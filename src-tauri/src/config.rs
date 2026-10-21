@@ -23,6 +23,18 @@ impl Default for ModelLevel {
     }
 }
 
+impl ModelLevel {
+    /// 从字符串解析档位，大小写不敏感。
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "tiny" => Some(ModelLevel::Tiny),
+            "small" => Some(ModelLevel::Small),
+            "medium" => Some(ModelLevel::Medium),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Device {
@@ -33,6 +45,17 @@ pub enum Device {
 impl Default for Device {
     fn default() -> Self {
         Device::Directml
+    }
+}
+
+impl Device {
+    /// 从字符串解析设备，大小写不敏感。
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "directml" | "gpu" => Some(Device::Directml),
+            "cpu" => Some(Device::Cpu),
+            _ => None,
+        }
     }
 }
 

@@ -1,0 +1,30 @@
+{
+  "$comment": "OCR Studio 模型清单。URL 来自 RapidOCR 官方仓库 python/rapidocr/default_models.yaml，SHA256 同源。",
+  "tag": "v3.10.0",
+  "base": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0",
+  "levels": {
+    "tiny": {
+      "det":  { "file": "det.onnx",  "path": "onnx/PP-OCRv6/det/PP-OCRv6_det_tiny.onnx",   "sha256": "f42c0fbd294d95eac1a550e131b277dac97462c8025fa4b6c3cec1b7894bd3d5" },
+      "rec":  { "file": "rec.onnx",  "path": "onnx/PP-OCRv6/rec/PP-OCRv6_rec_tiny.onnx",   "sha256": "e16e242de5937ad92609223f19bc2aff3727ee40b095f996907c24749bad251b" },
+      "cls":  { "file": "cls.onnx",  "path": "onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx", "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7" },
+      "keys": { "file": "keys.txt",  "path": "paddle/PP-OCRv6/rec/PP-OCRv6_rec_tiny/ppocrv6_tiny_dict.txt", "sha256": null }
+    },
+    "small": {
+      "det":  { "file": "det.onnx",  "path": "onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",  "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f" },
+      "rec":  { "file": "rec.onnx",  "path": "onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",  "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884" },
+      "cls":  { "file": "cls.onnx",  "path": "onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx", "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7" },
+      "keys": { "file": "keys.txt",  "path": "paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt", "sha256": null }
+    },
+    "medium": {
+      "det":  { "file": "det.onnx",  "path": "onnx/PP-OCRv6/det/PP-OCRv6_det_medium.onnx", "sha256": "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2" },
+      "rec":  { "file": "rec.onnx",  "path": "onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx", "sha256": "eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b" },
+      "cls":  { "file": "cls.onnx",  "path": "onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx", "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7" },
+      "keys": { "file": "keys.txt",  "path": "paddle/PP-OCRv6/rec/PP-OCRv6_rec_medium/ppocrv6_dict.txt", "sha256": null }
+    }
+  },
+  "notes": [
+    "PP-OCRv6 暂无 cls 模型，方向分类沿用 PP-OCRv5 LCNet（与上游 RapidOCR 一致）。",
+    "keys.txt 上游未提供 SHA256，故不校验。",
+    "三档全部为 PP-OCRv6，预处理参数同代一致，切档不引入参数分歧。"
+  ]
+}

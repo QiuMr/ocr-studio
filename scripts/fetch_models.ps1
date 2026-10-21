@@ -1,51 +1,84 @@
-# 下载 OCR 模型到 models/<level>/
+﻿# 下载 OCR 模型到 models/<level>/
 #
-# 说明：
-# - 每档模型需要 det.onnx / rec.onnx / (cls.onnx 可选) / keys.txt / meta.json
-# - 默认从 RapidOCR 官方发布的 PP-OCR ONNX 模型获取（PP-OCRv4/v5），
-#   PP-OCRv6 的 ONNX 导出待验证后可替换同名文件。
-# - 本脚本只负责下载与整理，不做模型转换。
+# 模型清单见同目录 models.manifest.json（URL + SHA256 均来自 RapidOCR 官方仓库）
+# 三档全部采用 PP-OCRv6；PP-OCRv6 暂无 cls 模型，方向分类沿用 PP-OCRv5 LCNet。
+#
+# 用法：
+#   .\fetch_models.ps1                 # 下载 small 档（默认）
+#   .\fetch_models.ps1 -Level all      # 下载 tiny/small/medium 全部
+#   .\fetch_models.ps1 -Level tiny
 
 param(
+    [string]$Level = 'small',
     [string]$Root = (Split-Path -Parent $PSScriptRoot)
 )
 
 $ErrorActionPreference = 'Stop'
 $modelsDir = Join-Path $Root 'models'
+$manifestPath = Join-Path $PSScriptRoot 'models.manifest.json'
 
-# RapidOCR 模型下载源（modelscope 镜像，稳定）
-# 目录结构参考 RapidOCR 仓库: det / rec / cls 模型 + 字典
-$sources = @{
-    'det' = 'https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_infer.onnx'
-    'rec' = 'https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_infer.onnx'
-    'cls' = 'https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_infer.onnx'
-    'keys' = 'https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/paddle/PP-OCRv4/rec/ppocr_keys_v1.txt'
+$manifest = Get-Content -Path $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$base = $manifest.base
+
+function Get-FileSha256([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLower() }
+        finally { $sha.Dispose() }
+    }
+    finally { $stream.Dispose() }
 }
 
-function Download-File($url, $dest) {
-    if (Test-Path $dest) { Write-Host "已存在: $dest"; return }
-    New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
-    Write-Host "下载: $url"
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+function Download-One([string]$Url, [string]$Dest, [string]$Sha256) {
+    if ((Test-Path $Dest) -and ((Get-Item $Dest).Length -gt 0)) {
+        Write-Host "已存在: $Dest"
+        return
+    }
+    $tmp = "$Dest.part"
+    if (Test-Path $tmp) { Remove-Item $tmp -Force }
+    Write-Host "下载: $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
+
+    if ($Sha256) {
+        $actual = Get-FileSha256 $tmp
+        if ($actual -ne $Sha256.ToLower()) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            throw "SHA256 校验失败: $Url`n期望 $Sha256`n实际 $actual"
+        }
+        Write-Host "  SHA256 OK"
+    }
+    Move-Item -Path $tmp -Destination $Dest -Force
 }
 
-# 先只装 small 档用于打通链路
-$level = 'small'
-$dir = Join-Path $modelsDir $level
-New-Item -ItemType Directory -Force $dir | Out-Null
+$levels = if ($Level -eq 'all') { @('tiny', 'small', 'medium') } else { @($Level) }
 
-Download-File $sources['det']  (Join-Path $dir 'det.onnx')
-Download-File $sources['rec']  (Join-Path $dir 'rec.onnx')
-Download-File $sources['cls']  (Join-Path $dir 'cls.onnx')
-Download-File $sources['keys'] (Join-Path $dir 'keys.txt')
+foreach ($lvl in $levels) {
+    $lvlNode = $manifest.levels.PSObject.Properties[$lvl]
+    if ($null -eq $lvlNode) { throw "未知档位: $lvl（可选 tiny/small/medium/all）" }
 
-# 生成 meta.json（PP-OCRv4 默认参数）
-$meta = @{
-    model_version = 'PP-OCRv4'
-    det = @{ input_size = 960; mean = @(0.485, 0.456, 0.406); std = @(0.229, 0.224, 0.225) }
-    rec = @{ img_h = 48; img_w = 320 }
-} | ConvertTo-Json -Depth 5
-Set-Content -Path (Join-Path $dir 'meta.json') -Value $meta -Encoding UTF8
+    $dir = Join-Path $modelsDir $lvl
+    New-Item -ItemType Directory -Force $dir | Out-Null
 
-Write-Host "完成。模型目录: $dir"
-Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize
+    # det / rec / cls / keys 四项
+    foreach ($prop in $lvlNode.Value.PSObject.Properties) {
+        $item = $prop.Value
+        $url = "$base/$($item.path)"
+        Download-One $url (Join-Path $dir $item.file) $item.sha256
+    }
+
+    # 生成 meta.json（PP-OCRv6 默认参数）
+    # 注意：input_size / rec_img_h / rec_img_w 以 ONNX 实际输入形状为准，见 inspect_models.py
+    $meta = [ordered]@{
+        model_version = 'PP-OCRv6'
+        det = [ordered]@{ input_size = 960; mean = @(0.485, 0.456, 0.406); std = @(0.229, 0.224, 0.225) }
+        rec = [ordered]@{ img_h = 48; img_w = 320 }
+    } | ConvertTo-Json -Depth 5
+    Set-Content -Path (Join-Path $dir 'meta.json') -Value $meta -Encoding UTF8
+
+    Write-Host ""
+    Write-Host "=== $lvl 档完成 ==="
+    Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize
+}
+
+Write-Host "模型下载完成。"

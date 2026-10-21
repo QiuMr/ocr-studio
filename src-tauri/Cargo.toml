@@ -26,13 +26,36 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 图像与张量
 image = "0.25"
-ndarray = "0.16"
+ndarray = "0.17"
 
 # 本地 HTTP 服务
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync"] }
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 
-# 注：ort(onnxruntime) / windows 依赖在后续里程碑单独加入并逐一验证编译
+# 接口入参解码
+base64 = "0.22"
+regex = "1"
+
+# 推理引擎：ort (onnxruntime 2.x)
+#
+# 为什么用 load-dynamic：
+#   本机只有 onnxruntime.dll（来自 onnxruntime-directml 1.24.3），没有 MSVC 导入库 .lib。
+#   ort-sys 默认走链接路线（要么构建期下载，要么找 onnxruntime.lib），都不适用。
+#   load-dynamic 让 ort-sys 构建脚本直接跳过链接，运行时用 libloading 加载 DLL，
+#   并通过 ORT_DYLIB_PATH 指定位置（未设置则按 DLL 搜索顺序找 onnxruntime.dll）。
+#
+# api-24：向 DLL 请求 ONNX Runtime API v24，与 1.24.3 对应。
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "ndarray",
+    "api-24",
+    "tracing",
+    "load-dynamic",
+    "directml",
+] }
+imageproc = "0.27.0"
+
+# 注：windows 依赖在截图/句柄里程碑（M2）加入并单独验证编译
 
 [profile.release]
 codegen-units = 1

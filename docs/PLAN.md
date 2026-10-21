@@ -21,7 +21,7 @@
 | 层 | 选型 | 说明 |
 |---|---|---|
 | 壳 | Tauri 2.x | 产物小、原生窗口、可打包 NSIS/MSI |
-| 前端 | Vue 3 + TypeScript + Vite + TailwindCSS + shadcn-vue | 好看、开发快；界面 = 控制面板 + 测试台 |
+| 前端 | **React + TypeScript + Vite + Tailwind CSS + shadcn/ui** | 2026-10-21 由 Vue 3 + shadcn-vue 改为本方案；界面 = 控制面板 + 测试台 |
 | 推理 | `ort` crate（onnxruntime 2.x，feature: `directml` + `ndarray`） | 加载 ONNX，GPU/CPU 可切换 |
 | 图像 | `image` + `ndarray` + 自研预处理/后处理 | 缩放、归一化、DB 后处理、CTC 解码 |
 | 截图/窗口 | `windows` crate（PrintWindow / BitBlt / EnumWindows / GetWindowRect） | 句柄找图、屏幕找图的基础 |
@@ -153,7 +153,23 @@ models/<level>/
 - **Playground**：拖入/粘贴图片 → 调 `/ocr/shibie`、`/ocr/zhaozi`、找图；左图右结果，框可叠加显示。
 - **Logs**：实时日志（tracing → 前端事件）。
 - **Settings**：端口、默认档位、是否开机自启、模板匹配阈值。
-- 视觉：浅色/深色，Tailwind + shadcn-vue，卡片式布局。
+
+### 7.1 视觉规范（2026-10-21 确定）
+
+| 项 | 规范 |
+|---|---|
+| 框架 | React + TypeScript（Vite，Tauri 2 壳不变） |
+| 样式 | Tailwind CSS |
+| 组件库 | shadcn/ui |
+| 字体 | **MiSans**（小米字体，`@font-face` 本地引入并设为全局默认；商用授权需确认后再随包分发） |
+| 配色 | **纯白为主，黑色为辅，蓝色点缀** |
+| 按钮 | **每个按钮都必须带图标**（图标库用 `lucide-react`，shadcn/ui 默认图标源） |
+| 标题栏 | **自定义标题栏：不要图标、不要标题**，仅窗口控制按钮 |
+
+自定义标题栏落地：`tauri.conf.json` 的 `app.windows[0]` 设 `"decorations": false`，
+前端用 `getCurrentWindow().minimize()/toggleMaximize()/close()` 自绘。
+
+> 原方案为 Vue 3 + shadcn-vue，`src/` 下现有 Vue 骨架需整体替换。
 
 ---
 

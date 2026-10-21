@@ -1,11 +1,9 @@
-mod api;
-mod config;
-mod ocr;
+use tauri::Manager;
 
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+pub mod api;
+pub mod commands;
+pub mod config;
+pub mod ocr;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,7 +13,23 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|app| {
+            let state = api::start_for_tauri(app.handle());
+            app.manage(state);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::ocr_recognize,
+            commands::get_health,
+            commands::get_config,
+            commands::save_config,
+            commands::set_level,
+            commands::set_device,
+            commands::server_status,
+            commands::server_start,
+            commands::server_stop,
+            commands::models_root,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
