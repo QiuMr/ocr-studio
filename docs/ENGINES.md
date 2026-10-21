@@ -159,8 +159,27 @@ M3.0 顺带完成的部分：`catalog::discover()` 9 个候选引擎（ppocr×3 
 现在只有一种引擎在跑，多建一层缓存只会多一处不一致。等 M3.1 真有两个引擎了再落，
 届时 `AppState.engine` 换成注册表，`ensure_engine` 的按参数重载逻辑一并搬过去。
 
-### YOLO 的已知坑（提前记）
+### M3.1 参考实现要点（ddddocr 1.6.1，已读源码，模型已确认可取）
 
+模型不用自己找：`pip download ddddocr --no-deps --no-binary :all:` 拿 sdist，
+包内直接带 `common.onnx`（rec，54MB）、`common_det.onnx`（det，20MB）、
+`common_old.onnx`（旧版 rec，13MB）与 `charsets.py`（字符集以 Python 列表字面量内嵌，
+不是 txt，需要生成一次）。**注意这会让分发包再大 70MB+，分发时要单独说明。**
+
+rec 预处理（`core/ocr_engine.py::_preprocess_image`，`use_import_onnx=False` 分支）：
+
+1. 高固定 **64**，宽 = `int(w * 64 / h)`——**保持宽高比、不 pad、不裁**；
+2. `PIL.Image.resize(..., LANCZOS)`。**这是与 PP-OCR 最大的差异点**：
+   我们用 cv2 双线性，它用 LANCZOS。文字相似度验收足够，但别指望逐位对齐；
+3. 转灰度 → `/255.0` → `[1, 1, 64, W]`（单通道，不是 3 通道）；
+4. CTC 解码与 PP-OCR 同构，但 **charset[0] 是空串当 blank**，
+   所以加载时**不能过滤空行**（我们的 `load_dict` 会过滤，ddddocr 要单独写一个保留下标 0 的加载器）。
+
+det 侧另有 `core/detection_engine.py` 的 DB 后处理，参数需单独核对（不能直接套 PP-OCR 的
+`DetConfig`）。字符集还带 `valid_indices` 范围限制机制，我们暂不需要，但读源码时要留意
+它会把不在范围内的 idx 整个丢掉（不是替换成别的字）。
+
+### YOLO 的已知坑（提前记）
 1. **输出布局**：v5 是 `[1, N, 5+C]`（xywh+obj+cls），v8/v11 是 `[1, 4+C, N]`（无 obj，
    需转置）。两者不能共用一套后处理，必须按 `EngineKind` 分开。
 2. **NMS**：ultralytics 默认 `conf=0.25, iou=0.7, class-agnostic=False`。要和它逐框对齐，
