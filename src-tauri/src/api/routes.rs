@@ -27,8 +27,9 @@ use super::dto::{
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
+use crate::engine::TextLine;
 use crate::matcher::{self, MatchOptions};
-use crate::ocr::TextBox;
+use crate::ocr::Device;
 
 /// 请求体上限 32MB：截图级 PNG  compressed 一般几百 KB，留足余量。
 const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -175,6 +176,7 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
         level: fields.get("level").cloned(),
         device: fields.get("device").cloned(),
         use_cls: fields.get("use_cls").and_then(|s| s.parse().ok()),
+        engine: fields.get("engine").cloned(),
         keyword: fields.get("keyword").cloned(),
     };
     Ok((img, opts))
@@ -182,7 +184,7 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
 
 // ---------------------------------------------------------------- 处理器
 
-fn to_dto(b: &TextBox) -> LineDto {
+fn to_dto(b: &TextLine) -> LineDto {
     LineDto {
         text: b.text.clone(),
         r#box: [
@@ -206,10 +208,7 @@ async fn shibie(State(state): State<Arc<AppState>>, req: Request) -> Response {
     };
     let (w, h) = (img.width(), img.height());
 
-    if let Err(e) = state.ensure_engine(&opts).await {
-        return e.into_response();
-    }
-    let boxes = match state.run_recognize(img).await {
+    let boxes = match state.recognize_lines(&opts, img).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -252,10 +251,7 @@ async fn zhaozi(State(state): State<Arc<AppState>>, req: Request) -> Response {
         Err(e) => return e.into_response(),
     };
 
-    if let Err(e) = state.ensure_engine(&opts).await {
-        return e.into_response();
-    }
-    let boxes = match state.run_recognize(img).await {
+    let boxes = match state.recognize_lines(&opts, img).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -284,10 +280,7 @@ async fn duohangjson(State(state): State<Arc<AppState>>, req: Request) -> Respon
     };
     let (w, h) = (img.width(), img.height());
 
-    if let Err(e) = state.ensure_engine(&opts).await {
-        return e.into_response();
-    }
-    let boxes = match state.run_recognize(img).await {
+    let boxes = match state.recognize_lines(&opts, img).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -302,6 +295,9 @@ async fn duohangjson(State(state): State<Arc<AppState>>, req: Request) -> Respon
 }
 
 /// GET /ocr/health —— 服务与引擎状态。
+///
+/// PP-OCR 还没加载、但用户正在用 ddddocr 时，不能报「引擎未加载」——
+/// 那会让用户以为整个服务挂了。这种情况下按额外引擎的实际状态回一份。
 async fn health(State(state): State<Arc<AppState>>) -> Response {
     let cfg = state
         .cfg
@@ -311,6 +307,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
     match state.health() {
         Some(info) => Json(ApiResp::ok(HealthDto {
             status: "ok".to_string(),
+            engine: crate::engine::EngineSpec::ppocr(info.level).key(),
             model: format!("{:?}", info.level).to_lowercase(),
             device: format!("{:?}", info.requested_device).to_lowercase(),
             actual_device: format!("{:?}", info.actual_device).to_lowercase(),
@@ -322,11 +319,31 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
             uptime_sec: state.started_at.elapsed().as_secs(),
         }))
         .into_response(),
-        None => Json(err_resp(
-            CODE_ENGINE_NOT_READY,
-            "引擎未加载：请检查 models 目录与 onnxruntime.dll",
-        ))
-        .into_response(),
+        None => {
+            if let Some((spec, dev)) = state.alt_loaded() {
+                let dev = dev.unwrap_or(Device::Cpu);
+                return Json(ApiResp::ok(HealthDto {
+                    status: "ok".to_string(),
+                    engine: spec.key(),
+                    model: spec.variant.clone().unwrap_or_default(),
+                    device: format!("{:?}", dev).to_lowercase(),
+                    actual_device: format!("{:?}", dev).to_lowercase(),
+                    det_loaded: true,
+                    rec_loaded: true,
+                    cls_loaded: false,
+                    // ddddocr 的字典长度没在这一层缓存，回 0 而不是瞎猜
+                    dict_size: 0,
+                    port: cfg.port,
+                    uptime_sec: state.started_at.elapsed().as_secs(),
+                }))
+                .into_response();
+            }
+            Json(err_resp(
+                CODE_ENGINE_NOT_READY,
+                "引擎未加载：请检查 models 目录与 onnxruntime.dll",
+            ))
+            .into_response()
+        }
     }
 }
 
@@ -355,6 +372,14 @@ async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
         for e in engines.iter_mut() {
             if e.spec.key() == key {
                 e.actual_device = Some(info.actual_device);
+            }
+        }
+    }
+    // 额外引擎（ddddocr 等）同理：已经加载过才填设备
+    if let Some((spec, device)) = state.alt_loaded() {
+        for e in engines.iter_mut() {
+            if e.spec == spec {
+                e.actual_device = device;
             }
         }
     }
@@ -723,10 +748,7 @@ async fn danzijson(State(state): State<Arc<AppState>>, req: Request) -> Response
     };
     let (w, h) = (img.width(), img.height());
 
-    if let Err(e) = state.ensure_engine(&opts).await {
-        return e.into_response();
-    }
-    let details = match state.run_recognize_detailed(img).await {
+    let details = match state.recognize_details(&opts, img).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };

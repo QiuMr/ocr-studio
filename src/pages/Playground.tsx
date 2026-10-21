@@ -22,6 +22,13 @@ import { Badge } from "../components/ui/badge";
 import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { PageHeader } from "../components/ui/page-header";
 import { EmptyState } from "../components/ui/empty-state";
@@ -29,9 +36,16 @@ import { Callout } from "../components/ui/callout";
 import { Hint } from "../components/ui/hint";
 import { ImageViewer } from "../components/ImageViewer";
 import { FindPanel } from "../components/FindPanel";
-import { fileToBase64, imageSize, recognize, recognizeChars } from "../lib/api";
+import { fileToBase64, imageSize, listEngines, recognize, recognizeChars } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
-import type { DanziResult, LineResult, RecognizeResult } from "../types";
+import type { DanziResult, EngineItem, LineResult, RecognizeResult } from "../types";
+
+/** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
+function engineLabel(e: EngineItem): string {
+  if (e.family === "ddddocr") return `DDDDOCR（${e.variant ?? "common"}·验证码快）`;
+  if (e.family === "yolo") return `YOLO ${e.variant ?? ""}（目标检测）`;
+  return e.name;
+}
 
 export function Playground() {
   // 识别页载入的图会传下来，切到找图页可以直接当搜索图
@@ -81,6 +95,9 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [showBoxes, setShowBoxes] = useState(true);
   const [useCls, setUseCls] = useState(true);
+  /** 空字符串 = 用当前 PP-OCR 配置（历史行为）；其它值为 `family:variant` */
+  const [engine, setEngine] = useState("");
+  const [engines, setEngines] = useState<EngineItem[]>([]);
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState("text");
   /** 逐字结果：按需加载，切到「逐字」tab 时才请求 */
@@ -135,6 +152,28 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
 
   const { dragging } = useImageDrop(onDrop);
 
+  /**
+   * 可选引擎列表。
+   *
+   * 只列**已经可用**的非 PP-OCR 引擎：PP-OCR 的档位由设置页管理，
+   * 在识别面板里再选一次会出现「两处都能改、以谁为准」的歧义。
+   * 加载失败（比如模型目录被搬走）时静默降级为只有默认项，不打断识别主流程。
+   */
+  useEffect(() => {
+    let alive = true;
+    void listEngines()
+      .then((l) => {
+        if (!alive) return;
+        setEngines(l.engines.filter((e) => e.available && e.family !== "ppocr"));
+      })
+      .catch(() => {
+        if (alive) setEngines([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Ctrl+V 粘贴
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -156,7 +195,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     setBusy(true);
     setError(null);
     try {
-      setResult(await recognize(b64Ref.current, useCls));
+      setResult(await recognize(b64Ref.current, useCls, engine));
       setDetail(null); // 档位/参数可能变了，旧的逐字结果作废
       setTab("text");
     } catch (e) {
@@ -172,7 +211,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     setCharBusy(true);
     setError(null);
     try {
-      setDetail(await recognizeChars(b64Ref.current, useCls));
+      setDetail(await recognizeChars(b64Ref.current, useCls, engine));
     } catch (e) {
       setError(`逐字定位失败: ${e}`);
     } finally {
@@ -228,6 +267,37 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
           <ScanText className="h-3.5 w-3.5" />
           {busy ? "识别中…" : "开始识别"}
         </Button>
+
+        {/* 引擎选择：只在确实有第二个可用引擎时出现，避免给小白多一个要理解的概念 */}
+        {engines.length > 0 && (
+          <div className="flex items-center gap-1">
+            <Select
+              value={engine || "default"}
+              onValueChange={(v) => {
+                setEngine(v === "default" ? "" : v);
+                // 换引擎后旧结果一定作废，别让用户拿 A 的框对着 B 的图
+                setResult(null);
+                setDetail(null);
+              }}
+            >
+              <SelectTrigger className="h-8 w-[190px] text-[12.5px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">PP-OCR（默认）</SelectItem>
+                {engines.map((e) => (
+                  <SelectItem key={e.name} value={e.name}>
+                    {engineLabel(e)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Hint>
+              不同引擎擅长的东西不一样：PP-OCR 适合成段文字（截图、扫描件），
+              DDDDOCR 训练在验证码上，短英文数字更快。切换后要重新点「开始识别」。
+            </Hint>
+          </div>
+        )}
 
         <div className="mx-1 h-5 w-px bg-neutral-200" />
 

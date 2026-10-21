@@ -75,14 +75,22 @@ export async function modelsRoot(): Promise<string> {
 }
 
 /** 识别一张图片。`image` 为 base64（不含 data URL 前缀也可）。 */
-export async function recognize(image: string, useCls: boolean): Promise<RecognizeResult> {
+export async function recognize(
+  image: string,
+  useCls: boolean,
+  engine?: string,
+): Promise<RecognizeResult> {
   if (isTauri()) {
-    return invoke<RecognizeResult>("ocr_recognize", { image, use_cls: useCls });
+    return invoke<RecognizeResult>("ocr_recognize", {
+      image,
+      use_cls: useCls,
+      engine: engine || null,
+    });
   }
   const res = await fetch(`${HTTP_BASE}/ocr/shibie`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image, use_cls: useCls }),
+    body: JSON.stringify({ image, use_cls: useCls, ...(engine ? { engine } : {}) }),
   });
   const json = await res.json();
   if (json.code !== 0) {
@@ -104,14 +112,22 @@ export async function recognize(image: string, useCls: boolean): Promise<Recogni
  * 字框是「CTC 帧区间按比例切分行宽 + 单应矩阵投回原图」算出来的，
  * 所以字间距不均时边界会有几像素误差。需要精确字框的场景应自行校验。
  */
-export async function recognizeChars(image: string, useCls: boolean): Promise<DanziResult> {
+export async function recognizeChars(
+  image: string,
+  useCls: boolean,
+  engine?: string,
+): Promise<DanziResult> {
   if (isTauri()) {
-    return invoke<DanziResult>("ocr_danzijson", { image, use_cls: useCls });
+    return invoke<DanziResult>("ocr_danzijson", {
+      image,
+      use_cls: useCls,
+      engine: engine || null,
+    });
   }
   const res = await fetch(`${HTTP_BASE}/ocr/danzijson`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image, use_cls: useCls }),
+    body: JSON.stringify({ image, use_cls: useCls, ...(engine ? { engine } : {}) }),
   });
   const json = await res.json();
   if (json.code !== 0) {

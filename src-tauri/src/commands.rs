@@ -48,6 +48,7 @@ pub async fn ocr_recognize(
     state: State<'_, Arc<AppState>>,
     image: String,
     use_cls: Option<bool>,
+    engine: Option<String>,
 ) -> Result<RecognizeOut, String> {
     let t0 = Instant::now();
     let bytes = decode_base64_image(&image)?;
@@ -59,14 +60,11 @@ pub async fn ocr_recognize(
         level: None,
         device: None,
         use_cls,
+        engine,
         keyword: None,
     };
-    state
-        .ensure_engine(&opts)
-        .await
-        .map_err(|e| e.message())?;
     let boxes = state
-        .run_recognize(img)
+        .recognize_lines(&opts, img)
         .await
         .map_err(|e| e.message())?;
 
@@ -147,6 +145,7 @@ pub async fn ocr_danzijson(
     state: State<'_, Arc<AppState>>,
     image: String,
     use_cls: Option<bool>,
+    engine: Option<String>,
 ) -> Result<DanziOut, String> {
     let t0 = Instant::now();
     let bytes = decode_base64_image(&image)?;
@@ -158,14 +157,11 @@ pub async fn ocr_danzijson(
         level: None,
         device: None,
         use_cls,
+        engine,
         keyword: None,
     };
-    state
-        .ensure_engine(&opts)
-        .await
-        .map_err(|e| e.message())?;
     let details = state
-        .run_recognize_detailed(img)
+        .recognize_details(&opts, img)
         .await
         .map_err(|e| e.message())?;
 
@@ -229,6 +225,7 @@ fn health_dto(state: &AppState) -> HealthDto {
     match state.health() {
         Some(info) => HealthDto {
             status: "ok".to_string(),
+            engine: crate::engine::EngineSpec::ppocr(info.level).key(),
             model: format!("{:?}", info.level).to_lowercase(),
             device: format!("{:?}", info.requested_device).to_lowercase(),
             actual_device: format!("{:?}", info.actual_device).to_lowercase(),
@@ -241,6 +238,7 @@ fn health_dto(state: &AppState) -> HealthDto {
         },
         None => HealthDto {
             status: "no_model".to_string(),
+            engine: crate::engine::EngineSpec::ppocr(cfg.level).key(),
             model: format!("{:?}", cfg.level).to_lowercase(),
             device: format!("{:?}", cfg.device).to_lowercase(),
             actual_device: "-".to_string(),

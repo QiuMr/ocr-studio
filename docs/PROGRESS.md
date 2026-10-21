@@ -1,28 +1,48 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-21（深夜第三轮：M3.0 多引擎抽象落地）
+> 最后更新：2026-10-22（M3.1 DDDDOCR 引擎落地）
 
 ---
 
 ## 0. 一句话现状
 
-**M2 全部收口 + M3.0 落地**：找图 7 端点、单字 JSON（`/ocr/danzijson`）、实时日志页、
-界面精修四件事已完成；本轮又切出多引擎抽象层，`OcrEngine` 成为 `VisionEngine` 的
-第一个实现，`/engine/list` 能回答「本机 9 个候选引擎里哪些真能用」。
-48 单测 + 17 重量级（含精度基线 / 真实截图 / 逐字对齐）全绿，**推理路径零改动**。
+**M3.1 完成**：DDDDOCR（common / old）作为第二种真实可跑的引擎接入完毕——
+`ddddocr` 单行分类器 + **共享 PP-OCR det** 做行检测，`/ocr/*` 与 Tauri 命令都能用
+`engine=ddddocr:common` 切换，前端测试台出现引擎下拉。
+55 单测 + 18 重量级（含精度基线 / 真实截图 / 逐字对齐 / **新增 ddddocr 跨语言对齐**）全绿，
+PP-OCR 精度**零变化**（`pipeline_match` 仍然逐字全对）。
+
+M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）与 M3.0 抽象层均已完成。
 
 **分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
 `tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
 `exe + runtime/*.dll + models/ + 使用说明.txt` 的压缩包。**单独拷 exe 是跑不起来的**
 （缺 onnxruntime.dll 会静默退回 CPU，缺 DirectML.dll 直接起不来），这一点已写进分发说明。
+加了 ddddocr common（54MB）后压缩包约 100MB 量级，分发说明里要写清「不要这 54MB
+可以删 `models/ocr/ddddocr/`，PP-OCR 仍然可用」。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
-M2（找图 + 单字 JSON + 日志页 + 界面精修）。
+M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）。
 
-下一步：M3.1（DDDDOCR 引擎 + 引擎注册表），设计见 `docs/ENGINES.md`。
+下一步：M3.2（YOLO 检测，`/vision/detect`），设计见 `docs/ENGINES.md`。
 
-### 0.0 本轮（M3.0 多引擎抽象）做了什么
+### 0.0 本轮（M3.1 DDDDOCR）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 模型与字典 | 新增 `scripts/fetch_ddddocr.ps1`：从 PyPI sdist 取 `common.onnx`/`common_old.onnx`，**同源生成 charset.txt**（8210 项，第 0 项是 blank 空串），已实测跑通 |
+| 引擎实现 | 新增 `src-tauri/src/engine/ddddocr.rs`：灰度 64 高 + LANCZOS + `/255`、单通道 `[1,1,64,W]`、logits 解码（blank 在字典 0 位）、逐字框复用 CTC 帧区间 |
+| 行检测复用 | 新增 `src-tauri/src/ocr/detector.rs::LineDetector`：只加载 det 不加载 rec，ddddocr 借它找行（它自带的 det 是 YOLOX 目标检测，切文档很差） |
+| ORT 公共层 | 抽出 `src-tauri/src/ocr/ort_util.rs`（环境单例 / 建会话 / 预热降级），PP-OCR 只是**原样搬家**，行为不变 |
+| 引擎工厂 | `engine::load_engine(spec, …)`：`ppocr:*` 走老路、`ddddocr:*` 走新引擎、`yolo:*` 明确报「未实现」而不是返回空壳 |
+| 接口 | `OcrOptions` 增 `engine` 字段（JSON 与 multipart 都认）；`/ocr/{shibie,zhaozi,duohangjson,danzijson}` 统一走 `recognize_lines`/`recognize_details`；`ocr_recognize`/`ocr_danzijson` 命令增 `engine` 参数 |
+| 状态 | `AppState` 增额外引擎单槽（`alt`），切换引擎丢弃上一个；`/ocr/health` 在 PP-OCR 未加载时会报额外引擎状态，不再误导成「引擎未加载」；`/engine/list` 回填额外引擎的真实设备 |
+| 能力声明修正 | ddddocr 由「无 CTC、字框只能等分估计」改成真实情况：**有 CTC 帧区间，逐字框是真映射**；可用性不再要求自带 det |
+| 前端 | 测试台新增引擎下拉（只列已可用的非 PP-OCR 引擎，带「验证码快」这类人话标签），换引擎即清空旧结果 |
+| 测试 | 新增 `tests/ddddocr_parity.rs`：7 张裁剪行图与官方 Python 实现**逐字完全一致**；整图 det+rec 链路跑通（找得到 `8848`/`13800`） |
+
+### 0.1 上上轮（M3.0 多引擎抽象）做了什么
 
 | 项 | 结果 |
 |---|---|
@@ -384,8 +404,8 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 | 11 | 截图区域框选 UI（鼠标拖出 region） | 已评估，本轮**不做**：当前「整屏 / 整窗口」两种粒度够用，框选属交互打磨 |
 | 12 | MiSans 商用授权口径确认 | 待用户确认（随包分发前） |
 | 13 | 免安装 exe 分发（**用户明确不要 MSI/NSIS**） | `bundle.active=false` + `scripts/pack_exe.ps1` 打 zip（exe + dll + models + 说明） |
-| 14 | 多引擎抽象（DDDDOCR / YOLO） | **M3.0 已完成**：`engine/{mod,catalog}.rs` 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` + 设置页引擎卡片；M3.1/3.2 待落 |
-| 15 | 引擎注册表（多引擎 LRU 单活） | 已评估，**M3.0 不做**：当前只有一种引擎在跑，多建一层缓存只会多一处不一致。等 M3.1 真有两个引擎时再落，`AppState.engine` 整块换掉 |
+| 14 | 多引擎抽象（DDDDOCR / YOLO） | **M3.0 + M3.1 已完成**：抽象层 + `OcrEngine`/`DdddOcrEngine` 两个实现 + `/engine/list` + `/ocr/*` 的 `engine` 字段 + 设置页引擎卡片 + 测试台引擎下拉 |
+| 15 | 引擎注册表（多引擎 LRU 单活） | **已用「PP-OCR + 额外引擎单槽」替代**：ddddocr common 就 54MB，同时开两个只浪费内存；单槽等价于 LRU 上限 1。要并行（YOLO+PP-OCR 做 pipeline）时再把 `alt` 换成 HashMap |
 
 ---
 
@@ -399,6 +419,16 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 4. **MSYS `timeout` 完全不可用**（`STATUS_DLL_INIT_FAILED`），要限时用程序自带参数或后台轮询。
 5. **非 ASCII 路径的验证一律用 PowerShell 建目录/传参**，否则会误判成程序 bug。
 6. **PowerShell 工具的工作目录与 `Set-Location` 对 .NET API 不一致**，.NET API 一律用绝对路径。
+7. **PowerShell 控制台默认按 GBK 显示，会把 UTF-8 的中文输出打成乱码**，看起来像数据损坏。
+   本轮就因为 `python ... | Out-String` 看到「婊︽幏鐚滄」而误判成 ddddocr 字符集坏了，
+   实际是显示问题。要打印中文先设：
+   ```powershell
+   $env:PYTHONIOENCODING="utf-8"; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+   ```
+   或者把结果写进文件再用 Read 工具看。
+8. **agent 的 bash 与 PowerShell 用的 python 不是同一个**：bash 是托管 3.13，PowerShell 是
+   系统 3.12。给 3.12 装的包在 bash 里 import 会报 `numpy._core._multiarray_umath` 缺失。
+   要跨工具跑 python，显式写解释器全路径。
 
 ---
 

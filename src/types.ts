@@ -58,6 +58,8 @@ export interface DanziResult {
 
 export interface Health {
   status: "ok" | "no_model";
+  /** 当前引擎标识，如 `ppocr:small` / `ddddocr:common` */
+  engine: string;
   model: ModelLevel;
   device: Device;
   actual_device: Device | "-";

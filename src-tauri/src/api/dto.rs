@@ -62,6 +62,12 @@ pub struct OcrOptions {
     /// 是否启用方向分类（缺省用当前配置）
     #[serde(default)]
     pub use_cls: Option<bool>,
+    /// 引擎：`ppocr:small` / `ddddocr:common` / `yolo:v8`。
+    ///
+    /// 缺省 = 用当前 PP-OCR 配置（行为与历史版本完全一致）。
+    /// 写 `ppocr:*` 也归到缺省路径，档位由 `level` 参数控制。
+    #[serde(default)]
+    pub engine: Option<String>,
     /// 找字关键词：普通子串，或 `/正则/` 形式
     #[serde(default)]
     pub keyword: Option<String>,
@@ -238,6 +244,8 @@ pub struct FindData {
 #[derive(Debug, Serialize)]
 pub struct HealthDto {
     pub status: String,
+    /// 引擎标识：`ppocr:small` / `ddddocr:common`。前端据此显示「正在用哪个引擎」。
+    pub engine: String,
     pub model: String,
     pub device: String,
     /// 实际生效设备（DirectML 不可用时会是 cpu）

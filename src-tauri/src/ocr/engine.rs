@@ -8,19 +8,18 @@
 //! - 模型目录布局见 `docs/PLAN.md` 5.3 节：`models/<level>/{det,rec,cls}.onnx + keys.txt`。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use image::DynamicImage;
 use ndarray::Array4;
 use ort::environment::Environment;
-use ort::ep::{CPU, DirectML};
 use ort::error::Result as OrtResult;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
 
 use super::det::{db_postprocess, DetBox, DetConfig};
 use super::geometry::{order_points, WarpMap, Pt};
+use super::ort_util;
 use super::preprocess::{det_preprocess, rec_preprocess, DetLimitType, CLS_IMG_H, CLS_IMG_W};
 use super::rec::ctc_decode_spans;
 
@@ -37,28 +36,6 @@ impl ModelLevel {
             ModelLevel::Medium => "medium",
         }
     }
-}
-
-/// ort 的 `Environment` 是**进程级单例**：`ort::init().build()` 调用第二次会直接报
-/// "only one environment is allowed per process"。
-///
-/// 这不是测试专属问题——运行时切换模型档位/设备就要重载引擎，同样会踩到。
-/// 因此这里缓存一份，整个进程复用。
-static ORT_ENV: OnceLock<Environment> = OnceLock::new();
-/// 串行化首次环境创建，避免两个线程同时 build 时其中一个白跑。
-static ORT_ENV_INIT: Mutex<()> = Mutex::new(());
-
-fn ort_env() -> OrtResult<&'static Environment> {
-    if let Some(env) = ORT_ENV.get() {
-        return Ok(env);
-    }
-    let _guard = ORT_ENV_INIT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(env) = ORT_ENV.get() {
-        return Ok(env);
-    }
-    let env = ort::init().with_name("ocr-studio").build()?;
-    let _ = ORT_ENV.set(env);
-    Ok(ORT_ENV.get().expect("ORT_ENV 刚被设置"))
 }
 
 /// 引擎加载配置。
@@ -182,7 +159,7 @@ impl OcrEngine {
 
         let chars = load_dict(&keys_path)?;
 
-        let env = ort_env()?;
+        let env = ort_util::ort_env()?;
 
         // 先尝试请求的设备；若预热推理失败则降级 CPU
         let (det, rec, actual_device) = match cfg.device {
@@ -221,9 +198,9 @@ impl OcrEngine {
             None
         };
 
-        let det_input = input_name(&det);
-        let rec_input = input_name(&rec);
-        let cls_input = cls.as_ref().map(input_name).unwrap_or_default();
+        let det_input = ort_util::input_name(&det);
+        let rec_input = ort_util::input_name(&rec);
+        let cls_input = cls.as_ref().map(ort_util::input_name).unwrap_or_default();
 
         Ok(Self {
             det,
@@ -507,17 +484,7 @@ fn build_session(
     path: &Path,
     device: Device,
 ) -> OrtResult<Session> {
-    let mut builder = Session::builder(env)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?;
-    builder = match device {
-        Device::Directml => builder.with_execution_providers([
-            DirectML::default().build(),
-            CPU::default().build(),
-        ])?,
-        Device::Cpu => builder
-            .with_execution_providers([CPU::default().build()])?,
-    };
-    builder.commit_from_file(path)
+    ort_util::build_session(env, path, device)
 }
 
 fn build_pair(
@@ -539,21 +506,14 @@ fn build_pair(
 fn warmup_directml(det: &mut Session, rec: &mut Session) -> OrtResult<()> {
     // det: [1,3,32,32]
     let det_t = Array4::<f32>::zeros((1, 3, 32, 32));
-    let name = input_name(det);
+    let name = ort_util::input_name(det);
     det.run(ort::inputs![name.as_str() => Tensor::from_array(det_t)?])?;
 
     // rec: [1,3,48,320]
     let rec_t = Array4::<f32>::zeros((1, 3, 48, 320));
-    let name = input_name(rec);
+    let name = ort_util::input_name(rec);
     rec.run(ort::inputs![name.as_str() => Tensor::from_array(rec_t)?])?;
     Ok(())
-}
-
-fn input_name(sess: &Session) -> String {
-    sess.inputs()
-        .first()
-        .map(|i| i.name().to_string())
-        .unwrap_or_else(|| "x".to_string())
 }
 
 /// cls 预处理：输入固定 [N,3,80,160]。

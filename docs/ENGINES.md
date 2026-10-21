@@ -1,10 +1,12 @@
 # 多引擎架构（DDDDOCR / YOLO 扩展）
 
-> 状态：**M3.0 已完成**——抽象层落在 `src-tauri/src/engine/{mod.rs,catalog.rs}`，
-> `OcrEngine` 已实现 `VisionEngine`，`/engine/list` 与 `list_engines` 命令已接通。
-> M3.1（DDDDOCR）与 M3.2（YOLO）待落，目录约定与能力声明已就位。
+> 状态：**M3.0 / M3.1 已完成**——
+> 抽象层 `src-tauri/src/engine/{mod.rs,catalog.rs,ddddocr.rs}`，
+> `OcrEngine` 与 `DdddOcrEngine` 都实现了 `VisionEngine`，`/engine/list`、
+> `list_engines`、以及 `/ocr/*` 的 `engine` 字段全部接通。
+> M3.2（YOLO 检测）待落，目录约定与能力声明已就位。
 > 目的：在不破坏现有 PP-OCR 精度基线的前提下，为后续接入 DDDDOCR 与各版本 YOLO 留好位置。
-> 时间：2026-10-21
+> 时间：2026-10-22
 
 ## 1. 为什么现在就要抽象
 
@@ -149,35 +151,67 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `cla
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | M3.0 ✅ | 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` | 8 个新用例全绿；48 通过 / 1 忽略；推理路径零改动 |
-| M3.1 | `ddddocr` 引擎（先 common 版）+ 引擎注册表（LRU 单活） | 同一张图上与 PP-OCR 的文本相似度 ≥ 0.95 才认为接入正确 |
+| M3.1 ✅ | `ddddocr` 引擎（common / old）+ 共享 PP-OCR det + `/ocr/*` 的 `engine` 字段 | 见 6.1 的实测验收（7 行逐字与官方 Python 完全一致） |
 | M3.2 | YOLO 通用检测（v8 优先，导出 ONNX opset 12+） | NMS 后处理与 ultralytics 对齐，IoU/置信度逐框比对 |
 | M3.3 | `/vision/pipeline` 串联 | 复杂版面（表格、多列）上比纯 PP-OCR 明显更准 |
 
 M3.0 顺带完成的部分：`catalog::discover()` 9 个候选引擎（ppocr×3 + ddddocr×2 + yolo×4）
 的可用性探测、能力声明、缺失文件提示；前端设置页「识别引擎」卡片。
 **注册表（`HashMap<key, Arc<Mutex<Box<dyn VisionEngine>>>>` + LRU）没有做**——
-现在只有一种引擎在跑，多建一层缓存只会多一处不一致。等 M3.1 真有两个引擎了再落，
-届时 `AppState.engine` 换成注册表，`ensure_engine` 的按参数重载逻辑一并搬过去。
+`AppState` 里改用「PP-OCR 一个 + 额外引擎单槽」：PP-OCR 的配置/重载语义已被现有测试依赖，
+不动它；额外引擎只可能同时开一个（ddddocr common 就 54MB），单槽等价于 LRU 上限 1。
+真需要多引擎并行（例如 YOLO + PP-OCR 同时用于 pipeline）时，再把 `alt` 换成 HashMap。
 
-### M3.1 参考实现要点（ddddocr 1.6.1，已读源码，模型已确认可取）
+### 6.1 M3.1 实现实录（ddddocr 1.6.1，全部实测，别再凭源码猜）
 
-模型不用自己找：`pip download ddddocr --no-deps --no-binary :all:` 拿 sdist，
-包内直接带 `common.onnx`（rec，54MB）、`common_det.onnx`（det，20MB）、
-`common_old.onnx`（旧版 rec，13MB）与 `charsets.py`（字符集以 Python 列表字面量内嵌，
-不是 txt，需要生成一次）。**注意这会让分发包再大 70MB+，分发时要单独说明。**
+**模型与字典**
 
-rec 预处理（`core/ocr_engine.py::_preprocess_image`，`use_import_onnx=False` 分支）：
+- `scripts/fetch_ddddocr.ps1` 从 PyPI sdist 取，**字典与模型同源同版本**：
+  - `common` ← `common.onnx` + **`CHARSET_BETA`**（54MB rec）
+  - `old` ← `common_old.onnx` + **`CHARSET_OLD`**（13.6MB rec）
+  - 两套字典都是 8210 项，`[0] == ""` 就是 blank。
+- **配对关系错一次就整行错位**：`common.onnx` 配 `CHARSET_OLD` 会把「测试样本」解成
+  「婊︽幏鐚滄」这类乱码，而且不报错。当时差点误判成「上游字符集损坏」，
+  真实原因是 **PowerShell 控制台按 GBK 显示 UTF-8 输出**造成的假象——
+  查这类问题必须先把 `[Console]::OutputEncoding` 设成 UTF-8（或把结果写进文件再读）。
+- 别忘了一条：ddddocr **默认走的其实是 `common_old`**（`load_ocr_model` 里
+  `old=False,beta=False` 两个分支都指向 common_old），只有 `beta=True` 才用 common.onnx。
 
-1. 高固定 **64**，宽 = `int(w * 64 / h)`——**保持宽高比、不 pad、不裁**；
-2. `PIL.Image.resize(..., LANCZOS)`。**这是与 PP-OCR 最大的差异点**：
-   我们用 cv2 双线性，它用 LANCZOS。文字相似度验收足够，但别指望逐位对齐；
-3. 转灰度 → `/255.0` → `[1, 1, 64, W]`（单通道，不是 3 通道）；
-4. CTC 解码与 PP-OCR 同构，但 **charset[0] 是空串当 blank**，
-   所以加载时**不能过滤空行**（我们的 `load_dict` 会过滤，ddddocr 要单独写一个保留下标 0 的加载器）。
+**预处理（`core/ocr_engine.py::_preprocess_image`）**
 
-det 侧另有 `core/detection_engine.py` 的 DB 后处理，参数需单独核对（不能直接套 PP-OCR 的
-`DetConfig`）。字符集还带 `valid_indices` 范围限制机制，我们暂不需要，但读源码时要留意
-它会把不在范围内的 idx 整个丢掉（不是替换成别的字）。
+1. 高固定 **64**，宽 = `int(w * 64 / h)`——截断，**不 pad、不裁、不保 32 对齐**；
+2. `PIL.Image.resize(..., LANCZOS)`，**先 resize 再转灰度**（顺序反了有 1~2 灰阶差）；
+3. 灰度用 **ITU-R 601-2**（0.299/0.587/0.114），不是 `image` crate 的 Rec.709；
+4. 只 `/255.0`，**不做 mean/std 归一化**；输入 `[1, 1, 64, W]` 单通道。
+
+**输出与解码**
+
+- 输出 `[T, 1, C]`，且是 **logits**（实测单帧和可到 -34，softmax 后才归 1）；
+- blank 就在 `charset[0]`，映射是 `chars[idx]`；**不能**把字典直接丢给
+  `ocr::rec::ctc_decode_spans`（那个按 PP-OCR 约定取 `chars[idx-1]`，会整体错位一位）；
+- 置信度只对「被采纳的帧」算 softmax：`p = 1 / Σexp(v - v_max)`，
+  T×8210 次 exp 换成几十帧×8210，快一个数量级，且数学上精确。
+
+**行检测**
+
+ddddocr 自带 `common_det.onnx` 是 **YOLOX 目标检测**（416×416、strides 8/16/32、
+`demo_postprocess`、class-agnostic NMS、BGR 0~255 不归一化），训练目标是验证码字符块，
+**不是 DB 文本行检测**。所以本引擎的行检测复用了 PP-OCR 的 `det.onnx`
+（新增 `ocr::detector::LineDetector`，只做 det 不加载 rec，避免为了一个 det 而
+背上整个 PP-OCR）。这一条同时解释了为什么 `/engine/list` 里 ddddocr 的可用性
+要求「PP-OCR det 存在」。
+
+**验收数据**（`cargo test --test ddddocr_parity -- --ignored`）
+
+| 项目 | 结果 |
+|---|---|
+| 7 张裁剪行图 vs 官方 Python 实现 | 文本**逐字完全一致**（含中文、英文、数字混排） |
+| 整图 det+rec 链路 | 7 行全部返回，框点落在图内，逐字框数 = 文本字数 |
+| 与 PP-OCR 的差异 | ddddocr 会丢空格与短横线（`SO-2026-1021-8848` → `SO202610218848`），中文偶有错字；PP-OCR 在同一张图上是逐字全对 |
+
+结论：**ddddocr 定位为「验证码 / 短英文数字」引擎，长文本仍然用 PP-OCR**。
+这不是工程问题，是训练分布决定的（它的字典与模型都是为短串设计的）。
+
 
 ### YOLO 的已知坑（提前记）
 1. **输出布局**：v5 是 `[1, N, 5+C]`（xywh+obj+cls），v8/v11 是 `[1, 4+C, N]`（无 obj，

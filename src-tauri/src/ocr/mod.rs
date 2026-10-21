@@ -8,12 +8,15 @@
 //! - `geometry`    最小外接矩形、unclip 偏移、多边形填充、透视变换
 
 pub mod det;
+pub mod detector;
 pub mod engine;
 pub mod geometry;
+pub mod ort_util;
 pub mod preprocess;
 pub mod rec;
 
 pub use det::{db_postprocess, DetBox, DetConfig};
+pub use detector::LineDetector;
 pub use engine::{
     engine_from_dir, engine_from_dir_with, ensure_ort_dylib_path, CharBox, EngineConfig,
     HealthInfo, LineDetail, OcrEngine, TextBox,

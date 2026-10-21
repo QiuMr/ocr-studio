@@ -13,8 +13,11 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
+use crate::engine::{
+    load_engine, EngineKind, EngineSpec, RecognizeOptions, TextLine, VisionEngine,
+};
 use crate::ocr::{
-    engine_from_dir_with, Device, HealthInfo, LineDetail, ModelLevel, OcrEngine, TextBox,
+    engine_from_dir_with, Device, HealthInfo, LineDetail, ModelLevel, OcrEngine,
 };
 
 use super::dto::{ApiError, OcrOptions};
@@ -86,6 +89,34 @@ fn parse_device(s: &str) -> Option<Device> {
     }
 }
 
+/// 额外引擎槽（PP-OCR 之外）。
+///
+/// 只留一个槽是刻意的：这些模型动辄几十 MB（ddddocr common 54MB），
+/// 同时驻留多个纯属浪费显存/内存。请求换引擎时先丢旧的再加载新的，
+/// 行为等价于「单槽 LRU」。PP-OCR 自己仍走 `engine` 字段，
+/// 因为它的配置（档位/设备/cls）与重载语义已经被现有代码和测试依赖。
+struct AltEngine {
+    spec: EngineSpec,
+    /// 实际请求的设备。请求里换了设备也要重载——否则 `device=cpu` 会静默无效。
+    device: Device,
+    engine: Box<dyn VisionEngine>,
+}
+
+/// 请求要用的引擎：`None` 表示沿用当前 PP-OCR 配置。
+///
+/// `engine=ppocr:tiny` 这类写法也归到 `None`——它由 `level` 参数和时间已久
+/// 的 `ensure_engine` 重载路径处理，没必要让同一个引擎走两条加载代码。
+fn alt_spec_of(opts: &OcrOptions) -> Result<Option<EngineSpec>, ApiError> {
+    let Some(raw) = opts.engine.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let spec = EngineSpec::parse(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if matches!(spec.kind, EngineKind::PpOcr) {
+        return Ok(None);
+    }
+    Ok(Some(spec))
+}
+
 /// HTTP 服务共享状态。
 pub struct AppState {
     pub models_root: PathBuf,
@@ -93,6 +124,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// 引擎实例。`None` 表示尚未成功加载（接口会返回 503）。
     pub engine: Mutex<Option<OcrEngine>>,
+    /// PP-OCR 之外的引擎（当前只会是 ddddocr），单槽。
+    alt: Mutex<Option<AltEngine>>,
     pub cfg: RwLock<AppConfig>,
     pub started_at: Instant,
     /// 停机信号发送端。`Some` 表示服务正在运行。
@@ -109,6 +142,7 @@ impl AppState {
             models_root,
             data_dir,
             engine: Mutex::new(None),
+            alt: Mutex::new(None),
             cfg: RwLock::new(cfg),
             started_at: Instant::now(),
             shutdown: Mutex::new(None),
@@ -181,40 +215,145 @@ impl AppState {
         Ok(())
     }
 
-    /// 在阻塞线程里执行识别，避免占住 tokio worker。
-    pub async fn run_recognize(
+    /// 确保请求指定的额外引擎就绪。换引擎/换设备时丢弃上一个（单槽）。
+    pub async fn ensure_alt_engine(
+        self: &Arc<Self>,
+        spec: EngineSpec,
+        device: Option<Device>,
+    ) -> Result<(), ApiError> {
+        let need_load = {
+            let guard = self.alt.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(a) => a.spec != spec || device.is_some_and(|d| d != a.device),
+                None => true,
+            }
+        };
+        if !need_load {
+            return Ok(());
+        }
+        let st = Arc::clone(self);
+        tokio::task::spawn_blocking(move || st.load_alt_blocking(spec, device))
+            .await
+            .map_err(|e| ApiError::Internal(format!("引擎加载任务崩溃: {e}")))?
+            .map_err(ApiError::EngineNotReady)
+    }
+
+    fn load_alt_blocking(
+        &self,
+        spec: EngineSpec,
+        device: Option<Device>,
+    ) -> Result<(), String> {
+        let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let device = device.unwrap_or(cfg.device);
+        let eng = load_engine(&spec, &self.models_root, cfg.level, device, true)
+            .map_err(|e| format!("加载 {spec} 失败: {e}"))?;
+        let mut guard = self.alt.lock().unwrap_or_else(|e| e.into_inner());
+        // 先赋新值再让旧的 drop：旧引擎的释放（几十 MB）在锁内完成，
+        // 但这是单槽设计下唯一安全的位置——放到锁外可能出现两个实例同时活着。
+        *guard = Some(AltEngine {
+            spec,
+            device,
+            engine: eng,
+        });
+        Ok(())
+    }
+
+    /// 在阻塞线程里跑 PP-OCR。走 trait 入口，与 `recognize_detailed` 等价。
+    async fn run_pp(
         self: &Arc<Self>,
         img: image::DynamicImage,
-    ) -> Result<Vec<TextBox>, ApiError> {
+        want_chars: bool,
+    ) -> Result<Vec<TextLine>, ApiError> {
         let st = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
             let eng = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
-            eng.recognize(&img)
+            eng.infer(&img, &RecognizeOptions { want_chars })
                 .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
         })
         .await
         .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
     }
 
-    /// 识别并返回逐字框（`/ocr/danzijson` 用）。
-    pub async fn run_recognize_detailed(
+    /// 在阻塞线程里跑额外引擎。
+    async fn run_alt(
         self: &Arc<Self>,
         img: image::DynamicImage,
-    ) -> Result<Vec<LineDetail>, ApiError> {
+        want_chars: bool,
+    ) -> Result<Vec<TextLine>, ApiError> {
         let st = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
-            let eng = guard
+            let mut guard = st.alt.lock().unwrap_or_else(|e| e.into_inner());
+            let alt = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
-            eng.recognize_detailed(&img)
+            alt.engine
+                .infer(&img, &RecognizeOptions { want_chars })
                 .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
         })
         .await
         .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
+    }
+
+    /// 统一识别入口：按 `opts.engine` 选引擎，返回文本行。
+    ///
+    /// 未指定 `engine`（或指定 `ppocr:*`）时走原来的 PP-OCR 路径，
+    /// 参数语义、重载规则、精度全部不变。
+    pub async fn recognize_lines(
+        self: &Arc<Self>,
+        opts: &OcrOptions,
+        img: image::DynamicImage,
+    ) -> Result<Vec<TextLine>, ApiError> {
+        match alt_spec_of(opts)? {
+            None => {
+                self.ensure_engine(opts).await?;
+                self.run_pp(img, false).await
+            }
+            Some(spec) => {
+                let dev = opts.device.as_deref().and_then(parse_device);
+                self.ensure_alt_engine(spec, dev).await?;
+                self.run_alt(img, false).await
+            }
+        }
+    }
+
+    /// 同上，但带逐字框（`/ocr/danzijson`、`ocr_danzijson` 用）。
+    pub async fn recognize_details(
+        self: &Arc<Self>,
+        opts: &OcrOptions,
+        img: image::DynamicImage,
+    ) -> Result<Vec<LineDetail>, ApiError> {
+        let lines = match alt_spec_of(opts)? {
+            None => {
+                self.ensure_engine(opts).await?;
+                self.run_pp(img, true).await?
+            }
+            Some(spec) => {
+                let dev = opts.device.as_deref().and_then(parse_device);
+                self.ensure_alt_engine(spec, dev).await?;
+                self.run_alt(img, true).await?
+            }
+        };
+        Ok(lines.into_iter().map(LineDetail::from).collect())
+    }
+
+    /// 当前额外引擎的标识与真实设备（`/engine/list` 回填用）。
+    pub fn alt_loaded(&self) -> Option<(EngineSpec, Option<Device>)> {
+        let guard = self.alt.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|a| (a.spec.clone(), a.engine.status().actual_device))
+    }
+
+    /// 按 spec 立即加载额外引擎（Tauri 命令用，不经过请求参数）。
+    pub async fn load_alt(
+        self: &Arc<Self>,
+        spec: EngineSpec,
+        device: Option<Device>,
+    ) -> Result<(), ApiError> {
+        self.ensure_alt_engine(spec, device).await
     }
 
     /// 读取引擎健康信息；未加载时返回 `None`。

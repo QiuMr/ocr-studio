@@ -18,13 +18,15 @@
 //!   （带能力声明与可用性），health 特指模型进程状态。
 
 pub mod catalog;
+pub mod ddddocr;
 
 use std::fmt;
+use std::path::Path;
 
 use image::DynamicImage;
 
 use crate::config::{Device, ModelLevel};
-use crate::ocr::{CharBox, LineDetail, OcrEngine, Pt};
+use crate::ocr::{CharBox, EngineConfig, LineDetail, OcrEngine, Pt};
 
 // ---------------------------------------------------------------------------
 // 引擎身份
@@ -246,6 +248,8 @@ pub struct TextLine {
     pub det_score: f64,
     /// 是否被方向分类判定为 180° 并已翻转
     pub rotated: bool,
+    /// rec 输出的总帧数。逐字框宽度 = 帧区间比例 × 行宽，留出来便于排查
+    pub frames: usize,
     /// 逐字框；`RecognizeOptions::want_chars = false` 时为空
     pub chars: Vec<CharBox>,
 }
@@ -258,6 +262,21 @@ impl From<LineDetail> for TextLine {
             score: l.score,
             det_score: l.det_score,
             rotated: l.rotated,
+            frames: l.frames,
+            chars: l.chars,
+        }
+    }
+}
+
+impl From<TextLine> for LineDetail {
+    fn from(l: TextLine) -> Self {
+        Self {
+            points: l.points,
+            text: l.text,
+            score: l.score,
+            det_score: l.det_score,
+            rotated: l.rotated,
+            frames: l.frames,
             chars: l.chars,
         }
     }
@@ -441,7 +460,58 @@ impl VisionEngine for OcrEngine {
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<OcrEngine>();
+    assert_send::<ddddocr::DdddOcrEngine>();
 };
+
+/// 按 [`EngineSpec`] 加载引擎。
+///
+/// - `ppocr:*` 走既有的 [`OcrEngine::load`]，**一个字节都没改**，精度基线不受影响；
+/// - `ddddocr:*` 走 [`ddddocr::DdddOcrEngine`]，行检测借 `default_level` 档的 PP-OCR det；
+/// - `yolo:*` 在 M3.2 之前直接报「未实现」，而不是返回一个能构造但跑不了的壳。
+///
+/// 返回 `Box<dyn VisionEngine>` 而不是枚举：新增引擎时只需加一个分支，
+/// 调用方（状态层 / 路由）不用改 match。
+pub fn load_engine(
+    spec: &EngineSpec,
+    models_root: &Path,
+    default_level: ModelLevel,
+    device: Device,
+    use_cls: bool,
+) -> Result<Box<dyn VisionEngine>, VisionError> {
+    match &spec.kind {
+        EngineKind::PpOcr => {
+            // 档位缺省取调用方给的默认档（而不是硬编码 small）
+            let level = spec
+                .variant
+                .as_deref()
+                .and_then(ModelLevel::from_str)
+                .unwrap_or(default_level);
+            let eng = OcrEngine::load(EngineConfig {
+                models_root: models_root.to_path_buf(),
+                level,
+                device,
+                use_cls,
+                ..Default::default()
+            })
+            .map_err(|e| VisionError::NotReady(format!("PP-OCR 模型加载失败: {e}")))?;
+            Ok(Box::new(eng))
+        }
+        EngineKind::DdddOcr => {
+            let variant = spec.variant.as_deref().unwrap_or("common");
+            Ok(Box::new(ddddocr::engine_from_root(
+                models_root,
+                variant,
+                default_level,
+                device,
+            )?))
+        }
+        // 不返回假的实现体：前端会通过 /engine/list 看到 available=false
+        EngineKind::Yolo(v) => Err(VisionError::NotReady(format!(
+            "{} 检测引擎尚未实现（见 docs/ENGINES.md 的 M3.2）",
+            v.as_str()
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -106,21 +106,39 @@ pub fn discover(root: &Path) -> Vec<EngineStatus> {
     }
 
     // ---- DDDDOCR：common / old 两版 ----
+    //
+    // 只要求 rec.onnx + 字典：ddddocr 的 common/old 是**单行分类器**，自带的行检测
+    // （common_det.onnx）是 YOLOX 目标检测，训的是验证码字符块，切文档截图很糟，
+    // 所以本引擎的行检测复用 PP-OCR 的 det。det 缺失时仍算「可用」，
+    // 但会真跑不起来——这一点由 note 和加载错误一起说清楚，见 ENGINE_MODELS_NOTE。
     for variant in ["common", "old"] {
         let dir = ddddocr_dir(root, variant);
-        let has_det = dir.join("det.onnx").exists();
         let has_rec = dir.join("rec.onnx").exists();
-        // 字典名各家打包不一致，三个常见名字都认
         let has_charset = ["charset.txt", "keys.txt", "dict.txt"]
             .iter()
             .any(|n| dir.join(n).exists());
-        let available = has_det && has_rec && has_charset;
+        let has_shared_det = ppocr_dir(root, ModelLevel::default())
+            .join("det.onnx")
+            .exists();
+        let available = has_rec && has_charset && has_shared_det;
+
+        let note = if available {
+            Some("单行识别引擎，行检测共用 PP-OCR det；中文/英文都支持，验证码更快".to_string())
+        } else if !has_rec {
+            Some(format!("{} 缺少 rec.onnx", dir.display()))
+        } else if !has_charset {
+            Some(format!("{} 缺少字典（charset.txt / keys.txt / dict.txt）", dir.display()))
+        } else {
+            Some(
+                "缺少 PP-OCR 的 det.onnx：ddddocr 只做单行识别，需要它来找文本行".to_string(),
+            )
+        };
 
         out.push(EngineStatus {
             spec: EngineSpec::ddddocr(variant),
             capabilities: Capabilities {
                 line_boxes: available,
-                // DDDDOCR 没有 CTC 帧信息，字框只能按字符数等分估计
+                // 与 PP-OCR 一样来自 CTC 帧区间，不是等分估计
                 char_boxes: available,
                 rotation_cls: false,
                 detect: false,
@@ -129,11 +147,7 @@ pub fn discover(root: &Path) -> Vec<EngineStatus> {
             },
             available,
             actual_device: None,
-            note: if available {
-                Some("字框为等分估计，非逐字检测".to_string())
-            } else {
-                Some(format!("{} 缺少 det.onnx / rec.onnx / 字典", dir.display()))
-            },
+            note,
         });
     }
 
