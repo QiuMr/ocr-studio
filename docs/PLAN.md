@@ -1,0 +1,190 @@
+# OCR Studio —— Rust + ort + Tauri 桌面 OCR 工具
+
+> 目标：开箱即用的桌面 OCR / 找字 / 找图 一体化工具，带完整本地 HTTP 接口，支持 Tiny/Small/Medium 三档模型切换，GPU 加速（DirectML），界面用 Web 前端，产物为原生 exe、无 Python 运行时。
+
+---
+
+## 1. 机器现状（已确认）
+
+| 项 | 值 |
+|---|---|
+| 系统 | Windows（待脚本确认具体版本，需 Win10 1903+ 才支持 DirectML） |
+| CPU 架构 | AMD64 |
+| 显卡 | AMD Radeon(TM) Graphics（集显，**无 NVIDIA**） |
+
+**关键结论**：GPU 加速走 **ONNX Runtime DirectML EP**（`onnxruntime.dll` + `DirectML.dll`），不能用 CUDA。DirectML 在 Win10 1903+ / Win11 上对 AMD 核显可用，性能不如独显 CUDA，但足够加速推理。CPU 版作为兜底。
+
+---
+
+## 2. 技术栈
+
+| 层 | 选型 | 说明 |
+|---|---|---|
+| 壳 | Tauri 2.x | 产物小、原生窗口、可打包 NSIS/MSI |
+| 前端 | Vue 3 + TypeScript + Vite + TailwindCSS + shadcn-vue | 好看、开发快；界面 = 控制面板 + 测试台 |
+| 推理 | `ort` crate（onnxruntime 2.x，feature: `directml` + `ndarray`） | 加载 ONNX，GPU/CPU 可切换 |
+| 图像 | `image` + `ndarray` + 自研预处理/后处理 | 缩放、归一化、DB 后处理、CTC 解码 |
+| 截图/窗口 | `windows` crate（PrintWindow / BitBlt / EnumWindows / GetWindowRect） | 句柄找图、屏幕找图的基础 |
+| HTTP | `axum` + `tokio` | 本地服务，接口 1:1 复刻 |
+| 配置/日志 | `serde` + `toml` + `tracing` + `tauri-plugin-log` | 配置文件与日志落盘 |
+| 打包 | `tauri build`（NSIS）+ 自定义脚本拷贝 ort DLL | 需处理 `onnxruntime.dll`/`DirectML.dll` 随包 |
+
+> 备选：模板匹配如需更强能力可引入 `opencv` crate，但编译链重；优先纯 Rust 自研 NCC 匹配（约 100 行，可控）。
+
+---
+
+## 3. 目录结构（规划）
+
+```
+D:/Python测试/OCR-Studio/
+├── docs/
+│   └── PLAN.md                # 本文档
+├── models/
+│   ├── tiny/                  # det.onnx / rec.onnx / cls.onnx / keys.txt
+│   ├── small/
+│   └── medium/
+├── src-tauri/                 # Rust 后端
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── lib.rs
+│   │   ├── config.rs          # 配置加载/保存
+│   │   ├── model_manager.rs   # 三档模型加载、懒加载缓存、切换
+│   │   ├── ocr/
+│   │   │   ├── mod.rs
+│   │   │   ├── engine.rs      # 会话构建（DirectML/CPU 探测）
+│   │   │   ├── det.rs         # DB 检测后处理
+│   │   │   ├── rec.rs         # CTC 解码
+│   │   │   ├── cls.rs         # 方向分类
+│   │   │   └── preprocess.rs  # resize/normalize/NCHW
+│   │   ├── matcher/
+│   │   │   └── template.rs    # NCC 模板匹配（精准/容错两种）
+│   │   ├── capture/
+│   │   │   ├── screen.rs      # BitBlt 全屏/区域截图
+│   │   │   └── window.rs      # EnumWindows / PrintWindow / GetWindowRect
+│   │   ├── api/
+│   │   │   ├── mod.rs
+│   │   │   ├── routes.rs      # 全部 /ocr/* 路由
+│   │   │   └── dto.rs         # 请求/响应结构
+│   │   └── commands.rs        # Tauri invoke 命令（UI 调 Rust）
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
+│   └── build.rs
+├── src/                       # 前端 Vue
+│   ├── main.ts
+│   ├── App.vue
+│   ├── views/
+│   │   ├── Dashboard.vue      # 模型选择 / GPU 状态 / 服务启停 / 端口
+│   │   ├── Playground.vue     # 拖图识别、找字、找图
+│   │   ├── Logs.vue
+│   │   └── Settings.vue
+│   ├── components/
+│   └── stores/
+├── scripts/
+│   ├── fetch_models.ps1       # 下载/放置模型
+│   └── copy_runtime.ps1       # 拷贝 ort + DirectML DLL
+├── package.json
+└── vite.config.ts
+```
+
+---
+
+## 4. 推理管线
+
+```
+输入图 → (cls 方向分类，可选) → det(DB) → 后处理得框 → 按框裁剪 → rec(CTC) → 文本+坐标
+```
+
+- **检测 det**：PP-OCR DB 模型，输出概率图，后处理需复刻 PaddleOCR 的 `DBPostProcess`：二值化阈值、box_thresh、unclip_ratio（膨胀）、最小面积过滤、按框还原到原图坐标、可选的 `use_dilation`。
+- **识别 rec**：PP-OCR CRNN/SVTR，输出 CTC logits → argmax → 去 blank/重复 → 按 `keys.txt` 映射字符，支持置信度。
+- **找字**：OCR 出全部文本+框，再按关键词/正则过滤，返回命中框坐标。
+- **找图**：模板匹配。精准 = 归一化互相关（TM_CCOEFF_NORMED）阈值 0.9~0.99；容错 = 多尺度缩放 + 灰度 + 阈值降低，返回最佳位置。
+- **句柄找图**：`EnumWindows` 找句柄 → `PrintWindow`/`BitBlt` 截窗口 → 模板匹配。
+- **屏幕找图**：`BitBlt` 截全屏/指定区域 → 模板匹配。
+
+**精度对齐策略**：所有前后处理以 **RapidOCR（Python 版）的实现**为基准写单测，用同一张图对比输出文本与框，误差超阈值即视为 bug。
+
+---
+
+## 5. 模型策略（重要，含风险）
+
+### 5.1 目标
+三档：Tiny / Small / Medium，随包分发，界面下拉切换；每档一套 `det/rec` ONNX。
+
+### 5.2 现实约束
+- PP-OCRv6 发布于 2026-06，**是否能用 `paddle2onnx` 导出 ONNX 需实测**（阻塞项 R1）。
+- 即使暂不能导出 v6，可用 **RapidOCR 已提供的 PP-OCRv4/v5 ONNX 模型**（det/rec/cls + keys）先跑通全链路。
+- **代码按“模型目录 + 配置”设计**，v6 ONNX 一旦可用，直接替换 `models/*/` 下的文件，代码零改动。
+
+### 5.3 目录约定（每档）
+```
+models/<level>/
+├── det.onnx
+├── rec.onnx
+├── cls.onnx        # 可选
+├── keys.txt        # 字典
+└── meta.json       # {input_size, mean, std, rec_img_h, rec_img_w, ...}
+```
+
+---
+
+## 6. HTTP 接口（1:1 复刻原产品）
+
+| 方法 | 路径 | 入参 | 出参 |
+|---|---|---|---|
+| POST | `/ocr/shibie` | image(base64/文件) | text, boxes, scores |
+| POST | `/ocr/zhaozi` | image + 关键词/正则 | 命中框列表 |
+| POST | `/ocr/duohangjson` | image | 多行 [{text, box, score}] |
+| POST | `/ocr/danzijson` | image | 单字 [{char, box, score}] |
+| POST | `/ocr/tuzhaotu1` | screen + template | {found, x, y, score} 精准 |
+| POST | `/ocr/tuzhaotu2` | screen + template | 同上 容错 |
+| POST | `/ocr/jubingzhaotu1` | hwnd + template | 同上 精准 |
+| POST | `/ocr/jubingzhaotu2` | hwnd + template | 同上 容错 |
+| POST | `/ocr/pingmuzhaotu1` | template(+region) | 同上 精准 |
+| POST | `/ocr/pingmuzhaotu2` | template(+region) | 同上 容错 |
+| GET | `/ocr/health` | — | {status, model, device} |
+
+约定：图像支持 `multipart/form-data` 或 `application/json` 的 base64（二选一实现，默认 base64 兼容脚本党习惯）。
+
+---
+
+## 7. UI 设计
+
+- **Dashboard**：模型档位下拉（Tiny/Small/Medium）、设备（DirectML/CPU）+ 当前实际设备、模型加载状态、服务端口、启动/停止、健康检查按钮。
+- **Playground**：拖入/粘贴图片 → 调 `/ocr/shibie`、`/ocr/zhaozi`、找图；左图右结果，框可叠加显示。
+- **Logs**：实时日志（tracing → 前端事件）。
+- **Settings**：端口、默认档位、是否开机自启、模板匹配阈值。
+- 视觉：浅色/深色，Tailwind + shadcn-vue，卡片式布局。
+
+---
+
+## 8. 里程碑
+
+| 阶段 | 内容 | 预计 |
+|---|---|---|
+| M0 | 环境确认、Tauri 骨架跑起来、模型文件就位 | 0.5–1 天 |
+| M1 | 推理引擎（ort 加载 det/rec）+ DB/CTC 后处理 + `/ocr/shibie`（CPU）跑通 | 2–3 天 |
+| M2 | 找字/多行/单字 + 模板匹配 + 截图 + 句柄接口 | 2–3 天 |
+| M3 | DirectML GPU 探测与降级、三档模型切换、全部接口联调 | 1–2 天 |
+| M4 | UI 打磨、日志、配置、NSIS 打包 + DLL 随包 | 2–3 天 |
+
+---
+
+## 9. 风险与对策
+
+| 编号 | 风险 | 对策 |
+|---|---|---|
+| R1 | PP-OCRv6 无法用 paddle2onnx 导出 ONNX | 先用 RapidOCR v4/v5 ONNX 跑通；持续跟踪 v6 导出，接口/目录不变 |
+| R2 | ort DirectML 在 AMD 核显上的兼容/性能 | M1 先 CPU 跑通，M3 实测 DirectML；失败自动降级 CPU 并提示 |
+| R3 | 前后处理与 Paddle 精度不一致 | 以 RapidOCR Python 实现为基准，固定测试图对比 |
+| R4 | PrintWindow 对部分独占全屏/DirectX 程序截黑 | 文档说明限制；提供 BitBlt 全屏兜底 |
+| R5 | 打包遗漏 onnxruntime.dll / DirectML.dll | 构建脚本统一拷贝 + 安装目录校验 + 启动自检报错 |
+| R6 | 模板匹配性能（大图×多尺度） | 先降采样粗匹配再原图精修；限制最大尺寸 |
+
+---
+
+## 10. 下一步（本轮之后）
+
+1. 确认 Windows 版本与 Rust/Node 工具链（脚本已查）。
+2. 初始化 Tauri 2 + Vue 3 + TS 骨架（`npm create tauri-app` 或手动）。
+3. 放置第一套模型（先 RapidOCR v5 ONNX）到 `models/small/`。
+4. 写 `ocr/engine.rs` 最小加载 + 用一张测试图验证 det/rec 输出。

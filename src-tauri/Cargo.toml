@@ -1,0 +1,42 @@
+[package]
+name = "ocr-studio"
+version = "0.1.0"
+description = "OCR Studio - 开箱即用 OCR / 找字 / 找图 桌面工具"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "ocr_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 基础工具
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 图像与张量
+image = "0.25"
+ndarray = "0.16"
+
+# 本地 HTTP 服务
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync"] }
+
+# 注：ort(onnxruntime) / windows 依赖在后续里程碑单独加入并逐一验证编译
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

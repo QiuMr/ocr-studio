@@ -1,0 +1,35 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust
+target
+# 项目内私有 Rust 工具链（体积大且与机器绑定）
+.rust/
+# Cargo 锁文件保留，以便复现构建
+
+# ONNX 模型与运行期 DLL（体积大，走下载脚本）
+models/**/*.onnx
+models/**/*.txt
+*.dll
