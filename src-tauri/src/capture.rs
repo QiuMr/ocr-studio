@@ -163,15 +163,20 @@ fn dib_from_mem_dc(
     if got == 0 {
         return Err("GetDIBits 失败".to_string());
     }
-    let mut out = RgbImage::new(w as u32, h as u32);
-    for y in 0..h as u32 {
-        for x in 0..w as u32 {
-            let i = ((y * w as u32 + x) * 4) as usize;
-            // 32bpp DIB 是 BGRA
-            out.put_pixel(x, y, image::Rgb([buf[i + 2], buf[i + 1], buf[i]]));
-        }
+    // 一次性构造 RGB 缓冲：1920×1080 就是 200 万像素，用 put_pixel 逐点写
+    // 在 debug 构建下光这一步就要 200ms+（实测整条找图链路 427ms 的大头在这）。
+    let n = (w as usize) * (h as usize);
+    let mut out = vec![0u8; n * 3];
+    for i in 0..n {
+        let s = i * 4;
+        let d = i * 3;
+        // 32bpp DIB 是 BGRA
+        out[d] = buf[s + 2];
+        out[d + 1] = buf[s + 1];
+        out[d + 2] = buf[s];
     }
-    Ok(out)
+    RgbImage::from_raw(w as u32, h as u32, out)
+        .ok_or_else(|| "构造 RGB 图像失败（尺寸与缓冲不匹配）".to_string())
 }
 
 /// 截取虚拟屏幕的指定区域。`None` 表示整个虚拟屏幕。

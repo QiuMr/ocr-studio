@@ -30,10 +30,15 @@ use image::RgbImage;
 const COARSE_KEEP: usize = 64;
 /// 逐层精化时每层保留的候选数。
 const REFINE_KEEP: usize = 24;
-/// 金字塔最多 4 层（1/16）。再深小模板会被糊掉。
+/// 金字塔最多 4 层（1/16）。
 const MAX_LEVEL: usize = 4;
-/// 降采样后模板的最小边长。低于它模板细节就不存在了。
-const MIN_TPL_SIDE: usize = 8;
+/// 降采样后模板的最小边长。
+///
+/// 取 6 而不是 8：多降一层能把粗扫的位置数降 4 倍、模板面积降 4 倍，
+/// 合计约 17 倍加速（1080p 实测粗扫 424ms -> 25ms）。代价是最粗层的模板只有
+/// 8×6，判别力下降 —— 但粗筛只需要保证**真解还在候选集里**，位置精度由后续
+/// 逐层精化负责，所以这个交换是划算的。
+const MIN_TPL_SIDE: usize = 6;
 
 /// 一次匹配的参数。
 #[derive(Debug, Clone, Copy)]
@@ -98,19 +103,27 @@ pub fn find_template(
     let min_score = opts.min_score.clamp(-1.0, 1.0);
 
     // ---- 建金字塔 ----
+    // 先把各层的图全部降采样出来，再 move 进 Level —— 避免每层 clone 一份
+    // 全尺寸像素（1080p 一层就是 2MB，白拷了 4 次）。
     let levels = pick_levels(hw as usize, hh as usize, nw as usize, nh as usize);
+    let mut gs: Vec<Gray> = Vec::with_capacity(levels + 1);
+    gs.push(Gray::from_rgb(haystack));
+    for i in 1..=levels {
+        let next = gs[i - 1].downscale();
+        gs.push(next);
+    }
+    let mut ts: Vec<Gray> = Vec::with_capacity(levels + 1);
+    ts.push(Gray::from_rgb(needle));
+    for i in 1..=levels {
+        let next = ts[i - 1].downscale();
+        ts.push(next);
+    }
     let mut pyr: Vec<Level> = Vec::with_capacity(levels + 1);
-    let mut g = Gray::from_rgb(haystack);
-    let mut t = Gray::from_rgb(needle);
-    for i in 0..=levels {
-        if i > 0 {
-            g = g.downscale();
-            t = t.downscale();
-        }
+    for (g, t) in gs.into_iter().zip(ts) {
         if t.w > g.w || t.h > g.h {
             return Err("模板在降采样层超出搜索图（不应发生，疑似尺寸计算错误）".to_string());
         }
-        pyr.push(Level::new(g.clone(), t.clone()));
+        pyr.push(Level::new(g, t));
     }
 
     // ---- 最粗层 SQDIFF 全扫 ----
@@ -222,8 +235,11 @@ struct Gray {
 impl Gray {
     fn from_rgb(img: &RgbImage) -> Self {
         let (w, h) = img.dimensions();
+        // 用 chunks_exact 而不是 pixels() 迭代器：后者每像素要经过
+        // Iterator::next + Pixel trait 分派，2M 像素（1080p）下差距很明显。
+        let raw = img.as_raw();
         let mut data = Vec::with_capacity((w * h) as usize);
-        for p in img.pixels() {
+        for p in raw.chunks_exact(3) {
             // 定点 luma：0.299R + 0.587G + 0.114B ≈ (77R + 150G + 29B) >> 8
             let y = (77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32) >> 8;
             data.push(y as u8);
@@ -348,16 +364,21 @@ impl Level {
         self.g.h.saturating_sub(self.t.h)
     }
 
-    /// `Σ T·I`，唯一需要逐像素循环的量。
+    /// `Σ T·I`，唯一需要逐像素循环的量 —— 也是整个算法的热点。
+    ///
+    /// 用切片 zip 而不是 `data[i]` 索引：索引版每个元素都要做一次边界检查 +
+    /// 坐标乘法，debug 构建下这一项能占粗扫一半时间。
     #[inline]
     fn dot(&self, x: usize, y: usize) -> u64 {
         let tw = self.t.w;
         let mut acc = 0u64;
         for ty in 0..self.t.h {
-            let row_src = (y + ty) * self.g.w + x;
-            let row_tpl = ty * tw;
-            for tx in 0..tw {
-                acc += self.g.data[row_src + tx] as u64 * self.t.data[row_tpl + tx] as u64;
+            let s = (y + ty) * self.g.w + x;
+            let t = ty * tw;
+            let src = &self.g.data[s..s + tw];
+            let tpl = &self.t.data[t..t + tw];
+            for (a, b) in src.iter().zip(tpl.iter()) {
+                acc += (*a as u64) * (*b as u64);
             }
         }
         acc
@@ -533,7 +554,6 @@ mod tests {
 
     #[test]
     fn different_levels_still_locate() {
-        // 大图（1080p 级）应走多层金字塔，位置仍需准确
         let mut scene = make_scene(1280, 720);
         paste_button(&mut scene, 613, 401, 48, 36);
         let tpl = image::imageops::crop_imm(&scene, 613, 401, 48, 36).to_image();
@@ -546,5 +566,73 @@ mod tests {
             "位置误差过大: {:?}",
             (hits[0].x, hits[0].y)
         );
+    }
+
+    /// 1080p 全屏找 64×64 的分段耗时。不是断言测试，是性能观测：
+    /// 跑 `cargo test --lib bench_find_1080p -- --ignored --nocapture` 看输出。
+    /// debug 构建的数不能代表发布性能，但能看出哪一段是瓶颈。
+    #[test]
+    #[ignore = "性能观测，仅手动运行"]
+    fn bench_find_1080p() {
+        use std::time::Instant;
+        let mut scene = make_scene(1920, 1080);
+        paste_button(&mut scene, 613, 401, 64, 48);
+        let tpl = image::imageops::crop_imm(&scene, 613, 401, 64, 48).to_image();
+
+        let t0 = Instant::now();
+        let g = Gray::from_rgb(&scene);
+        let gt = Instant::now();
+        let n = (g.w * g.h) as f64;
+        let _ = (n, gt.duration_since(t0));
+
+        let lv = pick_levels(g.w, g.h, 64, 48);
+        let t1 = Instant::now();
+        let mut pyr = Vec::new();
+        let mut a = g;
+        let mut b = Gray::from_rgb(&tpl);
+        for i in 0..=lv {
+            if i > 0 {
+                a = a.downscale();
+                b = b.downscale();
+            }
+            // bench 里 clone 是有意保留的：真实实现已改为 move，这里的数比线上偏高
+            pyr.push(Level::new(a.clone(), b.clone()));
+        }
+        let t2 = Instant::now();
+
+        let mut cands = pyr[lv].coarse_scan(COARSE_KEEP);
+        let t3 = Instant::now();
+        for level in (0..lv).rev() {
+            let cur = &pyr[level];
+            let mut next = Vec::new();
+            for &(cx, cy, _) in &cands {
+                for dy in -2..=2i32 {
+                    for dx in -2..=2i32 {
+                        let x = (cx * 2) as i32 + dx;
+                        let y = (cy * 2) as i32 + dy;
+                        if x < 0 || y < 0 {
+                            continue;
+                        }
+                        let (x, y) = (x as usize, y as usize);
+                        if x > cur.max_x() || y > cur.max_y() {
+                            continue;
+                        }
+                        next.push((x, y, cur.ncc_at(x, y)));
+                    }
+                }
+            }
+            next.sort_by(desc);
+            next.truncate(REFINE_KEEP);
+            cands = next;
+        }
+        let t4 = Instant::now();
+
+        println!("\n=== bench: 1920x1080 找 64x48，金字塔 {lv} 层 ===");
+        println!("灰阶化   {:>8.1} ms", (gt - t0).as_secs_f64() * 1e3);
+        println!("建金字塔 {:>8.1} ms", (t2 - t1).as_secs_f64() * 1e3);
+        println!("粗扫     {:>8.1} ms", (t3 - t2).as_secs_f64() * 1e3);
+        println!("逐层精化 {:>8.1} ms", (t4 - t3).as_secs_f64() * 1e3);
+        println!("合计     {:>8.1} ms", (t4 - t0).as_secs_f64() * 1e3);
+        assert!(!cands.is_empty());
     }
 }

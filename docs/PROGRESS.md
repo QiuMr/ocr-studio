@@ -36,6 +36,15 @@ pnpm tauri build --debug         # 全链路打包（exe + MSI + NSIS）
 | `tensor_diff::rec_probe_matches_python_on_same_tensor` | 通过（同一张量下 Rust/Python 逐帧 argmax 一致） |
 | `api_smoke`（13 个） | **13 / 13 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、400 错误路径 |
 | `capture_live`（5 个，`--ignored`） | **5 / 5 通过**：全屏尺寸→自匹配**位置零误差、score=1.0**、区域截图坐标本地化、窗口枚举、窗口截图 136 万非黑像素 |
+| `scripts/e2e_find.py`（服务进程级） | **全部通过**：真实桌面自截模板 → `/ocr/pingmuzhaotu1` 命中**坐标零误差、score=1.0000**；容错端点一致；`tuzhaotu` 图内坐标与 `origin=(0,0)` 正确；缺模板返回 400 |
+| `matcher::bench_find_1080p`（`--ignored`） | 性能观测：灰阶 76ms / 建金字塔 129ms / **粗扫 38.5ms** / 精化 23ms（debug 构建） |
+
+**release 构建已实测**（2026-10-21）：
+```
+D:\rust-target\release\ocr-studio.exe    8.1 MB，启动 3s 内 /ocr/health 返回 ok
+/ocr/health                              actual_device=directml, dict_size=18708
+找图（1080p 全屏 + 64px 模板）            59~62 ms（截图 ~30ms + 匹配 ~30ms）
+```
 
 打包产物实测（2026-10-21）：
 ```
@@ -114,6 +123,25 @@ bundle/nsis/OCR Studio_0.1.0_x64-setup.exe         19.80 MiB
 - 所有分数语义统一为**零均值 NCC**（`-1..=1`），对亮度/对比度线性变换免疫。
 - 模板方差为 0（纯色块）时 NCC 无定义 → 返回 0 分**拒绝命中**，宁可漏不可假阳。
 - NMS 用中心距离（阈值 `max(4, min(w,h)/2)`）合并重复命中。
+- 性能实测（1920×1080 全屏找 64×64 模板，`scripts/e2e_find.py`）：
+  | 构建 | 截屏+找图 | 传图找图（含 PNG 解码） | 截图链路 |
+  |---|---|---|---|
+  | debug | ~380 ms | ~450 ms | ~0 ms |
+  | **release** | **59~62 ms** | **~31 ms** | **28~31 ms** |
+
+  粗扫原先是热点（debug 424ms），三处优化后降到 38.5ms（约 11 倍）：
+  1. `dot()` 内层从 `data[i]` 索引改成切片 `zip`（去掉逐元素边界检查与坐标乘法）；
+  2. `Gray::from_rgb` 从 `pixels()` 迭代器改成 `raw.chunks_exact(3)`；
+  3. 最粗层最小模板边长从 8 降到 6，让 64px 模板能多降一层
+     （位置数 ÷4、模板面积 ÷4，合计约 17 倍）。
+     代价是最粗层模板只有 8×6，判别力下降 —— 但粗筛只需保证真解仍在候选集，
+     位置精度由后续精化负责，这个交换是划算的（7 个单测复跑全绿）。
+- 建金字塔不再每层 `clone` 全尺寸像素，改为先降采样再 move。
+- **⚠ 手动跑 `cargo build` 的 exe 必须把 `src-tauri/runtime/*.dll` 拷到 exe 旁边**，
+  否则 `DmlExecutionProvider` 注册失败（报 "DirectML is not supported in this
+  build of ONNX Runtime"）并静默退回 CPU。根因是 DirectML.dll 不在 exe 的 DLL
+  搜索路径里（onnxruntime.dll 是绝对路径加载的，但它自己的依赖仍按标准顺序找）。
+  打包产物（MSI/NSIS）由 `bundle.resources` 自动放到位，不受影响。
 
 ### Tauri 命令层（`src-tauri/src/commands.rs`）
 `ocr_recognize` / `get_health` / `get_config` / `save_config`（热生效，端口变更自动重启服务）/
@@ -321,6 +349,7 @@ scripts/dump_det_boxes.py         # dump det 全精度框与 unclip 中间量
 scripts/probe_*.py                # 行为探针（OpenCV 定点 / pyclipper 语义 / EP 差异 / LSB 敏感性）
 scripts/gen_resize_fixture.py     # 生成 resize 的 cv2 对齐 fixture 测试
 scripts/fetch_misans_font.py      # 下载 MiSans 切片并生成本地 @font-face CSS
+scripts/e2e_find.py               # 找图端到端验证（真实屏幕 -> HTTP 服务 -> 坐标比对）
 scripts/models.manifest.json      # 三档模型 URL + SHA256
 scripts/fetch_models.ps1          # 下载校验模型
 scripts/copy_runtime.ps1          # 拷贝 ort DLL 到 src-tauri/runtime/
