@@ -142,6 +142,43 @@ export interface WindowInfo {
   height: number;
 }
 
+// ---------------------------------------------------------------- 引擎
+
+/**
+ * 引擎能力声明。前端据此决定显示哪些入口——
+ * **不支持的能力直接隐藏**，不要显示灰色禁用按钮（小白看到灰按钮只会困惑）。
+ */
+export interface EngineCapabilities {
+  line_boxes: boolean;
+  char_boxes: boolean;
+  rotation_cls: boolean;
+  detect: boolean;
+  /** 检测类别名。空 = 不做检测，或没给 labels.txt */
+  classes: string[];
+  batch: boolean;
+}
+
+/** 与 Rust 侧 `EngineItemDto` 一一对应 */
+export interface EngineItem {
+  /** 规范化名字，如 `ppocr:small`、`yolo:v8` */
+  name: string;
+  family: "ppocr" | "ddddocr" | "yolo" | string;
+  variant?: string | null;
+  capabilities: EngineCapabilities;
+  /** 模型文件齐全、可以加载。不代表已在内存里 */
+  available: boolean;
+  /** 只有当前已加载的那个引擎才有值 */
+  actual_device?: string | null;
+  /** 不可用的原因，或可用时的补充说明 */
+  note?: string | null;
+}
+
+export interface EngineList {
+  models_root: string;
+  default_engine: string;
+  engines: EngineItem[];
+}
+
 // ---------------------------------------------------------------- 日志
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";

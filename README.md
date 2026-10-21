@@ -71,14 +71,15 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/tuzhaotu1\|2` | 在**上传的图**里找图（1=精准 ≥0.92，2=容错 ≥0.72） |
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
+| `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
 
 请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`）。
 
 ## 验证
 
 ```powershell
-cargo test                    # 40 个单元测试
-cargo test -- --ignored       # 16 个重量级：精度基线比对、真实截图、逐字对齐
+cargo test                    # 48 个单元测试
+cargo test -- --ignored       # 17 个重量级：精度基线比对、真实截图、逐字对齐
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
 ```

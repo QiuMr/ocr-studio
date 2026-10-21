@@ -1,6 +1,8 @@
 # 多引擎架构（DDDDOCR / YOLO 扩展）
 
-> 状态：**设计已定，骨架已落（`src-tauri/src/engine/`），尚未接入路由。**
+> 状态：**M3.0 已完成**——抽象层落在 `src-tauri/src/engine/{mod.rs,catalog.rs}`，
+> `OcrEngine` 已实现 `VisionEngine`，`/engine/list` 与 `list_engines` 命令已接通。
+> M3.1（DDDDOCR）与 M3.2（YOLO）待落，目录约定与能力声明已就位。
 > 目的：在不破坏现有 PP-OCR 精度基线的前提下，为后续接入 DDDDOCR 与各版本 YOLO 留好位置。
 > 时间：2026-10-21
 
@@ -31,19 +33,35 @@ HTTP/Tauri 层
 
 ## 2. 核心类型
 
-定义在 `src-tauri/src/engine/mod.rs`：
+定义在 `src-tauri/src/engine/mod.rs`（**已落地**）：
 
 | 类型 | 含义 |
 |---|---|
-| `EngineKind` | `PpOcr` / `DdddOcr` / `Yolo { version }`，决定目录与加载方式 |
-| `Capabilities` | 能力声明：`line_boxes` / `char_boxes` / `rotation_cls` / `classes` / `batch` |
+| `EngineKind` | `PpOcr` / `DdddOcr` / `Yolo(YoloVersion)`，决定目录与加载方式 |
+| `YoloVersion` | `V5` / `V7` / `V8` / `V11`，把「有无 objectness」「letterbox 填 0 还是 114」编码成方法，后处理不再散落 `if version` |
+| `EngineSpec` | `<family>[:<variant>]` 的解析与规范化，`key()` 兼作缓存键 |
+| `Capabilities` | 能力声明：`line_boxes` / `char_boxes` / `rotation_cls` / `detect` / `classes` / `batch` |
 | `TextLine` | 一行文本：四点框 + 文本 + score + det_score + rotated + 可选逐字 |
-| `CharBox` | 一个字：四点框 + 字 + score + CTC 帧区间 |
-| `Detection` | 一个目标：四点或轴对齐框 + `class_id` + `class_name` + score |
-| `VisionEngine` | `kind()` / `capabilities()` / `health()` / `recognize()` / `detect()` |
+| `CharBox` | 一个字：四点框 + 字 + score + CTC 帧区间（复用 `ocr::engine::CharBox`） |
+| `Detection` | 一个目标：四点框 + `class_id` + `class_name` + score |
+| `VisionEngine` | `spec()` / `capabilities()` / `status()` / `infer()` / `detect()` |
+| `VisionError` | `BadRequest` / `Unsupported` / `UnknownEngine` / `NotReady` / `Inference` |
 
-`detect()` 默认返回 `Err(Unsupported)`，`recognize()` 同理——某个实现不支持某能力时
-不实现对应方法即可，调用方通过 `capabilities()` 提前判断，不靠捕获错误来分支。
+`detect()` 有默认实现返回 `Err(Unsupported)`，OCR 类引擎不实现即可——**不要在 `impl` 里
+写个 `Err` 占位**，否则能力声明和实现容易长期不一致。调用方通过 `capabilities()` 提前判断，
+不靠捕获错误来分支。
+
+### 2.1 两个刻意的命名避让（踩过就知道多贵）
+
+`OcrEngine` 上已有历史方法 `recognize(&img)` 与 `health()`。trait 若同名，会出现
+「具体类型解析到 inherent、`dyn` 解析到 trait」的双份行为，同一行代码换个静态类型
+结果就变，排查成本极高。因此 trait 用：
+
+- `infer()` 而不是 `recognize()`；
+- `status()` 而不是 `health()`（语义上也更宽：带能力声明与可用性）。
+
+`OcrEngine` 的 `recognize` / `recognize_detailed` 原样保留，M3.0 只做「包一层」，
+**推理路径一个字节都没动**，这是精度零变化的结构性保证。
 
 ## 3. 模型目录约定
 
@@ -66,10 +84,21 @@ models/
       v11/{model.onnx,labels.txt}
 ```
 
-兼容规则：**旧路径 `models/{tiny,small,medium}/` 继续有效**（`resolve_model_dir` 先找
-新路径，找不到再回退旧路径）。这样老用户的模型不用搬家。
+兼容规则：**旧路径 `models/{tiny,small,medium}/` 继续有效**——`catalog::ppocr_dir`
+先看新路径下有没有 `det.onnx`，没有再回退旧路径。这样老用户的模型不用搬家
+（30MB 文件让人手动挪目录是没必要的摩擦）。
 
-YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时用 `class_{id}` 兜底并打 warn。
+YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `classes` 为空、
+类名回落 `class_{id}` 并打 warn——**没有 labels 只是名字不可读，不该判定引擎不可用**。
+字典名各家打包不一致，ddddocr 的字典认 `charset.txt` / `keys.txt` / `dict.txt` 三个名字。
+
+### 3.1 探测与加载必须分开
+
+`catalog::discover()` **只读文件系统，绝不加载模型**：加载一次 det+rec 要几百毫秒
+到几秒、还吃显存，拿来做「本机能开哪些引擎」的探测完全不合适。所以
+`available: true` 只代表「文件齐」，能不能真跑要加载后看 `/ocr/health` 的
+`actual_device`（DirectML 注册成功但推理失败会静默降级 CPU，只有预热推理才知道）。
+
 
 ## 4. 接口面（HTTP）
 
@@ -91,9 +120,9 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时用 `
 | 端点 | 用途 | 备注 |
 |---|---|---|
 | `POST /ocr/danzijson` | 单字 JSON | **已实现**（CTC 帧对齐 + 逆透视） |
+| `GET /engine/list` | 列出可用引擎与能力 | **已实现**（`list_engines` 命令同源） |
 | `POST /vision/detect` | 通用目标检测 | 请求带 `engine`，返回 `Detection[]` |
 | `POST /vision/pipeline` | 检测 + 识别串联 | YOLO 找区域 → PP-OCR 认字 |
-| `GET /engine/list` | 列出可用引擎与能力 | 前端据此决定显示哪些面板 |
 
 `/vision/*` 与 `/ocr/*` 共用同一份 `AppState`，**不会各加载一份模型**：
 句柄按 `engine` 键缓存在 `HashMap<String, Arc<Mutex<Box<dyn VisionEngine>>>>` 里，
@@ -119,10 +148,16 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时用 `
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M3.0 | 抽象层 + `OcrEngine` 实现 `VisionEngine`，路由不变 | 37 个测试全绿，精度零变化 |
-| M3.1 | `ddddocr` 引擎（先 common 版） | 同一张图上与 PP-OCR 的文本相似度 ≥ 0.95 才认为接入正确 |
+| M3.0 ✅ | 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` | 8 个新用例全绿；48 通过 / 1 忽略；推理路径零改动 |
+| M3.1 | `ddddocr` 引擎（先 common 版）+ 引擎注册表（LRU 单活） | 同一张图上与 PP-OCR 的文本相似度 ≥ 0.95 才认为接入正确 |
 | M3.2 | YOLO 通用检测（v8 优先，导出 ONNX opset 12+） | NMS 后处理与 ultralytics 对齐，IoU/置信度逐框比对 |
 | M3.3 | `/vision/pipeline` 串联 | 复杂版面（表格、多列）上比纯 PP-OCR 明显更准 |
+
+M3.0 顺带完成的部分：`catalog::discover()` 9 个候选引擎（ppocr×3 + ddddocr×2 + yolo×4）
+的可用性探测、能力声明、缺失文件提示；前端设置页「识别引擎」卡片。
+**注册表（`HashMap<key, Arc<Mutex<Box<dyn VisionEngine>>>>` + LRU）没有做**——
+现在只有一种引擎在跑，多建一层缓存只会多一处不一致。等 M3.1 真有两个引擎了再落，
+届时 `AppState.engine` 换成注册表，`ensure_engine` 的按参数重载逻辑一并搬过去。
 
 ### YOLO 的已知坑（提前记）
 

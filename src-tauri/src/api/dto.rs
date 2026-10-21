@@ -250,6 +250,78 @@ pub struct HealthDto {
     pub uptime_sec: u64,
 }
 
+/// 能力声明。前端据此决定显示哪些面板——**未实现能力的入口直接隐藏**，
+/// 不要显示成灰色禁用按钮（小白看到灰按钮只会困惑，不知道为什么点不了）。
+#[derive(Debug, Serialize)]
+pub struct CapabilitiesDto {
+    pub line_boxes: bool,
+    pub char_boxes: bool,
+    pub rotation_cls: bool,
+    pub detect: bool,
+    /// 检测类别名。空 = 不做检测，或没给 labels.txt
+    pub classes: Vec<String>,
+    pub batch: bool,
+}
+
+impl From<&crate::engine::Capabilities> for CapabilitiesDto {
+    fn from(c: &crate::engine::Capabilities) -> Self {
+        Self {
+            line_boxes: c.line_boxes,
+            char_boxes: c.char_boxes,
+            rotation_cls: c.rotation_cls,
+            detect: c.detect,
+            classes: c.classes.clone(),
+            batch: c.batch,
+        }
+    }
+}
+
+/// `/engine/list` 的一条引擎记录。
+#[derive(Debug, Serialize)]
+pub struct EngineItemDto {
+    /// 规范化引擎名，如 `ppocr:small`、`yolo:v8`
+    pub name: String,
+    /// 引擎族：ppocr / ddddocr / yolo
+    pub family: String,
+    /// ppocr 的档位或 ddddocr 的版本；YOLO 为 null（版本已含在 name 里）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub capabilities: CapabilitiesDto,
+    /// 模型文件齐全、可以加载。**不代表已在内存里**
+    pub available: bool,
+    /// 实际生效设备。只有当前已加载的那个引擎才有值
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_device: Option<String>,
+    /// 不可用的原因或补充说明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl From<&crate::engine::EngineStatus> for EngineItemDto {
+    fn from(s: &crate::engine::EngineStatus) -> Self {
+        Self {
+            name: s.spec.key(),
+            family: s.spec.kind.family().to_string(),
+            variant: s.spec.variant.clone(),
+            capabilities: CapabilitiesDto::from(&s.capabilities),
+            available: s.available,
+            actual_device: s
+                .actual_device
+                .map(|d| format!("{d:?}").to_lowercase()),
+            note: s.note.clone(),
+        }
+    }
+}
+
+/// `/engine/list` 出参。
+#[derive(Debug, Serialize)]
+pub struct EngineListData {
+    pub models_root: String,
+    /// 当前配置的默认引擎
+    pub default_engine: String,
+    pub engines: Vec<EngineItemDto>,
+}
+
 /// 解析 multipart 表单得到的字段集合。
 pub type FormFields = HashMap<String, String>;
 

@@ -40,3 +40,6 @@ scripts/_edgeprofile/
 
 # 免安装分发包产物（scripts/pack_exe.ps1 生成，47MB+，不进仓库）
 /release/
+
+# 重新构建前端时把旧 dist 改名留档用的临时目录
+dist_old_*/

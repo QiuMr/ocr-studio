@@ -12,6 +12,7 @@ import type {
   AppConfig,
   DanziResult,
   Device,
+  EngineList,
   FindArgs,
   FindResult,
   Health,
@@ -26,6 +27,19 @@ const HTTP_BASE = "http://127.0.0.1:8848";
 
 export async function getHealth(): Promise<Health> {
   return invoke<Health>("get_health");
+}
+
+/**
+ * 列出本机可用的引擎与能力（只扫目录，不加载模型）。
+ *
+ * 浏览器调试模式下没有 HTTP 对应实现——`/engine/list` 有，但调试 UI 时
+ * 引擎面板没有意义（数据来自本机文件系统），故直接返回空列表让界面走空状态。
+ */
+export async function listEngines(): Promise<EngineList> {
+  if (!isTauri()) {
+    return { models_root: "-", default_engine: "ppocr:small", engines: [] };
+  }
+  return invoke<EngineList>("list_engines");
 }
 
 export async function getConfig(): Promise<AppConfig> {

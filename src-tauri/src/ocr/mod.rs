@@ -20,5 +20,6 @@ pub use engine::{
 };
 // Device / ModelLevel 统一定义在 crate::config，经此重新导出以保持 `ocr::Device` 路径可用
 pub use crate::config::{Device, ModelLevel};
+pub use geometry::Pt;
 pub use preprocess::{det_preprocess, rec_preprocess, DetLimitType};
 pub use rec::{ctc_decode, ctc_decode_spans, CharSpan, RecResult};

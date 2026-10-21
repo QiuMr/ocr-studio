@@ -493,6 +493,36 @@ fn danzijson_returns_char_boxes() {
 }
 
 #[test]
+fn engine_list_reports_capabilities() {
+    // 只扫目录，不需要模型与 DLL，所以不标 ignore
+    let srv = start_server_without_engine();
+    let (status, body) = http(srv.addr, "GET", "/engine/list", "application/json", b"");
+    println!("/engine/list -> {status} {}", &body[..body.len().min(400)]);
+    assert_eq!(status, 200);
+    assert!(body.contains("\"code\":0"), "code 应为 0: {body}");
+
+    // 9 = ppocr 三档 + ddddocr 两版 + yolo 四版
+    assert_eq!(
+        body.matches("\"name\":").count(),
+        9,
+        "应列出 9 个候选引擎: {body}"
+    );
+
+    // 本仓库只有 models/small 是真模型，它必须是「可用」的
+    assert!(body.contains("\"name\":\"ppocr:small\""), "应含 ppocr:small");
+    assert!(body.contains("\"default_engine\":\"ppocr:small\""));
+    // 空目录的档位必须明确标成不可用，并说清缺什么
+    assert!(body.contains("\"name\":\"ppocr:tiny\""));
+    assert!(
+        body.contains("缺少"),
+        "不可用的引擎要给出缺失文件提示: {body}"
+    );
+    // 只有 ppocr 支持逐字；YOLO 条目不能声称支持文本行
+    assert!(body.contains("\"line_boxes\":true"));
+    assert!(body.contains("\"detect\":false"));
+}
+
+#[test]
 #[ignore = "重量级集成测试：需要模型与 DLL"]
 fn health_returns_engine_status() {
     let srv = start_server();

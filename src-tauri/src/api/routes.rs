@@ -23,7 +23,7 @@ use image::{DynamicImage, RgbImage};
 use super::dto::{
     decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
     DanziLineDto, DuohangData, FindData, FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions,
-    ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY,
+    ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, EngineItemDto, EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -100,6 +100,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         .route("/ocr/pingmuzhaotu1", post(pingmuzhaotu1))
         .route("/ocr/pingmuzhaotu2", post(pingmuzhaotu2))
         .route("/ocr/health", get(health))
+        .route("/engine/list", get(engine_list))
 }
 
 // ---------------------------------------------------------------- 入参解析
@@ -327,6 +328,43 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         ))
         .into_response(),
     }
+}
+
+// ---------------------------------------------------------------- 引擎列表
+
+/// 列出本机可用的引擎与能力。
+///
+/// **只读文件系统，不加载模型**：加载一次 det+rec 要几百毫秒到几秒、还吃显存，
+/// 拿来做探测完全不合适。所以这里只能回答「这个引擎的模型齐不齐」，
+/// 「能不能真跑起来」要加载后才知道（`/ocr/health` 的 `actual_device` 才是真相）。
+///
+/// 已加载的实例会把 `actual_device` 回填到对应条目上，前端才能显示
+/// 「当前正在用 GPU」——否则用户改完设备重启，界面上看不出到底生效没有。
+async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    let mut engines = crate::engine::catalog::discover(&state.models_root);
+
+    // 回填当前实例的真实设备
+    if let Some(info) = state.health() {
+        let key = crate::engine::EngineSpec::ppocr(info.level).key();
+        for e in engines.iter_mut() {
+            if e.spec.key() == key {
+                e.actual_device = Some(info.actual_device);
+            }
+        }
+    }
+
+    Json(ApiResp::ok(EngineListData {
+        models_root: state.models_root.display().to_string(),
+        default_engine: crate::engine::EngineSpec::ppocr(cfg.level).key(),
+        engines: engines.iter().map(EngineItemDto::from).collect(),
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------- 找图

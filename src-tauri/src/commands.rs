@@ -29,6 +29,15 @@ pub struct RecognizeOut {
     pub elapsed_ms: u128,
 }
 
+/// 引擎列表（前端设置页用）。字段与 `/engine/list` 的出参保持一致，
+/// 前端两套通道（IPC / HTTP）可以共用同一个 TS 类型。
+#[derive(Debug, Serialize)]
+pub struct EngineListOut {
+    pub models_root: String,
+    pub default_engine: String,
+    pub engines: Vec<crate::api::dto::EngineItemDto>,
+}
+
 fn err<T>(msg: String) -> Result<T, String> {
     Err(msg)
 }
@@ -242,6 +251,38 @@ fn health_dto(state: &AppState) -> HealthDto {
             port: cfg.port,
             uptime_sec: state.started_at.elapsed().as_secs(),
         },
+    }
+}
+
+/// 列出可用引擎与能力（前端设置页 / 测试台用）。
+///
+/// 与 `/engine/list` 同一份逻辑：只扫目录，不加载模型。
+#[tauri::command]
+pub fn list_engines(state: State<'_, Arc<AppState>>) -> EngineListOut {
+    let cfg = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut engines = crate::engine::catalog::discover(&state.models_root);
+
+    // 回填已加载实例的真实设备，前端才能看出「GPU 到底生效没有」
+    if let Some(info) = state.health() {
+        let key = crate::engine::EngineSpec::ppocr(info.level).key();
+        for e in engines.iter_mut() {
+            if e.spec.key() == key {
+                e.actual_device = Some(info.actual_device);
+            }
+        }
+    }
+
+    EngineListOut {
+        models_root: state.models_root.display().to_string(),
+        default_engine: crate::engine::EngineSpec::ppocr(cfg.level).key(),
+        engines: engines
+            .iter()
+            .map(crate::api::dto::EngineItemDto::from)
+            .collect(),
     }
 }
 

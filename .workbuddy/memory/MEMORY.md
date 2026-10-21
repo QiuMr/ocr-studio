@@ -51,7 +51,14 @@
 - 跑 find 类接口时，截图必须和匹配用**同一份像素**（`find_image` 返回 `preview`），
   否则两次截屏之间画面变了，框会画在过时背景上。
 
-## 当前进度（2026-10-21 深夜）
-- M0/M1 完成；M2 的「截图找图」完成（6 个端点 + 前端面板 + release 实测 60ms）。
-- M2 剩余：`/ocr/danzijson`（单字级 CTC 帧对齐）、日志页。
-- 详细记录见 `docs/PROGRESS.md`。
+## 当前进度（2026-10-21 深夜第三轮）
+- M0/M1/M2 完成；M3.0 完成 —— 多引擎抽象层落地：
+  - `src-tauri/src/engine/{mod,catalog}.rs`；`OcrEngine` 实现 `VisionEngine`（内部零改动）。
+  - **trait 方法名必须是 `infer` / `status`，不能叫 `recognize` / `health`**：
+    `OcrEngine` 有同名 inherent 方法，同名会让「具体类型 / `dyn`」解析出两套行为。
+  - `/engine/list` + `list_engines` 只扫目录、**不加载模型**（加载一次几秒还吃显存）。
+  - `ppocr_dir` 新路径 `models/ocr/ppocr/<lvl>/` 优先，回退旧 `models/<lvl>/`。
+- 测试基线：`cargo test --lib` 48 通过 / 1 忽略；`cargo test -- --ignored` 17 项全绿。
+- M3 剩余：M3.1 DDDDOCR（**缺 onnx 模型与字典，得先弄到**）、M3.2 YOLO v8、
+  M3.3 `/vision/pipeline`；引擎注册表（LRU 单活）留到 M3.1 一起做。
+- 详细记录见 `docs/PROGRESS.md`；多引擎契约见 `docs/ENGINES.md`。

@@ -8,6 +8,8 @@ pub mod api;
 pub mod capture;
 pub mod commands;
 pub mod config;
+/// 多引擎抽象层（PP-OCR / DDDDOCR / YOLO）。设计契约见 `docs/ENGINES.md`。
+pub mod engine;
 pub mod logbuf;
 /// 模板匹配。文件名 `match.rs` 与 Rust 关键字冲突，模块名对外暴露为 `matcher`。
 #[path = "match.rs"]
@@ -230,6 +232,7 @@ pub fn run() {
             commands::ocr_recognize,
             commands::ocr_danzijson,
             commands::get_health,
+            commands::list_engines,
             commands::get_config,
             commands::save_config,
             commands::set_level,

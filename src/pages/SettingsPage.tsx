@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { Check, Info, RotateCcw, Save, Server, Settings as SettingsIcon, Shield } from "lucide-react";
+import {
+  Boxes,
+  Check,
+  Info,
+  RotateCcw,
+  Save,
+  Server,
+  Settings as SettingsIcon,
+  Shield,
+} from "lucide-react";
 import { PageHeader } from "../components/ui/page-header";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
@@ -15,15 +24,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import { getConfig, modelsRoot, saveConfig } from "../lib/api";
+import { getConfig, listEngines, modelsRoot, saveConfig } from "../lib/api";
 import { isTauri } from "../lib/tauri";
-import { DEFAULT_CONFIG, type AppConfig, type Device, type ModelLevel } from "../types";
+import { cn } from "../lib/utils";
+import {
+  DEFAULT_CONFIG,
+  type AppConfig,
+  type Device,
+  type EngineItem,
+  type EngineList,
+  type ModelLevel,
+} from "../types";
 
 export function SettingsPage() {
   const [cfg, setCfg] = useState<AppConfig>(DEFAULT_CONFIG);
   /** 磁盘上的值，用来判断「有没有改动」 */
   const [initial, setInitial] = useState<AppConfig | null>(null);
   const [root, setRoot] = useState("-");
+  const [engines, setEngines] = useState<EngineList | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +55,7 @@ export function SettingsPage() {
         setCfg(c);
         setInitial(c);
         setRoot(await modelsRoot());
+        setEngines(await listEngines());
       } catch (e) {
         setError(String(e));
       }
@@ -217,6 +236,27 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* 引擎清单：只读，告诉用户「本机能用哪些、缺什么」 */}
+      {engines && engines.engines.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Boxes className="h-3.5 w-3.5 text-blue-600" />
+              识别引擎
+            </CardTitle>
+            <CardDescription>
+              这是 App 扫描模型目录得到的结果，只看文件齐不齐、没有加载模型。
+              「未安装」的补上对应文件就能用，不用改任何设置。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-1.5">
+            {engines.engines.map((e) => (
+              <EngineRow key={e.name} e={e} isDefault={e.name === engines.default_engine} />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {/* 渲染兼容：只读，解释给用户听 */}
       <Card>
         <CardHeader>
@@ -287,6 +327,62 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <div className="flex items-start justify-between gap-4">
       <span className="shrink-0 text-neutral-500">{label}</span>
       <span className="min-w-0 text-right">{children}</span>
+    </div>
+  );
+}
+
+/** 一行引擎：名字 + 状态 + 能力标签 + 说明。 */
+function EngineRow({ e, isDefault }: { e: EngineItem; isDefault: boolean }) {
+  const caps = [
+    e.capabilities.line_boxes && "逐行",
+    e.capabilities.char_boxes && "逐字",
+    e.capabilities.rotation_cls && "方向矫正",
+    e.capabilities.detect && "目标检测",
+  ].filter(Boolean) as string[];
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg px-3 py-2.5 transition-colors",
+        e.available ? "bg-neutral-50/70" : "bg-neutral-50/40",
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <code
+          className={cn(
+            "font-mono text-[12px] font-medium",
+            e.available ? "text-neutral-800" : "text-neutral-400",
+          )}
+        >
+          {e.name}
+        </code>
+        {isDefault && <Badge variant="default">默认</Badge>}
+        <Badge variant={e.available ? "success" : "outline"}>
+          {e.available ? "可用" : "未安装"}
+        </Badge>
+        {e.actual_device && (
+          <Badge variant="secondary">
+            {e.actual_device === "directml" ? "GPU" : "CPU"}
+          </Badge>
+        )}
+        {caps.length > 0 && (
+          <span className="ml-auto flex flex-wrap justify-end gap-1">
+            {caps.map((c) => (
+              <span
+                key={c}
+                className="rounded bg-white px-1.5 py-0.5 text-[10.5px] text-neutral-500 ring-1 ring-neutral-200/70"
+              >
+                {c}
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+      {e.note && (
+        <p className="mt-1 break-all font-mono text-[11px] leading-4 text-neutral-500">
+          {e.note}
+        </p>
+      )}
     </div>
   );
 }

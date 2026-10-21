@@ -1,14 +1,16 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-21（深夜第二轮：界面精修 + 日志页 + 单字 JSON + 免安装分发）
+> 最后更新：2026-10-21（深夜第三轮：M3.0 多引擎抽象落地）
 
 ---
 
 ## 0. 一句话现状
 
-**M2 全部收口**：找图 7 端点、单字 JSON（`/ocr/danzijson`）、实时日志页、界面精修
-四件事一起完成，40 单测 + 16 重量级（含精度基线 / 真实截图 / 逐字对齐）全绿。
+**M2 全部收口 + M3.0 落地**：找图 7 端点、单字 JSON（`/ocr/danzijson`）、实时日志页、
+界面精修四件事已完成；本轮又切出多引擎抽象层，`OcrEngine` 成为 `VisionEngine` 的
+第一个实现，`/engine/list` 能回答「本机 9 个候选引擎里哪些真能用」。
+48 单测 + 17 重量级（含精度基线 / 真实截图 / 逐字对齐）全绿，**推理路径零改动**。
 
 **分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
 `tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
@@ -18,9 +20,23 @@
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
 M2（找图 + 单字 JSON + 日志页 + 界面精修）。
 
-下一步：M3 多引擎（DDDDOCR / YOLO），设计见 `docs/ENGINES.md`。
+下一步：M3.1（DDDDOCR 引擎 + 引擎注册表），设计见 `docs/ENGINES.md`。
 
-### 0.0 本轮（界面精修 + M2 收口）做了什么
+### 0.0 本轮（M3.0 多引擎抽象）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 抽象层 | 新增 `src-tauri/src/engine/{mod.rs,catalog.rs}`：`EngineKind`/`EngineSpec`/`YoloVersion`/`Capabilities`/`TextLine`/`Detection`/`VisionEngine`/`VisionError` |
+| 首个实现 | `impl VisionEngine for OcrEngine`——只做「包一层」，`recognize_detailed` 内部一字节没动，这是精度零变化的结构性保证 |
+| 命名避让 | trait 用 `infer`/`status` 而非 `recognize`/`health`，避免「具体类型走 inherent、`dyn` 走 trait」的双份行为（详见 ENGINES.md 2.1） |
+| 目录发现 | `catalog::discover()` 只读文件系统、不加载模型；9 个候选（ppocr×3 + ddddocr×2 + yolo×4），缺文件时明说缺哪个 |
+| 新旧路径 | `ppocr_dir` 新路径 `ocr/ppocr/<lvl>/` 优先，回退旧路径 `models/<lvl>/`，老用户模型不用搬家 |
+| 接口 | 新增 `GET /engine/list` 与 `list_engines` 命令（同源逻辑），已加载实例会回填 `actual_device` |
+| YOLO 坑位固化 | `YoloVersion::has_objectness()` / `pad_value()` 把「v5 有 obj、填 0；v8 无 obj、填 114」写进类型，后处理不再散落 `if version` |
+| 前端 | 设置页新增「识别引擎」卡片：名字 + 可用/未安装 + GPU/CPU + 能力标签 + 缺失文件路径 |
+| 测试 | 新增 8 个用例（spec 解析/歧义拒绝/key 往返/YOLO 版本语义×4 + 目录发现×4）；`/engine/list` 冒烟测试不需模型即可跑 |
+
+### 0.1 本轮之前（界面精修 + M2 收口）做了什么
 
 | 项 | 结果 |
 |---|---|
@@ -368,7 +384,8 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 | 11 | 截图区域框选 UI（鼠标拖出 region） | 已评估，本轮**不做**：当前「整屏 / 整窗口」两种粒度够用，框选属交互打磨 |
 | 12 | MiSans 商用授权口径确认 | 待用户确认（随包分发前） |
 | 13 | 免安装 exe 分发（**用户明确不要 MSI/NSIS**） | `bundle.active=false` + `scripts/pack_exe.ps1` 打 zip（exe + dll + models + 说明） |
-| 14 | 多引擎抽象（DDDDOCR / YOLO） | 设计完成 `docs/ENGINES.md`，代码骨架待落 |
+| 14 | 多引擎抽象（DDDDOCR / YOLO） | **M3.0 已完成**：`engine/{mod,catalog}.rs` 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` + 设置页引擎卡片；M3.1/3.2 待落 |
+| 15 | 引擎注册表（多引擎 LRU 单活） | 已评估，**M3.0 不做**：当前只有一种引擎在跑，多建一层缓存只会多一处不一致。等 M3.1 真有两个引擎时再落，`AppState.engine` 整块换掉 |
 
 ---
 
