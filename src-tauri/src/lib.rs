@@ -1,8 +1,12 @@
 use tauri::Manager;
 
 pub mod api;
+pub mod capture;
 pub mod commands;
 pub mod config;
+/// 模板匹配。文件名 `match.rs` 与 Rust 关键字冲突，模块名对外暴露为 `matcher`。
+#[path = "match.rs"]
+pub mod matcher;
 pub mod ocr;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,6 +33,9 @@ pub fn run() {
             commands::server_start,
             commands::server_stop,
             commands::models_root,
+            commands::find_image,
+            commands::screen_preview,
+            commands::list_windows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

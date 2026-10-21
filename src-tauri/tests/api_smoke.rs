@@ -76,6 +76,45 @@ fn start_server() -> TestServer {
     }
 }
 
+/// 起一个**不加载 OCR 引擎**的服务。找图类接口是纯 CPU 计算，不需要模型，
+/// 这样跑找图测试既快也不依赖 onnxruntime.dll 与模型文件。
+fn start_server_without_engine() -> TestServer {
+    let root = workspace_root();
+    let state = AppState::new(root.join("models"), AppConfig::default());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口失败");
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let state = std::sync::Arc::new(state);
+    let thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let tokio_listener = rt.block_on(async {
+            tokio::net::TcpListener::from_std(listener).expect("from_std")
+        });
+        rt.block_on(async move {
+            axum::serve(tokio_listener, build_router().with_state(state))
+                .await
+                .expect("serve");
+        });
+    });
+
+    for _ in 0..100 {
+        if TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    TestServer {
+        addr,
+        _thread: thread,
+    }
+}
+
 /// 发一次请求，返回 (状态码, 响应体字符串)。
 fn http(
     addr: std::net::SocketAddr,
@@ -195,6 +234,246 @@ fn json_num(body: &str, key: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
+fn json_bool(body: &str, key: &str) -> Option<bool> {
+    let pat = format!("\"{key}\":");
+    let i = body.find(&pat)? + pat.len();
+    let rest = body[i..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------- 找图
+
+/// 合成一张带纹理的「屏幕」，并在 `(bx, by)` 贴一个高对比度按钮。
+fn synth_scene(w: u32, h: u32, bx: u32, by: u32, bw: u32, bh: u32) -> image::RgbImage {
+    use image::{Rgb, RgbImage};
+    let mut img = RgbImage::new(w, h);
+    let mut seed = 0x9e37_79b9u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let base = (x * 255 / w.max(1) + y * 128 / h.max(1)) % 256;
+            let v = ((base + next() % 40) % 256) as u8;
+            img.put_pixel(x, y, Rgb([v, v.wrapping_add(30), v.wrapping_add(70)]));
+        }
+    }
+    for dy in 0..bh {
+        for dx in 0..bw {
+            let border = dx == 0 || dy == 0 || dx == bw - 1 || dy == bh - 1;
+            let c = if border {
+                Rgb([20u8, 20, 120])
+            } else if (dx + dy) % 7 == 0 {
+                Rgb([240, 240, 30])
+            } else if dx < bw / 2 {
+                Rgb([200, 40, 40])
+            } else {
+                Rgb([40, 190, 90])
+            };
+            img.put_pixel(bx + dx, by + dy, c);
+        }
+    }
+    img
+}
+
+fn png_b64(img: &image::RgbImage) -> String {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img.clone())
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .expect("PNG 编码失败");
+    base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
+}
+
+const SCENE_BTN: (u32, u32, u32, u32) = (150, 120, 64, 48);
+
+#[test]
+fn tuzhaotu_finds_template_in_uploaded_image() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3);
+    let tpl = image::imageops::crop_imm(
+        &scene, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3,
+    )
+    .to_image();
+
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template\":\"{}\"}}",
+        png_b64(&scene),
+        png_b64(&tpl)
+    );
+    for path in ["/ocr/tuzhaotu1", "/ocr/tuzhaotu2"] {
+        let (status, body) = http(srv.addr, "POST", path, "application/json", payload.as_bytes());
+        println!("{path} -> {status} {body}");
+        assert_eq!(status, 200, "{path} 应返回 200: {body}");
+        assert!(body.contains("\"code\":0"), "{path} code 应为 0: {body}");
+        assert_eq!(json_bool(&body, "found"), Some(true), "{path} 应命中");
+        assert_eq!(json_num(&body, "x"), Some(SCENE_BTN.0 as f64), "{path} x 不对");
+        assert_eq!(json_num(&body, "y"), Some(SCENE_BTN.1 as f64), "{path} y 不对");
+        assert_eq!(json_num(&body, "width"), Some(SCENE_BTN.2 as f64));
+        assert_eq!(json_num(&body, "height"), Some(SCENE_BTN.3 as f64));
+        assert!(
+            json_num(&body, "score").unwrap_or(0.0) > 0.99,
+            "{path} 分数应接近 1"
+        );
+        assert!(body.contains("\"source\":\"image\""));
+    }
+}
+
+#[test]
+fn tuzhaotu_reports_not_found_gracefully() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(320, 240, 10, 10, 40, 40);
+    // 用与场景无关的反色块当模板
+    let mut other = synth_scene(48, 48, 0, 0, 48, 48);
+    for p in other.pixels_mut() {
+        *p = image::Rgb([255 - p[0], 255 - p[1], 255 - p[2]]);
+    }
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template\":\"{}\"}}",
+        png_b64(&scene),
+        png_b64(&other)
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("not-found -> {status} {body}");
+    // 「没找到」是正常业务结果，HTTP 仍是 200，只把 found 置 false
+    assert_eq!(status, 200);
+    assert_eq!(json_bool(&body, "found"), Some(false));
+    assert!(body.contains("\"matched\":0"));
+}
+
+#[test]
+fn tuzhaotu_multipart_upload_works() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3);
+    let tpl = image::imageops::crop_imm(
+        &scene, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3,
+    )
+    .to_image();
+
+    // 多文件 multipart：image + template 各一个文件字段
+    let boundary = "----FindBoundary91QX";
+    let mut body = Vec::new();
+    for (name, data) in [("image", &scene), ("template", &tpl)] {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8((*data).clone())
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{name}.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&buf.into_inner());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let (status, resp) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        &format!("multipart/form-data; boundary={boundary}"),
+        &body,
+    );
+    println!("multipart find -> {status} {resp}");
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(json_bool(&resp, "found"), Some(true));
+    assert_eq!(json_num(&resp, "x"), Some(SCENE_BTN.0 as f64));
+}
+
+#[test]
+fn tuzhaotu_template_file_path_works() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3);
+    let tpl = image::imageops::crop_imm(
+        &scene, SCENE_BTN.0, SCENE_BTN.1, SCENE_BTN.2, SCENE_BTN.3,
+    )
+    .to_image();
+
+    let dir = std::env::temp_dir().join("ocr_studio_find_test");
+    std::fs::create_dir_all(&dir).expect("建临时目录失败");
+    let tpl_path = dir.join("tpl.png");
+    image::DynamicImage::ImageRgb8(tpl)
+        .save(&tpl_path)
+        .expect("写模板文件失败");
+
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template_file\":{:?}}}",
+        png_b64(&scene),
+        tpl_path.to_string_lossy()
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("template_file -> {status} {body}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json_bool(&body, "found"), Some(true));
+    assert_eq!(json_num(&body, "x"), Some(SCENE_BTN.0 as f64));
+}
+
+#[test]
+fn find_rejects_bad_extension_for_template_file() {
+    let srv = start_server_without_engine();
+    let payload = r#"{"image":"AAAA","template_file":"C:\\Windows\\System32\\drivers\\etc\\hosts"}"#;
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("bad ext -> {status} {body}");
+    assert_eq!(status, 400, "非图片扩展名必须被拒绝: {body}");
+    assert!(body.contains("template_file"), "{body}");
+}
+
+#[test]
+fn find_requires_template() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(100, 100, 10, 10, 20, 20);
+    let payload = format!("{{\"image\":\"{}\"}}", png_b64(&scene));
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("no template -> {status} {body}");
+    assert_eq!(status, 400);
+    assert!(body.contains("模板"), "{body}");
+}
+
+#[test]
+#[ignore = "重量级集成测试：需要模型与 DLL"]
+fn m2_endpoints_return_501() {
+    let srv = start_server();
+    let (status, body) = http(srv.addr, "POST", "/ocr/danzijson", "application/json", b"{}");
+    println!("/ocr/danzijson -> {status} {body}");
+    assert_eq!(status, 501, "/ocr/danzijson 应返回 501");
+    assert!(body.contains("\"code\":501"));
+}
+
 #[test]
 #[ignore = "重量级集成测试：需要模型与 DLL"]
 fn health_returns_engine_status() {
@@ -299,24 +578,6 @@ fn regex_keyword_works() {
     assert_eq!(status, 200);
     // 13800138000 是 11 位数字
     assert_eq!(json_num(&body, "matched"), Some(1.0), "应命中含 11 位数字的行");
-}
-
-#[test]
-#[ignore = "重量级集成测试：需要模型与 DLL"]
-fn m2_endpoints_return_501() {
-    let srv = start_server();
-    for path in [
-        "/ocr/tuzhaotu1",
-        "/ocr/tuzhaotu2",
-        "/ocr/jubingzhaotu1",
-        "/ocr/pingmuzhaotu2",
-        "/ocr/danzijson",
-    ] {
-        let (status, body) = http(srv.addr, "POST", path, "application/json", b"{}");
-        println!("{path} -> {status} {body}");
-        assert_eq!(status, 501, "{path} 应返回 501");
-        assert!(body.contains("\"code\":501"));
-    }
 }
 
 #[test]

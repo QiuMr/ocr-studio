@@ -115,6 +115,86 @@ pub struct DuohangData {
     pub elapsed_ms: u128,
 }
 
+/// 找图请求参数（JSON 形态；multipart 形态用同名 form 字段）。
+///
+/// 三种来源由端点决定，这里只做字段容器：
+/// - `tuzhaotu*` 用 `image`（调用方自己传搜索图）
+/// - `jubingzhaotu*` 用 `hwnd` 或 `title`（内部截窗口）
+/// - `pingmuzhaotu*` 用 `region`（内部截屏幕，缺省全屏）
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FindOptions {
+    /// 搜索图 base64（`tuzhaotu*` 必填）
+    #[serde(default)]
+    pub image: Option<String>,
+    /// 模板图 base64（与 `template_file` 二选一）
+    #[serde(default)]
+    pub template: Option<String>,
+    /// 模板文件绝对路径（与 `template` 二选一，支持 png/jpg/bmp）
+    #[serde(default)]
+    pub template_file: Option<String>,
+    /// 窗口句柄（`jubingzhaotu*`）；缺省时回退 `title`
+    #[serde(default)]
+    pub hwnd: Option<i64>,
+    /// 窗口标题，精确匹配优先，找不到再按子串匹配
+    #[serde(default)]
+    pub title: Option<String>,
+    /// 搜索区域 `[x, y, w, h]`（屏幕绝对坐标），仅 `pingmuzhaotu*` 有效
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
+    /// 分数下限（NCC），缺省按端点预设：精准 0.92 / 容错 0.75
+    #[serde(default)]
+    pub min_score: Option<f64>,
+    /// 最多返回几个命中，默认 1
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+/// 单个命中。
+#[derive(Debug, Clone, Serialize)]
+pub struct FindHitDto {
+    /// 左上角（屏幕绝对坐标；`tuzhaotu*` 为搜索图内坐标）
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub center_x: f64,
+    pub center_y: f64,
+    /// 零均值 NCC，`-1..=1`
+    pub score: f64,
+}
+
+/// 找图出参。
+///
+/// 同时提供扁平字段（`x`/`y`/`score`）与数组（`matches`）：
+/// 老脚本习惯直接读 `data.x` / `data.y`，新脚本可用 `matches` 处理多目标。
+#[derive(Debug, Serialize)]
+pub struct FindData {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_y: Option<f64>,
+    /// 模板尺寸（未命中时也返回，便于调用方算点击偏移）
+    pub width: u32,
+    pub height: u32,
+    /// 命中数量
+    pub matched: usize,
+    pub matches: Vec<FindHitDto>,
+    /// 搜索图来源：`image` / `screen` / `window`
+    pub source: String,
+    /// 搜索图左上角在屏幕上的坐标。前端要用它把绝对坐标换算回图内坐标
+    /// （`source=image` 时恒为 0）。
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub elapsed_ms: u128,
+}
+
 /// `/ocr/health` 出参。
 #[derive(Debug, Serialize)]
 pub struct HealthDto {

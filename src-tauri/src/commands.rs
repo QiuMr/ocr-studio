@@ -12,9 +12,12 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::api::dto::{decode_base64_image, decode_image, HealthDto, LineDto, OcrOptions};
+use crate::api::routes::{self, FindMode, FindSource};
 use crate::api::state::AppState;
 use crate::api::stop as stop_server;
+use crate::capture;
 use crate::config::{AppConfig, Device, ModelLevel};
+use crate::matcher::{self, MatchOptions};
 
 /// 识别结果（前端 Playground 用）。
 #[derive(Debug, Serialize)]
@@ -257,6 +260,185 @@ pub fn server_stop(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 #[tauri::command]
 pub fn models_root(state: State<'_, Arc<AppState>>) -> String {
     state.models_root.display().to_string()
+}
+
+// ---------------------------------------------------------------- 找图
+
+/// 前端发来的找图参数。字段与 HTTP 的 `FindOptions` 一一对应，额外多一个
+/// `source`（来源）和 `mode`（精准/容错）—— 这两个在 HTTP 侧是由路径决定的。
+#[derive(Debug, serde::Deserialize)]
+pub struct FindArgs {
+    /// `image` / `screen` / `window`
+    pub source: String,
+    /// `exact`（默认）或 `loose`
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub template_file: Option<String>,
+    #[serde(default)]
+    pub hwnd: Option<i64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
+    #[serde(default)]
+    pub min_score: Option<f64>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+impl FindArgs {
+    fn into_options(self) -> crate::api::dto::FindOptions {
+        crate::api::dto::FindOptions {
+            image: self.image,
+            template: self.template,
+            template_file: self.template_file,
+            hwnd: self.hwnd,
+            title: self.title,
+            region: self.region,
+            min_score: self.min_score,
+            max_results: self.max_results,
+        }
+    }
+}
+
+/// 可见窗口信息（前端选择「截哪个窗口」用）。
+#[derive(Debug, Serialize)]
+pub struct WindowDto {
+    pub hwnd: i64,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// 截图预览结果。带上区域原点，前端才能把屏幕绝对坐标换算成图内坐标。
+#[derive(Debug, Serialize)]
+pub struct ScreenPreview {
+    /// PNG 的 base64
+    pub image: String,
+    /// 截图区域在屏幕上的左上角
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 找图结果 + 本次实际用于匹配的搜索图。
+///
+/// 为什么要回传搜索图：屏幕是活的，若前端先单独截一张图当背景、再调找图，
+/// 两次截屏之间画面可能已经变了，命中框会画在过时的背景上。由同一次匹配
+/// 返回它自己看到的像素，框与背景必然对齐。
+#[derive(Debug, Serialize)]
+pub struct FindOut {
+    #[serde(flatten)]
+    pub data: crate::api::dto::FindData,
+    /// 搜索图的 PNG base64；`source=image` 时不返回（调用方本来就有）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+/// 枚举可见窗口。
+#[tauri::command]
+pub fn list_windows() -> Vec<WindowDto> {
+    capture::list_windows()
+        .into_iter()
+        .map(|w| WindowDto {
+            hwnd: w.hwnd as i64,
+            title: w.title,
+            x: w.rect.x,
+            y: w.rect.y,
+            width: w.rect.width,
+            height: w.rect.height,
+        })
+        .collect()
+}
+
+/// 截一张屏幕预览图，返回 PNG 的 base64（前端做预览用）。
+#[tauri::command]
+pub async fn screen_preview(region: Option<[i32; 4]>) -> Result<ScreenPreview, String> {
+    let region = region.map(|[x, y, w, h]| capture::ScreenRegion {
+        x,
+        y,
+        width: w,
+        height: h,
+    });
+    let img = tokio::task::spawn_blocking(move || capture::capture_region(region))
+        .await
+        .map_err(|e| format!("截图任务异常: {e}"))?
+        .map_err(|e| format!("截图失败: {e}"))?;
+    let (x, y) = match region {
+        Some(r) => (r.x, r.y),
+        None => {
+            let vs = capture::virtual_screen();
+            (vs.x, vs.y)
+        }
+    };
+    let (width, height) = img.dimensions();
+    Ok(ScreenPreview {
+        image: rgb_to_png_b64(&img)?,
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn rgb_to_png_b64(img: &image::RgbImage) -> Result<String, String> {
+    use base64::Engine as _;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img.clone())
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG 编码失败: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
+/// 找图：与 HTTP 的 `/ocr/tuzhaotu*|jubingzhaotu*|pingmuzhaotu*` 等价，
+/// 由 `source` 选择搜索图来源，`mode` 选择阈值预设。
+#[tauri::command]
+pub async fn find_image(args: FindArgs) -> Result<FindOut, String> {
+    let t0 = Instant::now();
+    let source = FindSource::parse(&args.source)
+        .ok_or_else(|| format!("未知来源 {:?}（可选 image/screen/window）", args.source))?;
+    let mode = match args.mode.as_deref().map(str::trim) {
+        Some("loose") | Some("rongcuo") | Some("容错") => FindMode::Loose,
+        _ => FindMode::Exact,
+    };
+    let opts = args.into_options();
+
+    // 模板必须先校验（错误提示优先级最高，和 HTTP 层保持一致）
+    let tpl = routes::load_template(&opts, None).map_err(|e| e.message())?;
+    let (tw, th) = tpl.dimensions();
+    let (hay, ox, oy) =
+        routes::acquire_haystack(source, &opts, None).map_err(|e| e.message())?;
+
+    let mopts = MatchOptions {
+        min_score: opts.min_score.unwrap_or(mode.default_min_score()),
+        max_results: opts.max_results.unwrap_or(1),
+    };
+    // 只有屏幕/窗口来源需要回传截图（图片来源调用方本来就有原图）
+    let need_preview = source != FindSource::Image;
+    let (hits, preview) = tokio::task::spawn_blocking(move || {
+        let hits = matcher::find_template(&hay, &tpl, &mopts)?;
+        let preview = if need_preview {
+            Some(rgb_to_png_b64(&hay)?)
+        } else {
+            None
+        };
+        Ok::<_, String>((hits, preview))
+    })
+    .await
+    .map_err(|e| format!("匹配任务异常终止: {e}"))??;
+
+    Ok(FindOut {
+        data: routes::to_find_data(&hits, (ox, oy), (tw, th), source, t0),
+        preview,
+    })
 }
 
 // 命令注册集中在 `lib.rs` 的 `invoke_handler` 中，用 `tauri::generate_handler!`

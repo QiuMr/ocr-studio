@@ -1,36 +1,41 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-21（晚）
+> 最后更新：2026-10-21（晚，M2 找图完成）
 
 ---
 
 ## 0. 一句话现状
 
-**M1 已完成**：Rust 推理核心与 Python 基线逐位对齐，HTTP 接口层（4 个端点 + 7 个明确 501）、
-Tauri 命令层、前端（React + Tailwind v4 + shadcn/ui 风格 + MiSans + 自定义标题栏）全部落地，
-**打包产物（exe/MSI/NSIS）已实测可启动并响应 /ocr/health**。
-M2（截图找图 / 单字 JSON / 日志页）未开始。前端技术栈见第 7 节。
+**M2 找图部分已完成**：截图（屏幕 / 窗口）+ 模板匹配引擎落地，7 个找图端点全部实现，
+Playground 增加找图面板；**真实屏幕自匹配实测 score=1.0、坐标零误差**。
+
+已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
+M2-找图（截图 + 模板匹配 + 7 端点 + 前端面板）。
+
+M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页。前端技术栈见第 7 节。
 
 ---
 
 ## 1. 验证状态（可复现）
 
 ```
-cargo test                       # 33 个单元测试
-cargo test -- --ignored          # + 11 个重量级集成测试（需模型与 DLL）
+cargo test                       # 40 个单元测试
+cargo test -- --ignored          # + 16 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
 pnpm tauri build --debug         # 全链路打包（exe + MSI + NSIS）
 ```
 
 | 测试 | 结果 |
 |---|---|
-| 单元测试（geometry / det / rec / preprocess / resize fixture） | **33 / 33 通过** |
+| 单元测试（geometry / det / rec / preprocess / resize fixture / **matcher**） | **40 / 40 通过** |
+| `matcher::*`（7 个） | **7 / 7 通过**：原位命中(score>0.999)、亮度缩放免症、无假阳、纯色模板不误检、NMS 多目标、超大模板拒绝、1080p 多层金字塔 |
 | `pipeline_match::rust_matches_python_reference` | **通过**：文本不一致 0、框偏差 >2px 0、置信度偏差 >0.05 0 |
 | `tensor_diff::rec_tensor_matches_python_dump` | 通过（rec 输入张量与 Python dump 一致） |
 | `tensor_diff::warp_perspective_matches_python_crop` | 通过（透视裁剪 **0/3069 逐位一致**） |
 | `tensor_diff::rec_probe_matches_python_on_same_tensor` | 通过（同一张量下 Rust/Python 逐帧 argmax 一致） |
-| `api_smoke`（7 个） | **7 / 7 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、501 占位、400 错误路径 |
+| `api_smoke`（13 个） | **13 / 13 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、400 错误路径 |
+| `capture_live`（5 个，`--ignored`） | **5 / 5 通过**：全屏尺寸→自匹配**位置零误差、score=1.0**、区域截图坐标本地化、窗口枚举、窗口截图 136 万非黑像素 |
 
 打包产物实测（2026-10-21）：
 ```
@@ -84,27 +89,59 @@ bundle/nsis/OCR Studio_0.1.0_x64-setup.exe         19.80 MiB
 | `routes.rs` | 路由表 1:1 对应 PLAN 第 6 节；JSON base64 与 multipart 双入参 |
 
 - **已实现 4 个**：`/ocr/shibie`、`/ocr/zhaozi`（子串或 `/正则/`）、`/ocr/duohangjson`、`/ocr/health`。
-- **7 个明确 501**（M2）：`/ocr/danzijson`、`/ocr/tuzhaotu1|2`、`/ocr/jubingzhaotu1|2`、`/ocr/pingmuzhaotu1|2`。
-  返回 `code=501` + 具体原因，不假装成功。
+- **找图类 6 个已实现**（M2，2026-10-21）：
+  `/ocr/tuzhaotu1|2`（传图）、`/ocr/jubingzhaotu1|2`（截窗口）、`/ocr/pingmuzhaotu1|2`（截屏幕）。
+  后缀 `1`=精准（NCC ≥ 0.92），`2`=容错（NCC ≥ 0.72）。
+- **仅剩 1 个 501**：`/ocr/danzijson`（单字级定位，需 CTC 帧对齐）。
 - 引擎按请求参数热切换：`level` / `device` / `use_cls` 与当前引擎不一致时自动重载。
+
+### 截图（`src-tauri/src/capture.rs`，M2）
+- 屏幕：`BitBlt(SRCCOPY | CAPTUREBLT)`；窗口：`PrintWindow(PW_RENDERFULLCONTENT)`，
+  失败或**返回全黑图（假成功）**时回退 `BitBlt(GetWindowDC)`。
+- 取像素统一 `GetDIBits` 32bpp top-down + 手工 BGRA→RGB。
+- `EnumWindows` 枚举可见且有标题、无 owner 的顶层窗口。
+- **坐标系必须配对**：`GetWindowRect`（含边框）配 `GetWindowDC`（原点=窗口左上角）。
+  早先用 `ClientToScreen`+`GetClientRect`（客户区）配 `GetWindowDC`，右侧/底部会缺一块，
+  已修正并实测窗口截图尺寸与 `GetWindowRect` 完全一致（1455×941）。
+
+### 模板匹配（`src-tauri/src/match.rs`，M2）
+算法：**灰度金字塔（≤1/16）+ 最粗层 NCC 全扫 + 逐层 ±2 精化 + NMS**。
+
+- 粗筛也用 NCC 而不是 SQDIFF。原设计「SQDIFF 积分图粗筛」的前提是错的：
+  SQDIFF 的 `ΣT²+ΣI²-2ΣTI` 里 `ΣTI` 同样要逐像素乘，**并不比 NCC 便宜**；
+  而 SQDIFF 对亮度漂移敏感（实测模板 ×0.8 后真位置掉出 top-64 候选，直接漏检）。
+  统一 NCC 后代码更短、更准，也更抗主题变化。
+- 所有分数语义统一为**零均值 NCC**（`-1..=1`），对亮度/对比度线性变换免疫。
+- 模板方差为 0（纯色块）时 NCC 无定义 → 返回 0 分**拒绝命中**，宁可漏不可假阳。
+- NMS 用中心距离（阈值 `max(4, min(w,h)/2)`）合并重复命中。
 
 ### Tauri 命令层（`src-tauri/src/commands.rs`）
 `ocr_recognize` / `get_health` / `get_config` / `save_config`（热生效，端口变更自动重启服务）/
-`set_level` / `set_device` / `server_start` / `server_stop` / `server_status` / `models_root`。
+`set_level` / `set_device` / `server_start` / `server_stop` / `server_status` / `models_root` /
+**`find_image` / `screen_preview` / `list_windows`**（M2）。
 UI 走 invoke，外部脚本走 HTTP，两条路汇到同一个 `AppState`，不会各加载一份模型。
+
+找图命令的关键设计：`find_image` 在 `source != image` 时**连同截图一起返回**（`preview` 字段）。
+因为屏幕是活的，若前端先单独截一张图当背景、再调找图，两次截屏之间画面可能已变，
+命中框就会画在过时背景上。由同一次匹配返回它自己看到的像素，框与背景必然对齐。
+同时出参带 `origin_x`/`origin_y`（截图左上角的屏幕坐标），前端才能把绝对坐标换算回图内坐标
+—— 这个偏移**不能靠前端反推**（多显示器时虚拟屏幕原点可能是负数）。
 
 ### 前端（`src/`，2026-10-21 从 Vue 迁移到 React）
 ```
 src/App.tsx                   布局：TitleBar + 侧边导航 + 三页
 src/components/TitleBar.tsx   自定义标题栏（无图标无标题，仅窗口控制）
-src/components/ImageViewer.tsx  canvas 框叠加（按原图像素坐标等比缩放）
+src/components/ImageViewer.tsx  canvas 框叠加（按原图像素坐标等比缩放，识别框蓝色 / 找图框琥珀色）
+src/components/FindPanel.tsx   找图面板：来源选择、模板上传、命中列表与可视化
 src/components/ui/*.tsx       shadcn/ui 风格：button/card/input/label/badge/select/
                               tabs/switch/slider/separator/scroll-area/progress/tooltip
-src/pages/                    Dashboard / Playground / SettingsPage
+src/pages/                    Dashboard / Playground（识别 / 找图 双 Tab）/ SettingsPage
 src/lib/api.ts                invoke 封装 + 浏览器降级到 http://127.0.0.1:8848
 ```
 - 图标库 `lucide-react`，**每个按钮均带图标**。
 - Playground 支持拖入 / Ctrl+V 粘贴 / 选文件，结果分「文本 / 逐行 / JSON」三个 Tab。
+- 找图面板三个来源：上传图片 / 整个屏幕 / 指定窗口（下拉选标题 + 刷新）。
+  在识别页载入的图会自动带过去当搜索图。
 - 非 Tauri 环境（纯浏览器）下 Playground 自动降级到 HTTP，便于调 UI。
 
 ### 字体落地（`scripts/fetch_misans_font.py`）
@@ -192,7 +229,13 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 | unclip 用斜接 join，pyclipper 用 JT_ROUND 圆角 | 轴对齐框**逐位一致**；明显旋转的框 minAreaRect 偏大约 1.5px | 工程代价——需复刻 Clipper 弧的角步长离散化，已用测试把偏差锁在 ≤2px |
 | `cls_should_rotate` 阈值语义 | **未验证**，需与 RapidOCR/PaddleOCR 对齐后才能启用 cls | 待办 |
 | 置信度对误检框敏感 | 误检框在 1-LSB 级别就是混沌的（实测 147 像素随机扰动可抖 0.04） | 原理性——不是 bug，但意味着**不能用误检框的置信度做精度验收** |
-| **App 内 UI 交互未验证** | 本环境无 GUI 会话，Dashboard/Playground 的 invoke 链路只验证了底层（打包 exe 启动 + HTTP 层 7/7），页面渲染与按钮回调未经真机点击 | 环境限制——需在有桌面的机器上过一遍 |
+| App 内 UI 点击链路 | **部分验证**：Playground 找图面板的底层（`find_image`/`screen_preview`/`list_windows`）
+  已由集成测试与真实截图测试覆盖，但页面渲染与按钮回调仍未真机点击过 | 环境限制——需在有桌面的机器上过一遍 |
+| **模板匹配不支持缩放** | 模板与目标尺寸差 >5% 时 NCC 分数明显下降，可能漏检 | 工程代价——多尺度搜索会让耗时线性翻倍（3 档就 ×3），规划为可选开关 |
+| **模板匹配不支持旋转** | 模板旋转后 NCC 直接崩（典型 0.99 → 0.3） | 工程代价——需旋转模板阵列（18 档 ×18 耗时），且旋转产生的插值会进一步降分 |
+| 亮度调整导致高光截断时 NCC 掉分 | 数学事实：`a*I+b` 被 255 截断后不再是线性变换 | 原理性——不是 bug。用例/数据无法完全规避，容错模式把阈值降到 0.72 应对 |
+| 多显示器混合 DPI | 坐标统一按主屏 DPI 处理，混合 DPI 下 `GetSystemMetrics` 与物理像素有偏差 | 工程代价——需按 per-monitor DPI 逐个换算，未实现 |
+| UAC 提权窗口截图 | 失败（不在同一桌面合成层） | 原理性——除非注入，无解 |
 | ort `Environment` 进程级单例 | 已修：`OcrEngine::load` 复用全局 `OnceLock<Environment>` | 曾是真 bug——运行时切档位重载引擎会直接报 "only one environment is allowed per process" |
 | 两套 `ModelLevel`/`Device` 类型 | 已修：统一定义在 `crate::config`，`ocr` 模块重新导出 | 曾是编译错误源 |
 
@@ -205,16 +248,19 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 
 | # | 任务 | 状态 |
 |---|---|---|
-| 1 | `api/routes.rs` + `api/dto.rs`：`/ocr/*` 端点 | **已完成**（4 个实现 + 7 个明确 501） |
+| 1 | `api/routes.rs` + `api/dto.rs`：`/ocr/*` 端点 | **已完成** |
 | 2 | `commands.rs`：Tauri invoke 命令 | **已完成** |
-| 3 | 前端测试台接真实后端 | **已完成**（代码 + 构建 + 打包验证；App 内点击未验证，见第 4 节） |
+| 3 | 前端测试台接真实后端 | **已完成**（代码 + 构建 + 打包验证；页面点击未验证，见第 4 节） |
 | 4 | `model_manager.rs`：三档模型懒加载缓存 | 部分达成——`AppState` 已支持按请求热切换重载，但无 LRU 缓存，切档会整份重载 |
 | 5 | `cls_should_rotate` 阈值语义对齐 RapidOCR | 待办（需读 RapidOCR 源码确认 label 顺序） |
-| 6 | 截图/句柄找图（`windows` crate PrintWindow/BitBlt）+ 模板匹配 NCC → 7 个找图端点 | **M2 主线，未开始** |
-| 7 | 单字 JSON：CTC 帧对齐 + 逆透视映射得到字符级 box | **M2，未开始** |
-| 8 | 日志页：tracing → `app.emit` → 前端实时日志 | **M2，未开始** |
-| 9 | MiSans 商用授权口径确认 | 待用户确认（随包分发前） |
-| 10 | release 打包（`pnpm tauri build`，LTO + strip）与安装包实测 | debug 已通；release 未跑 |
+| 6 | 截图/句柄找图 + 模板匹配 NCC → 7 个找图端点 | **已完成**（6 个端点 + 1 个仍 501；真实截图自匹配 score=1.0） |
+| 7 | 单字 JSON：CTC 帧对齐 + 逆透视映射得到字符级 box | **M2 剩余，未开始** |
+| 8 | 日志页：tracing → `app.emit` → 前端实时日志 | **M2 剩余，未开始** |
+| 9 | 模板匹配多尺度（±10%）开关 | 已评估，本轮**不做**：耗时 ×3，且容错模式已能覆盖大部分场景。做成可选参数留到有真实需求时加 |
+| 10 | 模板匹配旋转（18 档） | 已评估，**不做**：耗时 ×18 且旋转插值会自我降分，收益低于代价 |
+| 11 | 截图区域框选 UI（鼠标拖出 region） | 已评估，本轮**不做**：当前「整屏 / 整窗口」两种粒度够用，框选属交互打磨 |
+| 12 | MiSans 商用授权口径确认 | 待用户确认（随包分发前） |
+| 13 | release 打包（`pnpm tauri build`，LTO + strip）与安装包实测 | debug 已通；release 未跑 |
 
 ---
 
@@ -280,8 +326,10 @@ scripts/fetch_models.ps1          # 下载校验模型
 scripts/copy_runtime.ps1          # 拷贝 ort DLL 到 src-tauri/runtime/
 models/small/                     # small 档模型 + reference_output.json + dump/
 src-tauri/src/ocr/                # Rust 推理核心
+src-tauri/src/capture.rs          # 屏幕/窗口截图（BitBlt + PrintWindow）
+src-tauri/src/match.rs            # 模板匹配（金字塔 NCC + NMS），模块名暴露为 matcher
 src-tauri/src/api/                # HTTP 层（dto / state / routes）
 src-tauri/src/commands.rs         # Tauri invoke 命令
-src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke
+src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke / capture_live
 src/assets/fonts/misans/          # MiSans 切片（fetch_misans_font.py 生成，勿手改）
 ```

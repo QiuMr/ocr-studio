@@ -55,6 +55,16 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
 ] }
 imageproc = "0.27.0"
 
+# Windows 原生 API：截图（GDI BitBlt / PrintWindow）、窗口枚举、DPI 感知
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_Xps",
+  "Win32_UI_WindowsAndMessaging",
+]
+
 # 注：windows 依赖在截图/句柄里程碑（M2）加入并单独验证编译
 
 [profile.release]

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { Box4, LineResult } from "../types";
+import type { Box4, FindHit, LineResult } from "../types";
 
 interface Props {
   /** 已解码的原图（data URL / object URL / http URL 均可） */
@@ -9,6 +9,10 @@ interface Props {
   lines: LineResult[];
   /** 是否叠加显示检测框 */
   showBoxes: boolean;
+  /** 找图命中框（与识别框用不同颜色区分） */
+  hits?: FindHit[];
+  /** 找图命中坐标是否已经是图内坐标；`screen`/`window` 来源需要减去截图偏移 */
+  hitsOffset?: { x: number; y: number };
 }
 
 /**
@@ -17,7 +21,15 @@ interface Props {
  * 用 canvas 而不是绝对定位 div：框坐标是原图像素坐标，canvas 可以按同一比例
  * 缩放，定位天然一致；div 方案要自己算 CSS 缩放，容易在 devicePixelRatio 上跑偏。
  */
-export function ImageViewer({ src, width, height, lines, showBoxes }: Props) {
+export function ImageViewer({
+  src,
+  width,
+  height,
+  lines,
+  showBoxes,
+  hits,
+  hitsOffset,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
@@ -47,9 +59,15 @@ export function ImageViewer({ src, width, height, lines, showBoxes }: Props) {
       lines.forEach((line, i) => {
         drawBox(ctx, line.box, i + 1);
       });
+
+      const ox = hitsOffset?.x ?? 0;
+      const oy = hitsOffset?.y ?? 0;
+      (hits ?? []).forEach((h, i) => {
+        drawHit(ctx, h, i + 1, ox, oy);
+      });
     };
     img.src = src;
-  }, [src, width, height, lines, showBoxes]);
+  }, [src, width, height, lines, showBoxes, hits, hitsOffset]);
 
   if (!src) {
     return (
@@ -69,6 +87,45 @@ export function ImageViewer({ src, width, height, lines, showBoxes }: Props) {
       />
     </div>
   );
+}
+
+/** 画一个找图命中框（琥珀色）+ 序号与分数标签。 */
+function drawHit(
+  ctx: CanvasRenderingContext2D,
+  hit: FindHit,
+  index: number,
+  offsetX: number,
+  offsetY: number,
+) {
+  ctx.save();
+  const x = hit.x - offsetX;
+  const y = hit.y - offsetY;
+  const w = hit.width;
+  const h = hit.height;
+
+  ctx.fillStyle = "rgba(217, 119, 6, 0.12)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "#D97706";
+  const lw = Math.max(1.5, ctx.canvas.width / 600);
+  ctx.lineWidth = lw;
+  // 画在边框内侧，避免粗线溢出图像
+  ctx.strokeRect(x + lw / 2, y + lw / 2, Math.max(0, w - lw), Math.max(0, h - lw));
+
+  const fs = Math.max(11, ctx.canvas.width / 70);
+  ctx.font = `600 ${fs}px "MiSans", sans-serif`;
+  const label = `${index} · ${hit.score.toFixed(2)}`;
+  const tw = ctx.measureText(label).width;
+  const padX = fs * 0.35;
+  const bx = Math.max(0, Math.min(x, ctx.canvas.width - tw - 2 * padX));
+  const by = Math.max(0, y - fs - 2 * padX);
+  ctx.fillStyle = "#D97706";
+  ctx.beginPath();
+  ctx.roundRect(bx, by, tw + 2 * padX, fs + 2 * padX, 4);
+  ctx.fill();
+  ctx.fillStyle = "#FFFFFF";
+  ctx.textBaseline = "top";
+  ctx.fillText(label, bx + padX, by + padX);
+  ctx.restore();
 }
 
 /** 画一个四点框 + 序号标签。颜色用蓝色（点缀色），低透明度填充。 */

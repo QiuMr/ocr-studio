@@ -3,6 +3,7 @@ import {
   Braces,
   Clipboard,
   Copy,
+  Crosshair,
   Eye,
   EyeOff,
   FileImage,
@@ -19,10 +20,43 @@ import { Switch } from "../components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { ImageViewer } from "../components/ImageViewer";
+import { FindPanel } from "../components/FindPanel";
 import { fileToBase64, imageSize, recognize } from "../lib/api";
 import type { LineResult, RecognizeResult } from "../types";
 
 export function Playground() {
+  const [b64, setB64] = useState<string | null>(null);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <Tabs defaultValue="ocr" className="flex h-full min-h-0 flex-col gap-4">
+        <TabsList className="self-start">
+          <TabsTrigger value="ocr">
+            <ScanText />
+            文字识别
+          </TabsTrigger>
+          <TabsTrigger value="find">
+            <Crosshair />
+            找图
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="ocr" className="min-h-0 flex-1">
+          <OcrPanel onImageLoaded={setB64} />
+        </TabsContent>
+        <TabsContent value="find" className="min-h-0 flex-1">
+          <FindPanel inheritedImage={b64} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+interface OcrPanelProps {
+  /** 把载入的图同步出去，切到找图页时可直接复用 */
+  onImageLoaded: (b64: string) => void;
+}
+
+function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   const [src, setSrc] = useState<string | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [result, setResult] = useState<RecognizeResult | null>(null);
@@ -33,20 +67,24 @@ export function Playground() {
   const b64Ref = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const loadFile = useCallback(async (file: File) => {
-    try {
-      const b64 = await fileToBase64(file);
-      const url = URL.createObjectURL(file);
-      const dim = await imageSize(url);
-      b64Ref.current = b64;
-      setSrc(url);
-      setSize(dim);
-      setResult(null);
-      setError(null);
-    } catch (e) {
-      setError(`加载图片失败: ${e}`);
-    }
-  }, []);
+  const loadFile = useCallback(
+    async (file: File) => {
+      try {
+        const b64 = await fileToBase64(file);
+        const url = URL.createObjectURL(file);
+        const dim = await imageSize(url);
+        b64Ref.current = b64;
+        setSrc(url);
+        setSize(dim);
+        setResult(null);
+        setError(null);
+        onImageLoaded(b64);
+      } catch (e) {
+        setError(`加载图片失败: ${e}`);
+      }
+    },
+    [onImageLoaded],
+  );
 
   // Ctrl+V 粘贴
   useEffect(() => {

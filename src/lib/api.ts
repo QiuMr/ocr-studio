@@ -8,7 +8,19 @@
  */
 
 import { invoke, isTauri } from "./tauri";
-import type { AppConfig, Device, Health, ModelLevel, RecognizeResult } from "../types";
+import type {
+  AppConfig,
+  Device,
+  FindArgs,
+  FindResult,
+  Health,
+  ModelLevel,
+  RecognizeResult,
+  WindowInfo,
+} from "../types";
+
+/** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
+const HTTP_BASE = "http://127.0.0.1:8848";
 
 export async function getHealth(): Promise<Health> {
   return invoke<Health>("get_health");
@@ -51,7 +63,7 @@ export async function recognize(image: string, useCls: boolean): Promise<Recogni
   if (isTauri()) {
     return invoke<RecognizeResult>("ocr_recognize", { image, use_cls: useCls });
   }
-  const res = await fetch("http://127.0.0.1:8848/ocr/shibie", {
+  const res = await fetch(`${HTTP_BASE}/ocr/shibie`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image, use_cls: useCls }),
@@ -68,6 +80,63 @@ export async function recognize(image: string, useCls: boolean): Promise<Recogni
     height: d.height,
     elapsed_ms: d.elapsed_ms,
   };
+}
+
+/**
+ * 找图。
+ *
+ * Tauri 环境走 `find_image` 命令；浏览器调试时按来源映射到对应 HTTP 端点。
+ * App 内 `source != image` 时额外返回 `preview`（本次匹配实际看到的画面），
+ * 用它当背景可保证命中框与图像严格对齐。
+ */
+export async function findImage(args: FindArgs): Promise<FindResult & { preview?: string }> {
+  if (isTauri()) {
+    return invoke<FindResult & { preview?: string }>("find_image", { args });
+  }
+  const suffix = args.mode === "loose" ? "2" : "1";
+  const path =
+    args.source === "screen"
+      ? `/ocr/pingmuzhaotu${suffix}`
+      : args.source === "window"
+        ? `/ocr/jubingzhaotu${suffix}`
+        : `/ocr/tuzhaotu${suffix}`;
+  const res = await fetch(`${HTTP_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as FindResult;
+}
+
+/** 截图预览（含区域原点，用于把屏幕绝对坐标换算回图内坐标）。 */
+export interface ScreenPreview {
+  image: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 截一张屏幕预览图（PNG base64 + 区域原点），`region` 缺省为整屏。 */
+export async function screenPreview(
+  region?: [number, number, number, number],
+): Promise<ScreenPreview> {
+  if (isTauri()) {
+    return invoke<ScreenPreview>("screen_preview", { region: region ?? null });
+  }
+  throw new Error("屏幕预览只在 App 内可用（浏览器调试请用上传图片）");
+}
+
+/** 枚举可见窗口（仅 App 内可用）。 */
+export async function listWindows(): Promise<WindowInfo[]> {
+  if (isTauri()) {
+    return invoke<WindowInfo[]>("list_windows");
+  }
+  return [];
 }
 
 /** 读文件为 base64（去掉 data URL 前缀）。 */
