@@ -15,6 +15,12 @@
 - Bash 工具在本机 exit 127（MSYS coreutils 版本不匹配），**全程用 PowerShell 工具**。
 - cv2 读不了中文路径，一律 `np.frombuffer + cv2.imdecode`。
 - 写 `.ps1` 必须 UTF-8 带 BOM + CRLF（PowerShell 5.1 按 GBK 解码无 BOM 文件）。
+- **手动跑 `cargo build` 出来的 exe，必须把 `src-tauri/runtime/*.dll` 拷到 exe 旁边**，
+  否则 DirectML 不可用且**静默退回 CPU**（日志里才有 "DirectML is not supported in
+  this build of ONNX Runtime"）。打包产物由 `bundle.resources` 自动处理。
+- 起 App 做端到端验证要用 `run_in_background`；`Start-Process` 起的进程会被工具会话回收。
+- Python 访问本机服务必须绕系统代理（`build_opener(ProxyHandler({}))`），
+  否则 127.0.0.1 也走代理拿 502，会被误判成服务没起来。
 
 ## 精度基线（改动前后处理前必读）
 - 黄金基线：`models/small/reference_output.json`，由 `scripts/ref_pipeline.py` 生成。
@@ -26,6 +32,26 @@
 - **误检框的置信度是混沌的**，1-LSB 扰动能抖 0.04，**不能用误检框做精度验收**。
 - 验收时必须打**全精度**框坐标：整数取整后会掩盖亚像素差异（本轮就因此漏判过）。
 
-## 当前进度（2026-10-21）
-- Rust 推理核心完成并与 Python 基线逐位对齐；HTTP 接口层、Tauri 命令层、前端未开始。
+## 找图（模板匹配）设计要点
+- 模块 `src-tauri/src/match.rs`，因 `match` 是关键字，lib.rs 用
+  `#[path = "match.rs"] pub mod matcher;` 暴露为 `matcher`。
+- **粗筛也用 NCC，不要用 SQDIFF**：SQDIFF 的 `ΣTI` 同样要逐像素乘，
+  不比 NCC 便宜，且对亮度漂移敏感（模板 ×0.8 真位置就掉出候选，直接漏检）。
+- 金字塔 ≤4 层，`MIN_TPL_SIDE = 6`（取 6 而非 8 是为了让 64px 模板能多降一层，
+  粗扫快 11 倍）。位置精度靠逐层 ±2 精化保证。
+- 纯色模板方差为 0 时 NCC 无定义 → 返回 0 拒命中，宁可漏不可假阳。
+- 性能基线（release，1080p 全屏 + 64px 模板）：**60ms**（截图 30 + 匹配 30）。
+
+## 截图与坐标（易错，务必遵守）
+- **`GetWindowRect` 必须配 `GetWindowDC`/`PrintWindow`**（原点=窗口左上角，含边框）。
+  用 `ClientToScreen` 的客户区尺寸去配会右侧/底部缺一块。
+- `PrintWindow` 有"返回 TRUE 但全黑"的假成功，必须检测并回退 BitBlt。
+- 命中坐标换算成图内坐标的偏移只能由**后端返回**（`origin_x/origin_y`），
+  不能前端反推 —— 多显示器时虚拟屏幕原点可能是负数。
+- 跑 find 类接口时，截图必须和匹配用**同一份像素**（`find_image` 返回 `preview`），
+  否则两次截屏之间画面变了，框会画在过时背景上。
+
+## 当前进度（2026-10-21 深夜）
+- M0/M1 完成；M2 的「截图找图」完成（6 个端点 + 前端面板 + release 实测 60ms）。
+- M2 剩余：`/ocr/danzijson`（单字级 CTC 帧对齐）、日志页。
 - 详细记录见 `docs/PROGRESS.md`。
