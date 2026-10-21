@@ -87,6 +87,27 @@ export const DEFAULT_CONFIG: AppConfig = {
   template_threshold: 0.9,
 };
 
+// ---------------------------------------------------------------- 目标检测
+
+/** 单个检测目标（`/vision/detect` 与 `vision_detect` 命令共用） */
+export interface DetectHit {
+  /** 轴对齐框转四点（左上/右上/右下/左下），与文字行共用画框逻辑 */
+  box: Box4;
+  class_id: number;
+  /** labels.txt 缺失时后端回落 `class_{id}` */
+  class_name: string;
+  score: number;
+}
+
+export interface DetectResult {
+  engine: string;
+  detections: DetectHit[];
+  count: number;
+  width: number;
+  height: number;
+  elapsed_ms: number;
+}
+
 // ---------------------------------------------------------------- 找图
 
 export type FindSource = "image" | "screen" | "window";

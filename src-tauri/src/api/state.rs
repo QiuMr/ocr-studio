@@ -14,7 +14,8 @@ use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
 use crate::engine::{
-    load_engine, EngineKind, EngineSpec, RecognizeOptions, TextLine, VisionEngine,
+    load_engine, DetectOptions, Detection, EngineKind, EngineSpec, RecognizeOptions, TextLine,
+    VisionEngine, VisionError,
 };
 use crate::ocr::{
     engine_from_dir_with, Device, HealthInfo, LineDetail, ModelLevel, OcrEngine,
@@ -110,11 +111,25 @@ fn alt_spec_of(opts: &OcrOptions) -> Result<Option<EngineSpec>, ApiError> {
     let Some(raw) = opts.engine.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let spec = EngineSpec::parse(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let spec = EngineSpec::parse(raw).map_err(|e| match e {
+        VisionError::UnknownEngine(m) => ApiError::UnknownEngine(m),
+        other => ApiError::BadRequest(other.to_string()),
+    })?;
     if matches!(spec.kind, EngineKind::PpOcr) {
         return Ok(None);
     }
     Ok(Some(spec))
+}
+
+/// 把引擎层错误映射成 API 错误（`Unsupported`/`UnknownEngine` 带专用 code）。
+fn map_engine_err(e: VisionError) -> ApiError {
+    match e {
+        VisionError::Unsupported { capability, .. } => {
+            ApiError::Unsupported(format!("该引擎不支持 {capability}"))
+        }
+        VisionError::UnknownEngine(m) => ApiError::UnknownEngine(m),
+        other => ApiError::Internal(other.to_string()),
+    }
 }
 
 /// HTTP 服务共享状态。
@@ -345,6 +360,47 @@ impl AppState {
         guard
             .as_ref()
             .map(|a| (a.spec.clone(), a.engine.status().actual_device))
+    }
+
+    /// 通用目标检测入口（`/vision/detect`）。
+    ///
+    /// 引擎能力差异由 trait 默认实现兜底：OCR 类引擎返回 `Unsupported`（code 1002），
+    /// 这里不做提前判断——`capabilities()` 才是给前端看的，路由层保持薄。
+    pub async fn detect_objects(
+        self: &Arc<Self>,
+        opts: &OcrOptions,
+        img: image::DynamicImage,
+        detect: DetectOptions,
+    ) -> Result<Vec<Detection>, ApiError> {
+        match alt_spec_of(opts)? {
+            None => {
+                self.ensure_engine(opts).await?;
+                let st = Arc::clone(self);
+                tokio::task::spawn_blocking(move || {
+                    let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let eng = guard
+                        .as_mut()
+                        .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+                    eng.detect(&img, &detect).map_err(map_engine_err)
+                })
+                .await
+                .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?
+            }
+            Some(spec) => {
+                let dev = opts.device.as_deref().and_then(parse_device);
+                self.ensure_alt_engine(spec, dev).await?;
+                let st = Arc::clone(self);
+                tokio::task::spawn_blocking(move || {
+                    let mut guard = st.alt.lock().unwrap_or_else(|e| e.into_inner());
+                    let alt = guard
+                        .as_mut()
+                        .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+                    alt.engine.detect(&img, &detect).map_err(map_engine_err)
+                })
+                .await
+                .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?
+            }
+        }
     }
 
     /// 按 spec 立即加载额外引擎（Tauri 命令用，不经过请求参数）。

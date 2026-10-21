@@ -231,6 +231,7 @@ pub fn run() {
             ui_ready,
             commands::ocr_recognize,
             commands::ocr_danzijson,
+            commands::vision_detect,
             commands::get_health,
             commands::list_engines,
             commands::get_config,

@@ -4,7 +4,7 @@
 > 抽象层 `src-tauri/src/engine/{mod.rs,catalog.rs,ddddocr.rs}`，
 > `OcrEngine` 与 `DdddOcrEngine` 都实现了 `VisionEngine`，`/engine/list`、
 > `list_engines`、以及 `/ocr/*` 的 `engine` 字段全部接通。
-> M3.2（YOLO 检测）待落，目录约定与能力声明已就位。
+> M3.0 / M3.1 / M3.2 已完成（DDDDOCR、YOLO 检测均已实测落地）。
 > 目的：在不破坏现有 PP-OCR 精度基线的前提下，为后续接入 DDDDOCR 与各版本 YOLO 留好位置。
 > 时间：2026-10-22
 
@@ -152,7 +152,7 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `cla
 |---|---|---|
 | M3.0 ✅ | 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` | 8 个新用例全绿；48 通过 / 1 忽略；推理路径零改动 |
 | M3.1 ✅ | `ddddocr` 引擎（common / old）+ 共享 PP-OCR det + `/ocr/*` 的 `engine` 字段 | 见 6.1 的实测验收（7 行逐字与官方 Python 完全一致） |
-| M3.2 | YOLO 通用检测（v8 优先，导出 ONNX opset 12+） | NMS 后处理与 ultralytics 对齐，IoU/置信度逐框比对 |
+| M3.2 ✅ | YOLO 通用检测（v8 优先，导出 ONNX opset 12+） | 与 ultralytics 逐框比对：8/8 框 IoU=1.0000、conf 差=0.0000（见 6.2） |
 | M3.3 | `/vision/pipeline` 串联 | 复杂版面（表格、多列）上比纯 PP-OCR 明显更准 |
 
 M3.0 顺带完成的部分：`catalog::discover()` 9 个候选引擎（ppocr×3 + ddddocr×2 + yolo×4）
@@ -211,6 +211,47 @@ ddddocr 自带 `common_det.onnx` 是 **YOLOX 目标检测**（416×416、strides
 
 结论：**ddddocr 定位为「验证码 / 短英文数字」引擎，长文本仍然用 PP-OCR**。
 这不是工程问题，是训练分布决定的（它的字典与模型都是为短串设计的）。
+
+
+### 6.2 M3.2 实现实录（yolov8n，全部实测，别再凭源码猜）
+
+**模型获取**：`scripts/fetch_yolo.ps1` = 下载官方 yolov8n.pt → ultralytics 导出
+ONNX（`opset=12, imgsz=640, dynamic=False, simplify=True`）→ 重命名 `model.onnx`，
+**labels.txt 从权重元数据同源生成**（COCO 80 类），不手工维护。前提是本机 Python
+装了 ultralytics（含 torch CPU）。
+
+**预处理必须逐条复刻 ultralytics 的 LetterBox（auto=False, center=True）**：
+
+1. `scale = min(640/w, 640/h)`；`new = round(w*scale), round(h*scale)`——
+   Python 的 `round()` 是**银行家舍入**，Rust 要用 `round_ties_even()`，
+   `f64::round()` 会在 .5 边界差一个像素；
+2. 缩放用 `cv2.resize(INTER_LINEAR)`——直接复用 `ocr::preprocess::resize_bilinear`
+   （PP-OCR 精度基线验证过的 OpenCV 11bit 定点逐位复刻）；
+3. 填充值按 `YoloVersion::pad_value()`（v8=114），上下 `round(dh±0.1)` 均分；
+4. 输入 RGB `/255`（ultralytics 是 BGR 读入、letterbox 后 `[...,::-1]` 转 RGB，等效）。
+
+**后处理**：v8 输出 `[1, 4+C, 8400]`（导出图已带 sigmoid，值就是概率，不要再次
+sigmoid）；conf 过滤 0.25 → 按 conf 降序（**稳定排序**，并列时先出现者先，与
+torchvision 一致）→ 同类内贪心抑制 IoU 0.7（ultralytics 的「类别 × 7680 坐标偏移
++ torchvision NMS」与同类贪心等价）→ max_det 300 → **先 NMS 后还原原图坐标**
+（除 scale、减 pad），最后 clip 到闭区间 `[0,w]×[0,h]`（不是 w-1）。
+
+**验收方法（重要）**：`tests/yolo_parity.rs` + `scripts/ref_yolo.py`，参考值用
+ultralytics 跑**同一份导出的 onnx**（不是 .pt），差异才纯粹是我们的代码。
+**测试图必须用 PNG**：第一版用官方 bus.jpg 逐框比对，IoU 只有 0.97~0.999、
+conf 差 0.001~0.011，一度以为是 NMS/还原坐标写错；实际是 **JPEG 解码器差异**
+（cv2 与 image crate 的 IDCT 有 ±1 抖动）经回归放大。转 PNG 后 8/8 框
+IoU=1.0000、conf 差=0.0000，证明整条链路（letterbox/解码/NMS/坐标还原）与
+ultralytics 逐位一致。真实场景的 jpg 输入自带这点解码噪声，属正常现象。
+
+**v5/v7**：`decode()` 的 `[1,N,5+C]` obj×cls 路径已实现并有合成张量单测，
+但**没有真模型实测**——哪天拿到 v5/v7 的 onnx，先跑一遍 parity 再宣布可用。
+
+**本机环境坑（复现时必看）**：本机装的是 `onnxruntime-directml`，而 ultralytics
+按发行版名找 `onnxruntime`，找不到就**自动用 uv 装最新版**——装到一半 dll 被锁
+失败，把新版 wrapper 盖在旧版 native 上（症状：`InferenceSession` 没有
+`is_webgpu_graph_capture_enabled` 属性，且每次跑都重新破坏）。已改为安装
+`onnxruntime==1.24.3`（CPU 版）根治；代价是 RapidOCR 这类本机脚本退回 CPU 推理。
 
 
 ### YOLO 的已知坑（提前记）

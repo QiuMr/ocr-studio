@@ -13,6 +13,7 @@
 pnpm install
 powershell -File scripts\fetch_models.ps1            # PP-OCR 三档模型（默认只下 small）
 powershell -File scripts\fetch_ddddocr.ps1           # 可选：DDDDOCR 识别模型（54MB）
+powershell -File scripts\fetch_yolo.ps1              # 可选：YOLO v8 检测模型（约 19MB，需本机装 ultralytics）
 pnpm build                       # 前端（tsc --noEmit + vite build）
 cd src-tauri
 cargo build --release            # exe 在 $CARGO_TARGET_DIR/release（本机为 D:\rust-target）
@@ -43,8 +44,8 @@ models/                  模型（缺了会提示「引擎未加载」）
 > 单独把 exe 拷给别人是跑不起来的：缺 `DirectML.dll` 会起不来，
 > 缺 `onnxruntime.dll` 会静默退回 CPU。务必整包分发。
 >
-> `models/ocr/ddddocr/` 占 54MB，只用 PP-OCR 的话可以整目录删掉，
-> 引擎列表里会显示「未安装」，其余功能不受影响。
+> `models/ocr/ddddocr/` 占 54MB、`models/detect/yolo/` 占约 19MB，只用 PP-OCR 的话
+> 可以整目录删掉，引擎列表里会显示「未安装」，其余功能不受影响。
 
 ### 前端改动不生效？
 
@@ -76,6 +77,7 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/tuzhaotu1\|2` | 在**上传的图**里找图（1=精准 ≥0.92，2=容错 ≥0.72） |
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
+| `POST /vision/detect` | **通用目标检测**（`engine: "yolo:v8"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
 
 请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`）。
@@ -93,7 +95,11 @@ models/                  模型（缺了会提示「引擎未加载」）
 | 不传 / `ppocr:*` | PP-OCR（默认）。成段文字、扫描件、截图用这个 |
 | `ddddocr:common` | DDDDOCR 54MB 版。验证码、短英文数字更快，长文本会丢空格与标点 |
 | `ddddocr:old` | DDDDOCR 13.6MB 版。同上，精度略低但体积小 |
-| `yolo:v*` | 尚未实现（M3.2），会明确报错而不是静默降级 |
+| `yolo:v8` | YOLOv8n 目标检测（COCO 80 类）。**只能配 `POST /vision/detect` 用**，不能做文字识别 |
+
+`/vision/detect` 额外接受 `conf`（置信度下限，默认 0.25）、`iou`（NMS 阈值，默认 0.7）、
+`class_filter`（类别 id 数组，缺省全部）。后处理与 ultralytics 逐框对齐
+（实测 IoU=1.0 / conf 差=0，见 docs/ENGINES.md 6.2）。
 
 DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文档很差），
 行检测**复用 PP-OCR 的 det 模型**，所以用 ddddocr 时 `models/small/det.onnx` 必须在。
@@ -101,10 +107,11 @@ DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文
 ## 验证
 
 ```powershell
-cargo test                    # 55 个单元测试
-cargo test -- --ignored       # 18 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr 跨语言对齐
+cargo test                    # 63 个单元测试
+cargo test -- --ignored       # 21 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
+python scripts/ref_yolo.py models/detect/yolo/v8/model.onnx assets/bus.png out.json   # yolo 官方实现参照
 python scripts/ref_ddddocr.py --image models/small/dump/box_0_src.png   # ddddocr 官方实现参照
 ```
 

@@ -11,6 +11,7 @@ import { invoke, isTauri } from "./tauri";
 import type {
   AppConfig,
   DanziResult,
+  DetectResult,
   Device,
   EngineList,
   FindArgs,
@@ -134,6 +135,43 @@ export async function recognizeChars(
     throw new Error(json.msg || `HTTP ${res.status}`);
   }
   return json.data as DanziResult;
+}
+
+/**
+ * 通用目标检测（`yolo:v8` 等检测引擎）。
+ *
+ * 只有 `capabilities.detect === true` 的引擎能走这条；OCR 引擎会收到
+ * code 1002（不支持该能力）。
+ */
+export async function detectImage(
+  image: string,
+  engine?: string,
+  opts?: { conf?: number; iou?: number },
+): Promise<DetectResult> {
+  if (isTauri()) {
+    return invoke<DetectResult>("vision_detect", {
+      image,
+      engine: engine || null,
+      conf: opts?.conf ?? null,
+      iou: opts?.iou ?? null,
+      class_filter: null,
+    });
+  }
+  const res = await fetch(`${HTTP_BASE}/vision/detect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image,
+      ...(engine ? { engine } : {}),
+      ...(opts?.conf != null ? { conf: opts.conf } : {}),
+      ...(opts?.iou != null ? { iou: opts.iou } : {}),
+    }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as DetectResult;
 }
 
 /**

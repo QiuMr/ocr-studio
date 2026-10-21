@@ -62,6 +62,9 @@ pub async fn ocr_recognize(
         use_cls,
         engine,
         keyword: None,
+        conf: None,
+        iou: None,
+        class_filter: None,
     };
     let boxes = state
         .recognize_lines(&opts, img)
@@ -92,6 +95,98 @@ pub async fn ocr_recognize(
     Ok(RecognizeOut {
         text,
         lines,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
+}
+
+// ---------------------------------------------------------------- 目标检测
+
+/// 单条检测（前端测试台「目标检测」视图用）。
+#[derive(Debug, Serialize)]
+pub struct DetectHitOut {
+    pub r#box: [[f64; 2]; 4],
+    pub class_id: usize,
+    pub class_name: String,
+    pub score: f64,
+}
+
+/// 检测结果（与 HTTP `/vision/detect` 结构一致）。
+#[derive(Debug, Serialize)]
+pub struct DetectOut {
+    pub engine: String,
+    pub detections: Vec<DetectHitOut>,
+    pub count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// 通用目标检测：前端测试台走这条（少一跳 base64）。
+#[tauri::command]
+pub async fn vision_detect(
+    state: State<'_, Arc<AppState>>,
+    image: String,
+    engine: Option<String>,
+    conf: Option<f32>,
+    iou: Option<f32>,
+    class_filter: Option<Vec<usize>>,
+) -> Result<DetectOut, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?;
+    let (w, h) = (img.width(), img.height());
+
+    let engine_label = engine
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let level = state
+                .cfg
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .level;
+            crate::engine::EngineSpec::ppocr(level).key()
+        });
+
+    let opts = OcrOptions {
+        image,
+        level: None,
+        device: None,
+        use_cls: None,
+        engine,
+        keyword: None,
+        conf,
+        iou,
+        class_filter,
+    };
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: opts.conf.unwrap_or(0.25),
+        iou_thresh: opts.iou.unwrap_or(0.7),
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+    let dets = state
+        .detect_objects(&opts, img, detect)
+        .await
+        .map_err(|e| e.message())?;
+
+    let detections: Vec<DetectHitOut> = dets
+        .iter()
+        .map(|d| DetectHitOut {
+            r#box: box4(&d.points),
+            class_id: d.class_id,
+            class_name: d.class_name.clone(),
+            score: d.score,
+        })
+        .collect();
+
+    Ok(DetectOut {
+        engine: engine_label,
+        count: detections.len(),
+        detections,
         width: w,
         height: h,
         elapsed_ms: t0.elapsed().as_millis(),
@@ -159,6 +254,9 @@ pub async fn ocr_danzijson(
         use_cls,
         engine,
         keyword: None,
+        conf: None,
+        iou: None,
+        class_filter: None,
     };
     let details = state
         .recognize_details(&opts, img)

@@ -19,6 +19,7 @@
 
 pub mod catalog;
 pub mod ddddocr;
+pub mod yolo;
 
 use std::fmt;
 use std::path::Path;
@@ -461,13 +462,14 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<OcrEngine>();
     assert_send::<ddddocr::DdddOcrEngine>();
+    assert_send::<yolo::YoloEngine>();
 };
 
 /// 按 [`EngineSpec`] 加载引擎。
 ///
 /// - `ppocr:*` 走既有的 [`OcrEngine::load`]，**一个字节都没改**，精度基线不受影响；
 /// - `ddddocr:*` 走 [`ddddocr::DdddOcrEngine`]，行检测借 `default_level` 档的 PP-OCR det；
-/// - `yolo:*` 在 M3.2 之前直接报「未实现」，而不是返回一个能构造但跑不了的壳。
+/// - `yolo:*` 走 [`yolo::YoloEngine`]，检测能力经 `/vision/detect` 暴露。
 ///
 /// 返回 `Box<dyn VisionEngine>` 而不是枚举：新增引擎时只需加一个分支，
 /// 调用方（状态层 / 路由）不用改 match。
@@ -505,11 +507,7 @@ pub fn load_engine(
                 device,
             )?))
         }
-        // 不返回假的实现体：前端会通过 /engine/list 看到 available=false
-        EngineKind::Yolo(v) => Err(VisionError::NotReady(format!(
-            "{} 检测引擎尚未实现（见 docs/ENGINES.md 的 M3.2）",
-            v.as_str()
-        ))),
+        EngineKind::Yolo(v) => Ok(Box::new(yolo::engine_from_root(models_root, *v, device)?)),
     }
 }
 

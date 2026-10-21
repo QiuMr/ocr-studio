@@ -22,8 +22,9 @@ use image::{DynamicImage, RgbImage};
 
 use super::dto::{
     decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
-    DanziLineDto, DuohangData, FindData, FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions,
-    ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, EngineItemDto, EngineListData,
+    DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData, FindHitDto, FindOptions,
+    HealthDto, LineDto, OcrOptions, ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, EngineItemDto,
+    EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -102,6 +103,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         .route("/ocr/pingmuzhaotu2", post(pingmuzhaotu2))
         .route("/ocr/health", get(health))
         .route("/engine/list", get(engine_list))
+        .route("/vision/detect", post(vision_detect))
 }
 
 // ---------------------------------------------------------------- 入参解析
@@ -178,8 +180,23 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
         use_cls: fields.get("use_cls").and_then(|s| s.parse().ok()),
         engine: fields.get("engine").cloned(),
         keyword: fields.get("keyword").cloned(),
+        conf: fields.get("conf").and_then(|s| s.trim().parse().ok()),
+        iou: fields.get("iou").and_then(|s| s.trim().parse().ok()),
+        class_filter: fields
+            .get("class_filter")
+            .and_then(|s| parse_id_list(s)),
     };
     Ok((img, opts))
+}
+
+/// multipart 里 `class_filter` 写成逗号分隔的 id 列表（如 `0,5,7`）。
+fn parse_id_list(s: &str) -> Option<Vec<usize>> {
+    let ids: Vec<usize> = s
+        .split(',')
+        .map(|p| p.trim().parse::<usize>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    Some(ids)
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -388,6 +405,80 @@ async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
         models_root: state.models_root.display().to_string(),
         default_engine: crate::engine::EngineSpec::ppocr(cfg.level).key(),
         engines: engines.iter().map(EngineItemDto::from).collect(),
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------- 目标检测
+
+/// POST /vision/detect —— 通用目标检测（当前 `yolo:v8`）。
+///
+/// 与 `/ocr/*` 共用引擎槽：OCR 引擎没有检测能力，会返回 code 1002；
+/// `engine` 参数缺省时按 PP-OCR 处理（同样 1002），想检测必须显式写
+/// `engine: "yolo:v8"`。
+async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+
+    // 阈值合法性：NaN/负数直接 400，超 1 的 conf/iou 没有意义也拦下
+    let conf = opts.conf.unwrap_or(0.25);
+    let iou = opts.iou.unwrap_or(0.7);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return ApiError::BadRequest(format!("conf 必须在 0..1，收到 {conf}")).into_response();
+    }
+    if !iou.is_finite() || !(0.0..=1.0).contains(&iou) {
+        return ApiError::BadRequest(format!("iou 必须在 0..1，收到 {iou}")).into_response();
+    }
+
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        iou_thresh: iou,
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+    // 出参里的 engine 标识：请求带了就原样回，缺省按当前配置的 PP-OCR 档位
+    let engine_label = match opts.engine.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(e) => e.to_string(),
+        None => {
+            let level = state
+                .cfg
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .level;
+            crate::engine::EngineSpec::ppocr(level).key()
+        }
+    };
+
+    let dets = match state.detect_objects(&opts, img, detect).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let detections: Vec<DetectHitDto> = dets
+        .iter()
+        .map(|d| DetectHitDto {
+            r#box: [
+                [d.points[0].0, d.points[0].1],
+                [d.points[1].0, d.points[1].1],
+                [d.points[2].0, d.points[2].1],
+                [d.points[3].0, d.points[3].1],
+            ],
+            class_id: d.class_id,
+            class_name: d.class_name.clone(),
+            score: d.score,
+        })
+        .collect();
+
+    Json(ApiResp::ok(DetectData {
+        engine: engine_label,
+        count: detections.len(),
+        detections,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
     }))
     .into_response()
 }

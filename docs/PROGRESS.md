@@ -1,33 +1,47 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（M3.1 DDDDOCR 引擎落地）
+> 最后更新：2026-10-22（M3.2 YOLO 检测引擎落地）
 
 ---
 
 ## 0. 一句话现状
 
-**M3.1 完成**：DDDDOCR（common / old）作为第二种真实可跑的引擎接入完毕——
-`ddddocr` 单行分类器 + **共享 PP-OCR det** 做行检测，`/ocr/*` 与 Tauri 命令都能用
-`engine=ddddocr:common` 切换，前端测试台出现引擎下拉。
-55 单测 + 18 重量级（含精度基线 / 真实截图 / 逐字对齐 / **新增 ddddocr 跨语言对齐**）全绿，
-PP-OCR 精度**零变化**（`pipeline_match` 仍然逐字全对）。
+**M3.2 完成**：YOLO v8 通用目标检测接入完毕——`models/detect/yolo/v8/model.onnx`
+（官方权重 opset12 导出，`scripts/fetch_yolo.ps1` 一键复现），`POST /vision/detect`
++ Tauri `vision_detect` 命令，测试台出现「目标检测」形态（类别徽章 + 置信度列表，
+检测模式下方向分类开关自动隐藏）。
+**与本机 ultralytics 逐框比对：8/8 框 IoU=1.0000、置信度差=0.0000**（letterbox
+复用 cv2 逐位 resize + Python 银行家舍入复刻 + class-aware 贪心 NMS）。
+63 单测 + 21 重量级全绿，PP-OCR 精度**零变化**（`pipeline_match` 仍然逐字全对）。
 
-M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）与 M3.0 抽象层均已完成。
+M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）、M3.0 抽象层、
+M3.1 DDDDOCR 均已完成。
 
 **分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
 `tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
 `exe + runtime/*.dll + models/ + 使用说明.txt` 的压缩包。**单独拷 exe 是跑不起来的**
 （缺 onnxruntime.dll 会静默退回 CPU，缺 DirectML.dll 直接起不来），这一点已写进分发说明。
-加了 ddddocr common（54MB）后压缩包约 100MB 量级，分发说明里要写清「不要这 54MB
-可以删 `models/ocr/ddddocr/`，PP-OCR 仍然可用」。
+不需要的模型可删目录减体积：`models/ocr/ddddocr/`（54MB）、`models/detect/yolo/`（约 19MB）。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
-M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）。
+M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）、
+M3.2（YOLO 检测）。
 
-下一步：M3.2（YOLO 检测，`/vision/detect`），设计见 `docs/ENGINES.md`。
+下一步：M3.3（`/vision/pipeline` 检测+识别串联），设计见 `docs/ENGINES.md`。
 
-### 0.0 本轮（M3.1 DDDDOCR）做了什么
+### 0.0 本轮（M3.2 YOLO 检测）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 模型 | `scripts/fetch_yolo.ps1`：官方 yolov8n.pt → ultralytics 导出 ONNX（opset12/640/simplify）→ 重命名 model.onnx，**labels.txt 从权重元数据同源生成**（80 类），已实测跑通 |
+| 引擎实现 | 新增 `src-tauri/src/engine/yolo.rs`：letterbox（114 填充、`round_ties_even` 复刻 Python `round()`、缩放复用 cv2 逐位复刻的 `resize_bilinear`）、RGB `/255`、v8 `[1,4+C,N]` 转置解码（v5/v7 的 `[1,N,5+C]` obj×cls 路径也写了，**未实测——缺模型**）、class-aware 贪心 NMS（conf 0.25/iou 0.7/max_det 300，与 ultralytics 默认一致） |
+| 接口 | 新增 `POST /vision/detect`（`conf`/`iou`/`class_filter` 可选参数）与 Tauri `vision_detect` 命令；`OcrOptions` 增检测三字段；错误码落地 ENGINES.md 4.3：**1002 引擎不支持该能力 / 1003 未知引擎**（实测：PP-OCR 打 detect 得 1002，`engine=yolo` 缺版本得 1003） |
+| 前端 | 测试台按能力切换形态：选检测引擎后「开始识别」走检测，右侧是「检测结果」列表（类别 id 徽章按类别着色 + 置信度 + 坐标），图上框文字显示「类别 + 置信度%」，方向分类开关隐藏；api 层新增 `detectImage()`（Tauri/HTTP 双通道） |
+| 对齐验证 | 新增 `tests/yolo_parity.rs` + `scripts/ref_yolo.py`（ultralytics 跑同一份 onnx 出参考 JSON）。**关键结论：测试图必须用 PNG**——JPEG 各家解码器有 ±1 的 IDCT 抖动，会把置信度推动 0.001~0.01、大框 IoU 压到 0.97，全是解码器噪声；换 PNG 后 IoU/conf 全部归零，证明我们的链路与 ultralytics 逐位一致 |
+| UI 验收 | 无人值守实测：贴 bus.png → 选 YOLO → 开始识别，「5 目标 · 713ms」，5 框与参考 JSON 完全一致 |
+
+### 0.0.1 上轮（M3.1 DDDDOCR）做了什么
 
 | 项 | 结果 |
 |---|---|

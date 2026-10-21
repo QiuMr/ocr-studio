@@ -71,6 +71,15 @@ pub struct OcrOptions {
     /// 找字关键词：普通子串，或 `/正则/` 形式
     #[serde(default)]
     pub keyword: Option<String>,
+    /// 目标检测置信度下限（仅 `/vision/detect`）。缺省 0.25（ultralytics 默认）
+    #[serde(default)]
+    pub conf: Option<f32>,
+    /// NMS IoU 阈值（仅 `/vision/detect`）。缺省 0.7
+    #[serde(default)]
+    pub iou: Option<f32>,
+    /// 只保留这些 class_id（仅 `/vision/detect`）。空/缺省 = 全部
+    #[serde(default)]
+    pub class_filter: Option<Vec<usize>>,
 }
 
 /// 四点框（原图坐标，顺序 左上/右上/右下/左下）。
@@ -240,6 +249,29 @@ pub struct FindData {
     pub elapsed_ms: u128,
 }
 
+/// `/vision/detect` 的单条检测结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectHitDto {
+    /// 轴对齐框转四点（左上/右上/右下/左下），前端只写一套画框逻辑
+    pub r#box: Box4,
+    pub class_id: usize,
+    /// labels.txt 缺失时回落 `class_{id}`
+    pub class_name: String,
+    pub score: f64,
+}
+
+/// `/vision/detect` 出参。
+#[derive(Debug, Serialize)]
+pub struct DetectData {
+    /// 实际使用的引擎（缺省请求 = 当前 PP-OCR，检测只会失败，这里回请求值）
+    pub engine: String,
+    pub detections: Vec<DetectHitDto>,
+    pub count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
 /// `/ocr/health` 出参。
 #[derive(Debug, Serialize)]
 pub struct HealthDto {
@@ -361,6 +393,11 @@ pub enum ApiError {
     BadRequest(String),
     /// 引擎未加载：模型文件缺失或加载失败
     EngineNotReady(String),
+    /// 引擎不支持该能力（code 1002，见 docs/ENGINES.md 4.3）。
+    /// 调用方本应先看 `/engine/list` 的 capabilities，走到这里说明漏判了。
+    Unsupported(String),
+    /// 未知引擎名（code 1003）
+    UnknownEngine(String),
     /// 内部错误（推理失败等）
     Internal(String),
     /// 已规划但尚未实现
@@ -372,6 +409,8 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => CODE_BAD_REQUEST,
             ApiError::EngineNotReady(_) => CODE_ENGINE_NOT_READY,
+            ApiError::Unsupported(_) => 1002,
+            ApiError::UnknownEngine(_) => 1003,
             ApiError::Internal(_) => 500,
             ApiError::NotImplemented(_) => CODE_NOT_IMPLEMENTED,
         }
@@ -381,6 +420,8 @@ impl ApiError {
         match self {
             ApiError::BadRequest(m)
             | ApiError::EngineNotReady(m)
+            | ApiError::Unsupported(m)
+            | ApiError::UnknownEngine(m)
             | ApiError::Internal(m)
             | ApiError::NotImplemented(m) => m.clone(),
         }
@@ -399,7 +440,9 @@ impl From<ApiError> for Response {
     fn from(e: ApiError) -> Self {
         use axum::http::StatusCode;
         let status = match &e {
-            ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::BadRequest(_)
+            | ApiError::Unsupported(_)
+            | ApiError::UnknownEngine(_) => StatusCode::BAD_REQUEST,
             ApiError::EngineNotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
