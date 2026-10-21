@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LayoutDashboard, ScanText, Settings as SettingsIcon, Square } from "lucide-react";
 import { TitleBar } from "./components/TitleBar";
 import { Button } from "./components/ui/button";
@@ -7,7 +7,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Playground } from "./pages/Playground";
 import { SettingsPage } from "./pages/SettingsPage";
 import { cn } from "./lib/utils";
-import { isTauri } from "./lib/tauri";
+import { invoke, isTauri } from "./lib/tauri";
 
 type PageKey = "dashboard" | "playground" | "settings";
 
@@ -19,6 +19,15 @@ const NAV: { key: PageKey; label: string; icon: React.ReactNode }[] = [
 
 export default function App() {
   const [page, setPage] = useState<PageKey>("dashboard");
+
+  // 报到：告诉后端「界面已经渲染出来了」。
+  // 后端有个看门狗在等这个信号——WebView2 的 GPU 进程崩溃时 JS 根本不会执行，
+  // 收不到报到就自动切软件合成重建窗口（见 src-tauri/src/lib.rs）。
+  useEffect(() => {
+    void invoke("ui_ready").catch(() => {
+      /* 浏览器预览模式下没有这个命令，忽略 */
+    });
+  }, []);
 
   return (
     <TooltipProvider delayDuration={300}>

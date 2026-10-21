@@ -40,6 +40,8 @@ export interface AppConfig {
   device: Device;
   port: number;
   template_threshold: number;
+  /** 兼容渲染（软件合成）。由后端维护：WebView 白屏时自动置位，前端只读 */
+  webview_compat?: boolean;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {

@@ -1,11 +1,15 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-21（晚，M2 找图完成）
+> 最后更新：2026-10-21（深夜，界面白屏问题修复并实测通过）
 
 ---
 
 ## 0. 一句话现状
+
+**界面白屏已修复并实测通过**：`cargo build` 出来的 exe 会去连 `http://localhost:1420`
+（开发服务器）而不是加载内嵌前端，原因是 `tauri` 没开 `custom-protocol` feature。
+补齐后 release exe 双击即可正常显示仪表盘（引擎运行中 / DirectML / 字典 18708 / HTTP 8848）。
 
 **M2 找图部分已完成**：截图（屏幕 / 窗口）+ 模板匹配引擎落地，7 个找图端点全部实现，
 Playground 增加找图面板；**真实屏幕自匹配实测 score=1.0、坐标零误差**。
@@ -14,6 +18,47 @@ Playground 增加找图面板；**真实屏幕自匹配实测 score=1.0、坐标
 M2-找图（截图 + 模板匹配 + 7 端点 + 前端面板）。
 
 M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页。前端技术栈见第 7 节。
+
+### 0.1 白屏问题的完整结论（2026-10-21 深夜，排了三小时）
+
+现象：双击 exe，窗口一片白，什么也没有；偶尔弹出
+`msedgewebview2 has stopped working / Error launching CrashSender.exe`。
+
+查证顺序与结论：
+
+1. 前端本身没问题——同一份 `dist` 用本机 Edge 无头加载，仪表盘渲染完整。
+2. App 进程下 **0 个 WebView2 子进程**，窗口是「有窗无视图」。
+3. Chromium 日志（需从代码里传 `--enable-logging`，wry 会覆盖
+   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`）暴露两条真相：
+   - `FATAL:gpu_data_manager_impl_private.cc:408] GPU process isn't usable. Goodbye.`
+     —— GPU 进程启动即崩（`exit_code=7`），Chromium 判定 GPU 不可用后**终止浏览器进程**；
+   - 窗口实际在访问 `http://localhost:1420`（`ERR_CONNECTION_REFUSED`）。
+4. **根因**：`tauri = { features = [] }` 少了 `custom-protocol`。
+   这个 feature 决定 `generate_context!` 是否把 `frontendDist` 嵌进二进制，
+   不开的话**连 `--release` 也按开发模式加载 `build.devUrl`**。
+   官方 `pnpm tauri build` 会自动带上，裸 `cargo build` 不会 —— 属于典型陷阱。
+5. GPU 崩溃与我们的代码无关：同一 exe 由资源管理器启动（干净环境）时 GPU 正常、
+   界面正常；在本项目的 agent shell 里启动才必崩（该 shell 环境会让 WebView2 的
+   GPU 子进程起不来）。仍加了自动兜底，见下。
+
+修复内容：
+
+| 改动 | 说明 |
+|---|---|
+| `Cargo.toml` | `tauri` 打开 `custom-protocol`（否则 exe 永远白屏） |
+| `lib.rs` 主窗口改为运行时创建 | 只有运行时建窗才能从代码里传 `additional_browser_args`；`tauri.conf.json` 的 `windows` 留空 |
+| 白屏看门狗 | 前端挂载后 `invoke("ui_ready")`；后端 10 秒没收到就判定 WebView 已死，销毁并用 `--disable-gpu-compositing` 重建，并写 `webview_compat=true` 到配置，下次直接走兼容模式 |
+| 建窗失败重试 | 建窗直接报错时先用兼容参数重试一次，避免「没有窗口 → 事件循环立刻退出」 |
+| 文件日志 | release 是 GUI 子系统没有控制台，现在日志落 `<数据目录>/ocr-studio.log`（超 8MB 自动重置），白屏类问题有据可查 |
+| 诊断开关 | `OCR_NO_CORE=1` 跳过引擎+HTTP；`OCR_WEBVIEW_ARGS=...` 直接指定 WebView2 参数 |
+
+配套脚本（都可复跑）：`scripts/shot_window.py`（按窗口标题截图并统计非白/暗像素比例，
+用于无 GUI 会话时肉眼验收）、`scripts/cdp_probe.py`（WebView2 远程调试端口探页面状态）、
+`scripts/minidump_info.py`（零依赖解析 Crashpad 转储，定位崩溃模块）、
+`scripts/check_embedded_assets.py`（查 exe 是否嵌入前端资源）。
+
+实测：由资源管理器启动 `D:\rust-target\release\ocr-studio.exe`，
+窗口 1116×729，仪表盘正常显示「引擎状态 运行中 / DirectML(GPU) / 字典 18708 / 端口 8848」。
 
 ---
 

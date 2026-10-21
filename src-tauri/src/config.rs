@@ -66,6 +66,14 @@ pub struct AppConfig {
     pub device: Device,
     pub port: u16,
     pub template_threshold: f32,
+    /// 兼容渲染模式：给 WebView2 加 `--disable-gpu-compositing`。
+    ///
+    /// 部分机器（典型是较老的 AMD/Intel 核显驱动）上 WebView2 的 GPU 进程会
+    /// 启动即崩，Chromium 判定 "GPU process isn't usable" 后直接终止浏览器进程，
+    /// 表现为**白窗 + msedgewebview2 has stopped working**。开启本项改走软件
+    /// 合成，界面恢复正常（OCR 推理不受影响，仍在 DirectML/CPU 上跑）。
+    /// 首次崩溃后会自动置为 true 并持久化，无需用户手动处理。
+    pub webview_compat: bool,
 }
 
 impl Default for AppConfig {
@@ -75,6 +83,7 @@ impl Default for AppConfig {
             device: Device::default(),
             port: 8848,
             template_threshold: 0.9,
+            webview_compat: false,
         }
     }
 }

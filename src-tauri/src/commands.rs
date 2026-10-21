@@ -146,11 +146,17 @@ pub fn get_config(state: State<'_, Arc<AppState>>) -> AppConfig {
 #[tauri::command]
 pub async fn save_config(
     state: State<'_, Arc<AppState>>,
-    cfg: AppConfig,
+    mut cfg: AppConfig,
 ) -> Result<AppConfig, String> {
     if cfg.port == 0 {
         return err("端口不能为 0".to_string());
     }
+    // webview_compat 由后端自己维护（白屏看门狗自动置位），前端不感知也不该覆盖它
+    cfg.webview_compat = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .webview_compat;
     cfg.save(&state.data_dir).map_err(|e| format!("保存配置失败: {e}"))?;
 
     let old = state

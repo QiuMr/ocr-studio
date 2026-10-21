@@ -33,3 +33,7 @@ target
 models/**/*.onnx
 models/**/*.txt
 *.dll
+
+# 诊断脚本产出的临时截图 / 无头浏览器 profile
+scripts/_*.png
+scripts/_edgeprofile/

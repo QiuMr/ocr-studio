@@ -66,9 +66,10 @@ pub fn start_for_tauri(app: &tauri::AppHandle) -> Arc<AppState> {
         );
     }
 
+    // app_data_dir() = Roaming\<identifier>；data_dir() 是 Roaming 根目录，别用错
     let data_dir = app
         .path()
-        .data_dir()
+        .app_data_dir()
         .unwrap_or_else(|_| workspace_root().join(".ocr-studio-data"));
     let cfg = AppConfig::load(&data_dir);
     let models_root = resolve_models_root();
