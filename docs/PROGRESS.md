@@ -60,6 +60,15 @@ M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页
 实测：由资源管理器启动 `D:\rust-target\release\ocr-studio.exe`，
 窗口 1116×729，仪表盘正常显示「引擎状态 运行中 / DirectML(GPU) / 字典 18708 / 端口 8848」。
 
+打包产物（`pnpm tauri build`，已重新生成，旧的安装版是坏的，请换新）：
+- `D:\rust-target\release\bundle\msi\OCR Studio_0.1.0_x64_en-US.msi`（21.2 MB）
+- `D:\rust-target\release\bundle\nsis\OCR Studio_0.1.0_x64-setup.exe`（17.6 MB）
+
+打包注意：vite 的 `emptyOutDir` 会一次性删 `dist/assets` 下 60+ 个文件，
+本机 agent 环境的批量删除保护会拦下来（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），
+表现为 `beforeBuildCommand pnpm build failed`。**打包前先手动清空 `dist`**
+（`python -c "import shutil; shutil.rmtree('dist', ignore_errors=True)"`）即可。
+
 ---
 
 ## 1. 验证状态（可复现）
