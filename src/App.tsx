@@ -1,24 +1,72 @@
-import { useEffect, useState } from "react";
-import { LayoutDashboard, ScanText, Settings as SettingsIcon, Square } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  LayoutDashboard,
+  ScanText,
+  Settings as SettingsIcon,
+  ScrollText,
+} from "lucide-react";
 import { TitleBar } from "./components/TitleBar";
-import { Button } from "./components/ui/button";
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "./components/ui/tooltip";
 import { Dashboard } from "./pages/Dashboard";
 import { Playground } from "./pages/Playground";
+import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { cn } from "./lib/utils";
 import { invoke, isTauri } from "./lib/tauri";
 
-type PageKey = "dashboard" | "playground" | "settings";
+export type PageKey = "dashboard" | "playground" | "logs" | "settings";
 
-const NAV: { key: PageKey; label: string; icon: React.ReactNode }[] = [
-  { key: "dashboard", label: "仪表盘", icon: <LayoutDashboard className="h-4 w-4" /> },
-  { key: "playground", label: "测试台", icon: <ScanText className="h-4 w-4" /> },
-  { key: "settings", label: "设置", icon: <SettingsIcon className="h-4 w-4" /> },
+const NAV: { key: PageKey; label: string; hint: string; icon: React.ReactNode }[] = [
+  {
+    key: "dashboard",
+    label: "仪表盘",
+    hint: "引擎状态、模型档位、本地服务开关",
+    icon: <LayoutDashboard className="h-[18px] w-[18px]" strokeWidth={1.9} />,
+  },
+  {
+    key: "playground",
+    label: "测试台",
+    hint: "上传或截图，试文字识别与找图",
+    icon: <ScanText className="h-[18px] w-[18px]" strokeWidth={1.9} />,
+  },
+  {
+    key: "logs",
+    label: "运行日志",
+    hint: "实时日志，排查问题用",
+    icon: <ScrollText className="h-[18px] w-[18px]" strokeWidth={1.9} />,
+  },
+  {
+    key: "settings",
+    label: "设置",
+    hint: "端口、默认档位、设备",
+    icon: <SettingsIcon className="h-[18px] w-[18px]" strokeWidth={1.9} />,
+  },
 ];
 
+const SIDEBAR_KEY = "ocr-studio:sidebar-collapsed";
+
 export default function App() {
+  // 记住上次的折叠状态：每次开 App 都要重新点一次很烦
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [page, setPage] = useState<PageKey>("dashboard");
+
+  const toggleSidebar = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0");
+      } catch {
+        /* 隐私模式下 localStorage 可能不可写，忽略 */
+      }
+      return next;
+    });
+  }, []);
 
   // 报到：告诉后端「界面已经渲染出来了」。
   // 后端有个看门狗在等这个信号——WebView2 的 GPU 进程崩溃时 JS 根本不会执行，
@@ -30,55 +78,125 @@ export default function App() {
   }, []);
 
   return (
-    <TooltipProvider delayDuration={300}>
+    <TooltipProvider delayDuration={200}>
       <div className="flex h-full flex-col overflow-hidden bg-white">
-        <TitleBar />
+        <TitleBar collapsed={collapsed} onToggleSidebar={toggleSidebar} />
+
         <div className="flex min-h-0 flex-1">
-          {/* 侧边导航 */}
-          <aside className="flex w-52 shrink-0 flex-col border-r border-neutral-200 bg-white">
-            <nav className="flex flex-col gap-1 p-3">
+          {/* 侧边导航：无右边框，靠留白与选中底色区分 */}
+          <aside
+            className={cn(
+              "ease-sidebar flex shrink-0 flex-col overflow-hidden",
+              collapsed ? "w-[60px]" : "w-[196px]",
+            )}
+          >
+            <nav className={cn("flex flex-col gap-0.5", collapsed ? "px-3" : "px-3")}>
               {NAV.map((item) => (
-                <Tooltip key={item.key}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant={page === item.key ? "secondary" : "ghost"}
-                      className="justify-start"
-                      onClick={() => setPage(item.key)}
-                    >
-                      {item.icon}
-                      {item.label}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">{item.label}</TooltipContent>
-                </Tooltip>
+                <NavItem
+                  key={item.key}
+                  label={item.label}
+                  hint={item.hint}
+                  icon={item.icon}
+                  active={page === item.key}
+                  collapsed={collapsed}
+                  onClick={() => setPage(item.key)}
+                />
               ))}
             </nav>
 
-            <div className="mt-auto p-3">
-              {!isTauri() && (
-                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-4 text-amber-800">
-                  浏览器预览模式：仅测试台的 HTTP 降级可用
+            <div className="mt-auto px-3 pb-3">
+              {!isTauri() && !collapsed && (
+                <div className="mb-2 rounded-md bg-amber-50 px-2.5 py-2 text-[11px] leading-4 text-amber-800">
+                  浏览器预览：仅测试台的 HTTP 降级可用
                 </div>
               )}
-              <div
-                className={cn(
-                  "mt-2 flex items-center gap-2 px-1 text-[11px] text-neutral-400",
-                )}
-              >
-                <Square className="h-2.5 w-2.5 fill-blue-600 text-blue-600" />
-                OCR Studio v0.1
-              </div>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className={cn(
+                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] text-neutral-400",
+                      collapsed && "justify-center px-0",
+                    )}
+                  >
+                    <span className="relative flex h-2 w-2 shrink-0">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-blue-500 opacity-40" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-600" />
+                    </span>
+                    {!collapsed && <span className="truncate">OCR Studio v0.1</span>}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right">OCR Studio v0.1 · MIT</TooltipContent>
+              </Tooltip>
             </div>
           </aside>
 
-          {/* 主区 */}
-          <main className="min-w-0 flex-1 overflow-y-auto p-6">
-            {page === "dashboard" && <Dashboard />}
-            {page === "playground" && <Playground />}
-            {page === "settings" && <SettingsPage />}
+          {/* 主区：内容自己做左右留白，主区本身不加边框 */}
+          <main className="min-w-0 flex-1 overflow-y-auto">
+            <div
+              key={page}
+              className="animate-fade-rise mx-auto flex min-h-full w-full max-w-[1240px] flex-col px-7 py-5"
+            >
+              {page === "dashboard" && <Dashboard onNavigate={setPage} />}
+              {page === "playground" && <Playground />}
+              {page === "logs" && <LogsPage />}
+              {page === "settings" && <SettingsPage />}
+            </div>
           </main>
         </div>
       </div>
     </TooltipProvider>
+  );
+}
+
+function NavItem({
+  label,
+  hint,
+  icon,
+  active,
+  collapsed,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  icon: React.ReactNode;
+  active: boolean;
+  collapsed: boolean;
+  onClick: () => void;
+}) {
+  const btn = (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "group relative flex h-9 items-center rounded-lg text-[13px] font-medium",
+        collapsed ? "w-9 justify-center" : "w-full gap-2.5 px-2.5",
+        active
+          ? "bg-blue-50 text-blue-700"
+          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 active:bg-neutral-200",
+      )}
+    >
+      {/* 选中指示条 */}
+      <span
+        className={cn(
+          "absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-blue-600 transition-opacity",
+          active ? "opacity-100" : "opacity-0",
+        )}
+      />
+      <span className={cn(active ? "text-blue-600" : "text-neutral-500 group-hover:text-neutral-700")}>
+        {icon}
+      </span>
+      {!collapsed && <span className="truncate">{label}</span>}
+    </button>
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{btn}</TooltipTrigger>
+      <TooltipContent side="right" className="max-w-[220px]">
+        <div className="font-medium">{label}</div>
+        <div className="mt-0.5 text-[11px] opacity-70">{hint}</div>
+      </TooltipContent>
+    </Tooltip>
   );
 }

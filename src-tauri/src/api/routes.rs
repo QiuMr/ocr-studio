@@ -1,4 +1,4 @@
-//! HTTP 路由与处理器。路由表 1:1 对应 `docs/PLAN.md` 第 6 节。
+﻿//! HTTP 路由与处理器。路由表 1:1 对应 `docs/PLAN.md` 第 6 节。
 //!
 //! 全部端点均已实现：
 //! - 识别类：`/ocr/shibie`、`/ocr/zhaozi`、`/ocr/duohangjson`
@@ -21,9 +21,9 @@ use axum::{Json, Router};
 use image::{DynamicImage, RgbImage};
 
 use super::dto::{
-    decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, DuohangData, FindData,
-    FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions, ShibieData, ZhaoziData,
-    CODE_ENGINE_NOT_READY,
+    decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
+    DanziLineDto, DuohangData, FindData, FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions,
+    ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -92,7 +92,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         .route("/ocr/shibie", post(shibie))
         .route("/ocr/zhaozi", post(zhaozi))
         .route("/ocr/duohangjson", post(duohangjson))
-        .route("/ocr/danzijson", post(not_implemented_danzi))
+        .route("/ocr/danzijson", post(danzijson))
         .route("/ocr/tuzhaotu1", post(tuzhaotu1))
         .route("/ocr/tuzhaotu2", post(tuzhaotu2))
         .route("/ocr/jubingzhaotu1", post(jubingzhaotu1))
@@ -663,15 +663,86 @@ fn resolve_hwnd(opts: &FindOptions) -> Result<isize, ApiError> {
     ))
 }
 
-// ---------------------------------------------------------------- 未实现
+// ---------------------------------------------------------------- 单字定位
 
-async fn not_implemented_danzi() -> Response {
-    ApiError::NotImplemented(
-        "单字 JSON 需要字符级定位（CTC 帧对齐 + 逆透视映射），尚未实现".to_string(),
-    )
-    .into_response()
+fn pt(p: crate::ocr::geometry::Pt) -> [f64; 2] {
+    [p.0, p.1]
 }
 
+/// POST /ocr/danzijson —— 逐字返回文本框。
+///
+/// 用途：需要按字定位的场景（验证码、逐字点击、排版分析）。整行识别接口只给
+/// 行的四边形，拿不到「每个字在哪」。
+///
+/// 精度边界：字框是**用 CTC 帧区间按比例切分行宽**算出来的，不是对每个字单独
+/// 检测。所以字间距不均、行内混排不同字号时，边界会有几个像素误差；被空格
+/// 隔开的两段字之间的空隙可能被算进前一个字的框。
+async fn danzijson(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+
+    if let Err(e) = state.ensure_engine(&opts).await {
+        return e.into_response();
+    }
+    let details = match state.run_recognize_detailed(img).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let mut char_count = 0usize;
+    let mut text_lines: Vec<String> = Vec::with_capacity(details.len());
+    let lines: Vec<DanziLineDto> = details
+        .into_iter()
+        .map(|l| {
+            char_count += l.chars.len();
+            text_lines.push(l.text.clone());
+            DanziLineDto {
+                text: l.text,
+                r#box: [
+                    pt(l.points[0]),
+                    pt(l.points[1]),
+                    pt(l.points[2]),
+                    pt(l.points[3]),
+                ],
+                score: l.score,
+                det_score: l.det_score,
+                rotated: l.rotated,
+                frames: l.frames,
+                chars: l
+                    .chars
+                    .into_iter()
+                    .map(|c| CharDto {
+                        ch: c.ch,
+                        r#box: [
+                            pt(c.points[0]),
+                            pt(c.points[1]),
+                            pt(c.points[2]),
+                            pt(c.points[3]),
+                        ],
+                        score: c.score,
+                        index: c.index,
+                        t_start: c.t_start,
+                        t_end: c.t_end,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    Json(ApiResp::ok(DanziData {
+        text: text_lines.join("\n"),
+        lines,
+        char_count,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    }))
+    .into_response()
+}
 // ---------------------------------------------------------------- 关键词匹配
 
 enum Matcher {

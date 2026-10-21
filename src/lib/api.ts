@@ -10,10 +10,12 @@
 import { invoke, isTauri } from "./tauri";
 import type {
   AppConfig,
+  DanziResult,
   Device,
   FindArgs,
   FindResult,
   Health,
+  LogLine,
   ModelLevel,
   RecognizeResult,
   WindowInfo,
@@ -80,6 +82,28 @@ export async function recognize(image: string, useCls: boolean): Promise<Recogni
     height: d.height,
     elapsed_ms: d.elapsed_ms,
   };
+}
+
+/**
+ * 逐字识别：除整行框外，额外返回每个字的四边形。
+ *
+ * 字框是「CTC 帧区间按比例切分行宽 + 单应矩阵投回原图」算出来的，
+ * 所以字间距不均时边界会有几像素误差。需要精确字框的场景应自行校验。
+ */
+export async function recognizeChars(image: string, useCls: boolean): Promise<DanziResult> {
+  if (isTauri()) {
+    return invoke<DanziResult>("ocr_danzijson", { image, use_cls: useCls });
+  }
+  const res = await fetch(`${HTTP_BASE}/ocr/danzijson`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, use_cls: useCls }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as DanziResult;
 }
 
 /**
@@ -153,12 +177,31 @@ export function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/** 取图片自然尺寸。 */
-export function imageSize(src: string): Promise<{ width: number; height: number }> {
+/** 取图片自然尺寸。 */export function imageSize(src: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
     img.onerror = () => reject(new Error("无法解析图片尺寸"));
     img.src = src;
   });
+}
+
+// ---------------------------------------------------------------- 日志
+
+/** 拉取后端环形缓冲里的最近日志（首次进页面用）。 */
+export async function getLogs(): Promise<LogLine[]> {
+  return invoke<LogLine[]>("get_logs");
+}
+
+/**
+ * 订阅实时日志。
+ *
+ * 后端把 tracing 事件同时写进环形缓冲和 Tauri 事件，这是第二条路。
+ * 事件 payload 是**数组**（后端按批次攒着发，避免每条日志一次 IPC）。
+ * 返回取消订阅函数；浏览器模式下直接给个空函数，页面不用判断环境。
+ */
+export async function subscribeLogs(onLines: (lines: LogLine[]) => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<LogLine[]>("log-lines", (e) => onLines(e.payload));
 }

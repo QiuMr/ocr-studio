@@ -376,45 +376,79 @@ pub fn warp_perspective(
     img: &DynamicImage,
     box_pts: [Pt; 4],
 ) -> Option<DynamicImage> {
-    let [tl, tr, br, bl] = order_points(box_pts);
+    WarpMap::new(box_pts)?.warp(img)
+}
 
-    let width_a = dist(br, bl);
-    let width_b = dist(tr, tl);
-    let height_a = dist(tr, br);
-    let height_b = dist(tl, bl);
-    let out_w = width_a.max(width_b) as u32;
-    let out_h = height_a.max(height_b) as u32;
-    if out_w == 0 || out_h == 0 {
-        return None;
-    }
+/// 四点框 -> 正视图的单应映射，可正反两用。
+///
+/// 为什么单独抽出来：单字级对齐需要把「裁剪图里的坐标」映射回原图
+/// （`/ocr/danzijson` 的每个字框），而裁剪本身也要用同一份矩阵。
+/// 早先 `warp_perspective` 内部算完就丢，导致外面只能再算一遍，
+/// 两次数值万一不一致，字框就会整体偏移。
+pub struct WarpMap {
+    /// 正视图坐标 -> 原图坐标
+    inv: [[f64; 3]; 3],
+    out_w: u32,
+    out_h: u32,
+}
 
-    // 目标矩形四角
-    let dst = [
-        (0.0f64, 0.0f64),
-        (out_w as f64 - 1.0, 0.0f64),
-        (out_w as f64 - 1.0, out_h as f64 - 1.0),
-        (0.0f64, out_h as f64 - 1.0),
-    ];
-    let src = [tl, tr, br, bl];
+impl WarpMap {
+    pub fn new(box_pts: [Pt; 4]) -> Option<Self> {
+        let [tl, tr, br, bl] = order_points(box_pts);
 
-    // 求 src -> dst 的单应矩阵，然后从 dst 反查 src
-    let h_mat = homography(&src, &dst)?;
-    let inv = invert3(&h_mat)?;
-
-    let rgb = img.to_rgb8();
-    let mut out = image::RgbImage::new(out_w, out_h);
-
-    for y in 0..out_h {
-        for x in 0..out_w {
-            // OpenCV 约定：**整数坐标 = 像素中心**。
-            // 所以 dst(x, y) 直接取整数 (x, y) 过逆矩阵，不要再 +0.5；
-            // 实测 identity 矩阵 warp 会原样返回图像，可反证这一点。
-            let (sx, sy) = apply_h(&inv, x as f64, y as f64);
-            let px = sample_bilinear(&rgb, sx, sy);
-            out.put_pixel(x, y, px);
+        let width_a = dist(br, bl);
+        let width_b = dist(tr, tl);
+        let height_a = dist(tr, br);
+        let height_b = dist(tl, bl);
+        let out_w = width_a.max(width_b) as u32;
+        let out_h = height_a.max(height_b) as u32;
+        if out_w == 0 || out_h == 0 {
+            return None;
         }
+
+        // 目标矩形四角
+        let dst = [
+            (0.0f64, 0.0f64),
+            (out_w as f64 - 1.0, 0.0f64),
+            (out_w as f64 - 1.0, out_h as f64 - 1.0),
+            (0.0f64, out_h as f64 - 1.0),
+        ];
+        let src = [tl, tr, br, bl];
+
+        // 求 src -> dst 的单应矩阵，然后从 dst 反查 src
+        let h_mat = homography(&src, &dst)?;
+        let inv = invert3(&h_mat)?;
+        Some(Self { inv, out_w, out_h })
     }
-    Some(DynamicImage::ImageRgb8(out))
+
+    /// 正视图尺寸 `(宽, 高)`。
+    pub fn size(&self) -> (u32, u32) {
+        (self.out_w, self.out_h)
+    }
+
+    /// 正视图坐标 -> 原图坐标。
+    pub fn to_source(&self, x: f64, y: f64) -> Pt {
+        apply_h(&self.inv, x, y)
+    }
+
+    /// 裁出正视图。
+    pub fn warp(&self, img: &DynamicImage) -> Option<DynamicImage> {
+        let (out_w, out_h) = (self.out_w, self.out_h);
+        let rgb = img.to_rgb8();
+        let mut out = image::RgbImage::new(out_w, out_h);
+
+        for y in 0..out_h {
+            for x in 0..out_w {
+                // OpenCV 约定：**整数坐标 = 像素中心**。
+                // 所以 dst(x, y) 直接取整数 (x, y) 过逆矩阵，不要再 +0.5；
+                // 实测 identity 矩阵 warp 会原样返回图像，可反证这一点。
+                let (sx, sy) = self.to_source(x as f64, y as f64);
+                let px = sample_bilinear(&rgb, sx, sy);
+                out.put_pixel(x, y, px);
+            }
+        }
+        Some(DynamicImage::ImageRgb8(out))
+    }
 }
 
 fn apply_h(m: &[[f64; 3]; 3], x: f64, y: f64) -> (f64, f64) {

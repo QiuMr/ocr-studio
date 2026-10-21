@@ -91,6 +91,119 @@ pub async fn ocr_recognize(
     })
 }
 
+// ---------------------------------------------------------------- 单字 JSON
+
+/// 单个字的框与置信度。
+#[derive(Debug, Serialize)]
+pub struct CharOut {
+    pub ch: String,
+    /// 原图四点，顺序 `[左上, 右上, 右下, 左下]`
+    pub r#box: [[f64; 2]; 4],
+    pub score: f64,
+    pub index: usize,
+    pub t_start: usize,
+    pub t_end: usize,
+}
+
+/// 单行（含逐字）。
+#[derive(Debug, Serialize)]
+pub struct DanziLineOut {
+    pub text: String,
+    pub r#box: [[f64; 2]; 4],
+    pub score: f64,
+    pub det_score: f64,
+    pub rotated: bool,
+    pub frames: usize,
+    pub chars: Vec<CharOut>,
+}
+
+/// 单字级识别结果（与 HTTP `/ocr/danzijson` 结构一致）。
+#[derive(Debug, Serialize)]
+pub struct DanziOut {
+    pub text: String,
+    pub lines: Vec<DanziLineOut>,
+    pub char_count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+fn box4(p: &[crate::ocr::geometry::Pt; 4]) -> [[f64; 2]; 4] {
+    [[p[0].0, p[0].1], [p[1].0, p[1].1], [p[2].0, p[2].1], [p[3].0, p[3].1]]
+}
+
+/// 逐字识别：在整行结果之外，额外给出每个字在原图中的四边形。
+#[tauri::command]
+pub async fn ocr_danzijson(
+    state: State<'_, Arc<AppState>>,
+    image: String,
+    use_cls: Option<bool>,
+) -> Result<DanziOut, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?;
+    let (w, h) = (img.width(), img.height());
+
+    let opts = OcrOptions {
+        image,
+        level: None,
+        device: None,
+        use_cls,
+        keyword: None,
+    };
+    state
+        .ensure_engine(&opts)
+        .await
+        .map_err(|e| e.message())?;
+    let details = state
+        .run_recognize_detailed(img)
+        .await
+        .map_err(|e| e.message())?;
+
+    let mut char_count = 0usize;
+    let lines: Vec<DanziLineOut> = details
+        .into_iter()
+        .map(|l| {
+            char_count += l.chars.len();
+            DanziLineOut {
+                text: l.text,
+                r#box: box4(&l.points),
+                score: l.score,
+                det_score: l.det_score,
+                rotated: l.rotated,
+                frames: l.frames,
+                chars: l
+                    .chars
+                    .into_iter()
+                    .map(|c| CharOut {
+                        ch: c.ch,
+                        r#box: box4(&c.points),
+                        score: c.score,
+                        index: c.index,
+                        t_start: c.t_start,
+                        t_end: c.t_end,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let text = lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(DanziOut {
+        text,
+        lines,
+        char_count,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
+}
+
 /// 引擎健康状态。
 #[tauri::command]
 pub fn get_health(state: State<'_, Arc<AppState>>) -> HealthDto {
@@ -449,3 +562,59 @@ pub async fn find_image(args: FindArgs) -> Result<FindOut, String> {
 
 // 命令注册集中在 `lib.rs` 的 `invoke_handler` 中，用 `tauri::generate_handler!`
 // 引用本模块的各个函数（宏接受路径，无需额外包装）。
+
+// ---------------------------------------------------------------- 日志
+
+/// 最近的后端日志（环形缓冲快照）。
+///
+/// 前端进「运行日志」页时先调这个补历史，之后靠 `log-lines` 事件增量接收。
+#[tauri::command]
+pub fn get_logs() -> Vec<crate::logbuf::LogLine> {
+    crate::logbuf::snapshot()
+}
+
+// ---------------------------------------------------------------- 文件
+
+/// 读取本地图片并统一转成 PNG 的 base64。
+///
+/// 拖拽进入窗口时，Tauri 只把**路径**交给我们（DOM 拿不到 File 对象），
+/// 而前端需要 base64 才能做缩略图和发给识别接口。这里顺手统一成 PNG，
+/// 前端就不用按扩展名猜 MIME。
+#[tauri::command]
+pub async fn read_image_file(path: String) -> Result<String, String> {
+    /// 单张图的硬上限。再大基本是误拖（比如把整个文件夹里的 RAW 扔进来）。
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    let p = std::path::PathBuf::from(&path);
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    const ALLOWED: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "webp", "gif"];
+    if !ALLOWED.contains(&ext.as_str()) {
+        return err(format!("不支持的文件类型: .{ext}（支持 png/jpg/bmp/webp/gif）"));
+    }
+
+    let meta = tokio::fs::metadata(&p)
+        .await
+        .map_err(|e| format!("读不到文件: {e}"))?;
+    if meta.len() > MAX_BYTES {
+        return err(format!(
+            "文件太大（{} MB），上限 64 MB",
+            meta.len() / (1024 * 1024)
+        ));
+    }
+
+    let bytes = tokio::fs::read(&p)
+        .await
+        .map_err(|e| format!("读取失败: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("不是有效的图片: {e}"))?;
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("转 PNG 失败: {e}"))?;
+
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}

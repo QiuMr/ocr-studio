@@ -4,11 +4,20 @@
  * 视觉规范（2026-10-21 确定，见 docs/PLAN.md 7.1）：
  *   字体 MiSans；配色纯白为主、黑色为辅、蓝色点缀；每个按钮带图标。
  * MiSans 的 @font-face 切片由 index.html 引入 src/assets/fonts/misans.css 提供。
+ *
+ * 2026-10-21 追加（界面精修）：
+ *   - 全局面包屑式分隔线全部去掉，靠留白与底色区分层级；
+ *   - 一切可点元素必须有 pointer 手势（Tailwind v4 preflight 把 button 的
+ *     cursor 重置成 default，这是「很多地方没有手势」的根因）；
+ *   - 统一 150ms 过渡，hover/active/focus-visible 三态都要有可见反馈。
  */
 @theme {
   --font-sans: "MiSans", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
     "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+
+  /* 语义色：只留一条蓝，其余交给中性灰 */
+  --color-brand: oklch(0.546 0.215 262.9);
 }
 
 @layer base {
@@ -24,6 +33,8 @@
     font-family: var(--font-sans);
     /* 自定义标题栏下禁止文本被误选拖拽 */
     user-select: none;
+    /* 关掉移动端式的双击缩放延迟，点按更跟手 */
+    -webkit-tap-highlight-color: transparent;
   }
 
   /* 代码/JSON 结果区允许选中复制 */
@@ -31,7 +42,83 @@
     user-select: text;
   }
 
-  /* 细滚动条，贴合纯白底色 */
+  /* ---------------------------------------------------------------- 手势 */
+
+  /*
+   * Tailwind v4 的 preflight 把 `button` 的 cursor 设为 default，
+   * 所以之前所有按钮都是箭头。这里统一纠正，并覆盖 Radix 生成的 role=button。
+   * 注意 disabled 要显式 not-allowed，否则会被 pointer 规则吃掉。
+   */
+  button,
+  [role="button"],
+  summary,
+  [data-clickable] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="button"][aria-disabled="true"],
+  [data-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* 原生 range / color 之类也给上手势 */
+  input[type="range"],
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="file"],
+  label[for],
+  select {
+    cursor: pointer;
+  }
+
+  input:disabled,
+  select:disabled {
+    cursor: not-allowed;
+  }
+
+  /* 文本类输入回到 I 形光标 */
+  input[type="text"],
+  input[type="number"],
+  input[type="search"],
+  input[type="password"],
+  textarea {
+    cursor: text;
+  }
+
+  /* ---------------------------------------------------------- 交互反馈 */
+
+  /*
+   * 统一过渡。只过渡颜色/阴影/位移，不过渡 width 之类会引发布局抖动的属性
+   * —— 侧边栏折叠需要过渡宽度，单独在组件里声明。
+   */
+  button,
+  [role="button"],
+  a,
+  label[for] {
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease,
+      box-shadow 150ms ease,
+      opacity 150ms ease,
+      transform 120ms ease;
+  }
+
+  /* 按下时轻微下压，给实体感（transform 只影响 1px，不会抖） */
+  button:not(:disabled):active,
+  [role="button"]:not([aria-disabled="true"]):active {
+    transform: translateY(0.5px);
+  }
+
+  /* 键盘可达性：统一蓝色焦点环，鼠标点击不显示 */
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+
+  /* -------------------------------------------------------------- 滚动条 */
+
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -46,5 +133,33 @@
   }
   ::-webkit-scrollbar-track {
     background: transparent;
+  }
+
+  /* 拖动窗口时整窗不要出现选择光标 */
+  [data-tauri-drag-region] {
+    cursor: default;
+  }
+}
+
+@layer utilities {
+  /* 载入动画：内容区切换页面时淡入，避免生硬闪切 */
+  @keyframes fade-rise {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-rise {
+    animation: fade-rise 180ms ease-out both;
+  }
+
+  /* 折叠动画用的缓动，比默认 linear 自然 */
+  .ease-sidebar {
+    transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
   }
 }

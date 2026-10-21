@@ -22,6 +22,40 @@ export interface RecognizeResult {
   elapsed_ms: number;
 }
 
+// ---------------------------------------------------------------- 单字
+
+/** 单个字的框与置信度 */
+export interface CharResult {
+  ch: string;
+  box: Box4;
+  score: number;
+  index: number;
+  /** CTC 起始帧（含） */
+  t_start: number;
+  /** CTC 结束帧（含） */
+  t_end: number;
+}
+
+export interface DanziLine {
+  text: string;
+  box: Box4;
+  score: number;
+  det_score: number;
+  rotated: boolean;
+  /** rec 总帧数，字框宽度由帧区间比例决定 */
+  frames: number;
+  chars: CharResult[];
+}
+
+export interface DanziResult {
+  text: string;
+  lines: DanziLine[];
+  char_count: number;
+  width: number;
+  height: number;
+  elapsed_ms: number;
+}
+
 export interface Health {
   status: "ok" | "no_model";
   model: ModelLevel;
@@ -106,4 +140,18 @@ export interface WindowInfo {
   y: number;
   width: number;
   height: number;
+}
+
+// ---------------------------------------------------------------- 日志
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
+/** 与 Rust 侧 `logbuf::LogLine` 一一对应 */
+export interface LogLine {
+  /** Unix 毫秒时间戳（前端格式化成当地时间） */
+  ts_ms: number;
+  level: LogLevel;
+  /** 产生日志的模块路径，如 `ocr_studio::api::routes` */
+  target: string;
+  message: string;
 }

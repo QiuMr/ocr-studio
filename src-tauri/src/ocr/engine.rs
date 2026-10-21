@@ -20,9 +20,9 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use super::det::{db_postprocess, DetBox, DetConfig};
-use super::geometry::{order_points, warp_perspective, Pt};
+use super::geometry::{order_points, WarpMap, Pt};
 use super::preprocess::{det_preprocess, rec_preprocess, DetLimitType, CLS_IMG_H, CLS_IMG_W};
-use super::rec::{ctc_decode, RecResult};
+use super::rec::ctc_decode_spans;
 
 // 注意：`Device` / `ModelLevel` 统一定义在 `crate::config`，此处仅引用，
 // 避免出现两套同名类型互相不兼容的问题（曾因此编译失败）。
@@ -100,6 +100,36 @@ pub struct TextBox {
     pub det_score: f64,
     /// 是否被 cls 判定为 180° 旋转并已翻转
     pub rotated: bool,
+}
+
+/// 单字信息（`/ocr/danzijson` 用）。
+#[derive(Debug, Clone)]
+pub struct CharBox {
+    pub ch: String,
+    /// 原图坐标四点，顺序 `[左上, 右上, 右下, 左下]`
+    pub points: [Pt; 4],
+    /// 该字置信度
+    pub score: f64,
+    /// 在行内的序号（0 起）
+    pub index: usize,
+    /// CTC 起始帧（含）
+    pub t_start: usize,
+    /// CTC 结束帧（含）
+    pub t_end: usize,
+}
+
+/// 单行明细：整行信息 + 逐字框。
+#[derive(Debug, Clone)]
+pub struct LineDetail {
+    /// 整行四点，原图坐标
+    pub points: [Pt; 4],
+    pub text: String,
+    pub score: f64,
+    pub det_score: f64,
+    pub rotated: bool,
+    /// rec 输出的总帧数。字框宽度 = 帧区间比例 × 行宽，留出来便于排查
+    pub frames: usize,
+    pub chars: Vec<CharBox>,
 }
 
 /// 引擎健康状态。
@@ -256,6 +286,29 @@ impl OcrEngine {
     }
 
     pub fn recognize(&mut self, img: &DynamicImage) -> OrtResult<Vec<TextBox>> {
+        Ok(self
+            .recognize_detailed(img)?
+            .into_iter()
+            .map(|l| TextBox {
+                points: l.points,
+                text: l.text,
+                score: l.score,
+                det_score: l.det_score,
+                rotated: l.rotated,
+            })
+            .collect())
+    }
+
+    /// 同 [`recognize`](Self::recognize)，但额外返回每行里**每个字**的框。
+    ///
+    /// 单字定位原理：rec 是 CTC 结构，输出 `[T, C]`，每个字符对应一段帧区间
+    /// `[t_start, t_end]`。把帧区间按比例映射到裁剪图横向像素，再经
+    /// [`WarpMap::to_source`] 投回原图，就得到该字的四边形。
+    ///
+    /// 两个必须注意的点：
+    /// - warp 的目标矩形角点是 `out_w-1`，所以横向比例要乘 `out_w-1` 而不是 `out_w`；
+    /// - 若该行被 cls 翻转了 180°，坐标要换成 `out_w-1-x`，且左右端点互换。
+    pub fn recognize_detailed(&mut self, img: &DynamicImage) -> OrtResult<Vec<LineDetail>> {
         if img.width() == 0 || img.height() == 0 {
             return Ok(Vec::new());
         }
@@ -274,11 +327,15 @@ impl OcrEngine {
         let boxes: Vec<DetBox> = db_postprocess(&prob4, ratio, &self.cfg.det_cfg);
 
         // ---- rec ----
-        let mut results = Vec::with_capacity(boxes.len());
+        let mut results: Vec<LineDetail> = Vec::with_capacity(boxes.len());
         for b in boxes {
-            let Some(crop) = warp_perspective(img, b.points) else {
+            let Some(map) = WarpMap::new(b.points) else {
                 continue;
             };
+            let Some(crop) = map.warp(img) else {
+                continue;
+            };
+            let (out_w, out_h) = map.size();
 
             // ---- cls（可选）----
             let mut rotated = false;
@@ -312,7 +369,44 @@ impl OcrEngine {
             let p2 = p_batch
                 .into_dimensionality::<ndarray::Ix2>()
                 .map_err(|e| ort::Error::new(format!("rec 输出维度异常: {e}")))?;
-            let RecResult { text, score, .. } = ctc_decode(&p2, &self.chars);
+            let (text, score, spans) = ctc_decode_spans(&p2, &self.chars);
+            let frames = p2.shape()[0];
+
+            // 逐字框：帧区间 -> 裁剪图 x 范围 -> 原图四边形
+            let mut chars = Vec::with_capacity(spans.len());
+            if frames > 0 && out_w > 1 && out_h > 1 {
+                let w_max = (out_w - 1) as f64;
+                let h_max = (out_h - 1) as f64;
+                for s in &spans {
+                    let mut xa = s.t_start as f64 / frames as f64 * w_max;
+                    let mut xb = (s.t_end + 1) as f64 / frames as f64 * w_max;
+                    // 保证至少有半个像素宽，避免零宽框（多见于极窄的字 / 最后一个字）
+                    if xb - xa < 0.5 {
+                        let mid = (xa + xb) / 2.0;
+                        xa = (mid - 0.25).max(0.0);
+                        xb = (mid + 0.25).min(w_max);
+                    }
+                    // 行被翻转时，裁剪图坐标系里的 x 也要翻过来，且端点互换
+                    let (x0, x1) = if rotated {
+                        (w_max - xb, w_max - xa)
+                    } else {
+                        (xa, xb)
+                    };
+                    let tl = map.to_source(x0, 0.0);
+                    let tr = map.to_source(x1, 0.0);
+                    let br = map.to_source(x1, h_max);
+                    let bl = map.to_source(x0, h_max);
+                    chars.push(CharBox {
+                        ch: s.ch.clone(),
+                        points: [tl, tr, br, bl],
+                        score: s.score,
+                        index: s.index,
+                        t_start: s.t_start,
+                        t_end: s.t_end,
+                    });
+                }
+            }
+
             // 调试钩子：设 OCR_DEBUG_REC=1 时打印每个框的 rec 逐帧 argmax 与非 blank 帧。
             // 用于定位「文本对但置信度对不上」这类问题——能把 det 框、rec 输入、
             // 逐帧概率三层一次拉开。默认关闭，不产生任何输出。
@@ -341,12 +435,14 @@ impl OcrEngine {
                 );
             }
             let points = order_points(b.points);
-            results.push(TextBox {
+            results.push(LineDetail {
                 points,
                 text,
                 score,
                 det_score: b.score,
                 rotated,
+                frames,
+                chars,
             });
         }
 

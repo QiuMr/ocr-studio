@@ -1,4 +1,4 @@
-//! HTTP 接口的请求/响应 DTO 与错误类型。
+﻿//! HTTP 接口的请求/响应 DTO 与错误类型。
 //!
 //! 设计约定（见 `docs/PLAN.md` 第 6 节）：
 //! - 全部接口返回统一信封 `{code, msg, data?}`，`code == 0` 表示成功。
@@ -110,6 +110,45 @@ pub struct ZhaoziData {
 #[derive(Debug, Serialize)]
 pub struct DuohangData {
     pub rows: Vec<LineDto>,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// 单字结果。`box` 是该字在原图中的四边形（左上/右上/右下/左下）。
+#[derive(Debug, Serialize)]
+pub struct CharDto {
+    pub ch: String,
+    pub r#box: Box4,
+    pub score: f64,
+    /// 行内序号，0 起
+    pub index: usize,
+    /// CTC 起止帧，排查对齐问题用
+    pub t_start: usize,
+    pub t_end: usize,
+}
+
+/// 单行结果（含逐字）。
+#[derive(Debug, Serialize)]
+pub struct DanziLineDto {
+    pub text: String,
+    pub r#box: Box4,
+    pub score: f64,
+    pub det_score: f64,
+    pub rotated: bool,
+    /// rec 总帧数。字框宽度由 `帧区间 / 总帧数` 决定
+    pub frames: usize,
+    pub chars: Vec<CharDto>,
+}
+
+/// `/ocr/danzijson` 出参。
+#[derive(Debug, Serialize)]
+pub struct DanziData {
+    /// 所有行按阅读顺序拼成的纯文本
+    pub text: String,
+    pub lines: Vec<DanziLineDto>,
+    /// 全部字符总数（含所有行），省得调用方自己数
+    pub char_count: usize,
     pub width: u32,
     pub height: u32,
     pub elapsed_ms: u128,

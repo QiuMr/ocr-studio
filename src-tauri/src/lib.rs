@@ -8,6 +8,7 @@ pub mod api;
 pub mod capture;
 pub mod commands;
 pub mod config;
+pub mod logbuf;
 /// 模板匹配。文件名 `match.rs` 与 Rust 关键字冲突，模块名对外暴露为 `matcher`。
 #[path = "match.rs"]
 pub mod matcher;
@@ -85,18 +86,33 @@ fn init_logging(data_dir: &std::path::Path) {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn"))
     };
 
+    // 日志同时进：文件 / stderr / 环形缓冲（前端「运行日志」页）。
+    // 用 registry 手动拼 layer，是为了能挂上自己的 BufferLayer。
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let buf_layer = logbuf::BufferLayer::new();
+
     match file {
         Some(f) => {
             let writer = LogFile(Arc::new(Mutex::new(f))).and(std::io::stderr);
-            tracing_subscriber::fmt()
-                .with_env_filter(filter())
+            let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_ansi(false)
-                .with_writer(writer)
+                .with_writer(writer);
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(fmt_layer)
+                .with(buf_layer)
                 .init();
             tracing::info!("日志文件: {}", log_path.display());
         }
         None => {
-            tracing_subscriber::fmt().with_env_filter(filter()).init();
+            let fmt_layer = tracing_subscriber::fmt::layer();
+            tracing_subscriber::registry()
+                .with(filter())
+                .with(fmt_layer)
+                .with(buf_layer)
+                .init();
         }
     }
     let _ = tracing_log::LogTracer::init();
@@ -134,6 +150,8 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             init_logging(&data_dir);
+            // 日志转发线程：把缓冲区里的新日志批量推给前端（日志页用）
+            logbuf::spawn_forwarder(app.handle().clone());
             tracing::info!("OCR Studio 启动，数据目录: {}", data_dir.display());
 
             // 诊断开关：跳过 OCR 核心（引擎 + HTTP 服务），用于隔离白屏问题
@@ -210,6 +228,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ui_ready,
             commands::ocr_recognize,
+            commands::ocr_danzijson,
             commands::get_health,
             commands::get_config,
             commands::save_config,
@@ -222,6 +241,8 @@ pub fn run() {
             commands::find_image,
             commands::screen_preview,
             commands::list_windows,
+            commands::get_logs,
+            commands::read_image_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

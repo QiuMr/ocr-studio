@@ -1,12 +1,17 @@
 ﻿import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AppWindow,
+  Check,
+  ChevronDown,
+  Copy,
   Crosshair,
-  Download,
   FileImage,
+  Hand,
+  Image as ImageIcon,
   Monitor,
   RefreshCw,
   ScanSearch,
+  Settings2,
   Target,
   Upload,
 } from "lucide-react";
@@ -23,10 +28,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
-import { Separator } from "./ui/separator";
 import { Switch } from "./ui/switch";
+import { EmptyState } from "./ui/empty-state";
+import { Callout } from "./ui/callout";
+import { Hint } from "./ui/hint";
 import { ImageViewer } from "./ImageViewer";
 import { fileToBase64, findImage, imageSize, listWindows, screenPreview } from "../lib/api";
+import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
+import { cn } from "../lib/utils";
 import type { FindHit, FindMode, FindResult, FindSource, WindowInfo } from "../types";
 
 /** 搜索图：既可能是用户上传的，也可能是内部截的屏幕/窗口。 */
@@ -41,32 +50,46 @@ interface Haystack {
   origin: { x: number; y: number };
 }
 
+interface Template {
+  url: string;
+  b64: string;
+  width: number;
+  height: number;
+  name: string;
+}
+
 interface Props {
   /** 从「识别」页带过来的图片，切到找图页时可直接当模板候选 */
   inheritedImage?: string | null;
 }
 
 const SOURCE_LABEL: Record<FindSource, string> = {
-  image: "上传图片",
+  image: "上传的图片",
   screen: "整个屏幕",
-  window: "指定窗口",
+  window: "某个窗口",
+};
+
+const SOURCE_HINT: Record<FindSource, string> = {
+  image: "在上传的图片里搜。适合离线验证模板准不准。",
+  screen: "截取整个屏幕来搜。适合做主屏幕上的自动化点击。",
+  window: "只截指定窗口。窗口被移动、遮挡影响更小，推荐用这个。",
 };
 
 export function FindPanel({ inheritedImage }: Props) {
-  const [source, setSource] = useState<FindSource>("image");
+  const [source, setSource] = useState<FindSource>("window");
   const [mode, setMode] = useState<FindMode>("exact");
   const [hay, setHay] = useState<Haystack | null>(null);
-  const [tplUrl, setTplUrl] = useState<string | null>(null);
-  const [tplB64, setTplB64] = useState<string | null>(null);
-  const [tplSize, setTplSize] = useState({ width: 0, height: 0 });
+  const [tpl, setTpl] = useState<Template | null>(null);
   const [result, setResult] = useState<(FindResult & { preview?: string }) | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showHits, setShowHits] = useState(true);
+  const [advanced, setAdvanced] = useState(false);
   const [maxResults, setMaxResults] = useState(1);
   const [minScore, setMinScore] = useState(""); // 留空 = 用端点预设
   const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [hwnd, setHwnd] = useState<number | null>(null);
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
   const hayInputRef = useRef<HTMLInputElement>(null);
   const tplInputRef = useRef<HTMLInputElement>(null);
@@ -86,31 +109,56 @@ export function FindPanel({ inheritedImage }: Props) {
     if (source === "window" && windows.length === 0) void refreshWindows();
   }, [source, windows.length, refreshWindows]);
 
-  // 从识别页继承的图：直接当搜索图（source=image 时才有意义）
+  // 从识别页继承的图：只用来当模板（大概率就是用户刚从截图里裁出来的东西）
   useEffect(() => {
-    if (!inheritedImage || hay) return;
+    if (!inheritedImage || tpl) return;
     let cancelled = false;
     const url = `data:image/png;base64,${inheritedImage}`;
     void imageSize(url).then((d) => {
       if (cancelled) return;
-      setHay({ url, b64: inheritedImage, width: d.width, height: d.height, origin: { x: 0, y: 0 } });
+      setTpl({ url, b64: inheritedImage, width: d.width, height: d.height, name: "来自识别页" });
     });
     return () => {
       cancelled = true;
     };
-  }, [inheritedImage, hay]);
+  }, [inheritedImage, tpl]);
 
-  /** 载入上传的搜索图。 */
-  const loadHayFile = async (file: File) => {
+  const applyTemplate = useCallback(async (b64: string, url: string, name: string) => {
+    const dim = await imageSize(url);
+    setTpl({ url, b64, width: dim.width, height: dim.height, name });
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const applyHaystack = useCallback(async (b64: string, url: string) => {
+    const dim = await imageSize(url);
+    setHay({ url, b64, width: dim.width, height: dim.height, origin: { x: 0, y: 0 } });
+    setResult(null);
+    setError(null);
+  }, []);
+
+  /** 拖进来的图：还没有模板就当模板，否则当搜索图。 */
+  const onDrop = useCallback(
+    (imgs: DroppedImage[]) => {
+      const first = imgs[0];
+      if (!first) return;
+      if (!tpl) void applyTemplate(first.b64, first.url, first.name);
+      else void applyHaystack(first.b64, first.url);
+    },
+    [tpl, applyTemplate, applyHaystack],
+  );
+
+  const { dragging } = useImageDrop(onDrop);
+
+  /** 载入上传的图片（浏览器里选文件用）。 */
+  const loadFileTo = async (file: File, target: "hay" | "tpl") => {
     try {
       const b64 = await fileToBase64(file);
-      const url = URL.createObjectURL(file);
-      const dim = await imageSize(url);
-      setHay({ url, b64, width: dim.width, height: dim.height, origin: { x: 0, y: 0 } });
-      setResult(null);
-      setError(null);
+      const url = `data:${file.type || "image/png"};base64,${b64}`;
+      if (target === "hay") await applyHaystack(b64, url);
+      else await applyTemplate(b64, url, file.name);
     } catch (e) {
-      setError(`加载搜索图失败: ${e}`);
+      setError(`加载图片失败: ${e}`);
     }
   };
 
@@ -119,9 +167,7 @@ export function FindPanel({ inheritedImage }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const region:
-        | [number, number, number, number]
-        | undefined = target
+      const region: [number, number, number, number] | undefined = target
         ? [target.x, target.y, target.width, target.height]
         : undefined;
       const p = await screenPreview(region);
@@ -139,48 +185,17 @@ export function FindPanel({ inheritedImage }: Props) {
     }
   };
 
-  /** 载入模板图。 */
-  const loadTplFile = async (file: File) => {
-    try {
-      const b64 = await fileToBase64(file);
-      const url = URL.createObjectURL(file);
-      const dim = await imageSize(url);
-      setTplUrl(url);
-      setTplB64(b64);
-      setTplSize(dim);
-      setResult(null);
-      setError(null);
-    } catch (e) {
-      setError(`加载模板失败: ${e}`);
-    }
-  };
-
-  /** Ctrl+V 粘贴：没有模板时优先当模板（模板通常很小）。 */
-  useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const item = Array.from(e.clipboardData?.items ?? []).find((i) =>
-        i.type.startsWith("image/"),
-      );
-      const file = item?.getAsFile();
-      if (!file) return;
-      if (!tplB64) void loadTplFile(file);
-      else void loadHayFile(file);
-    };
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  });
-
   const onFind = async () => {
-    if (!tplB64) {
-      setError("请先选择模板图");
+    if (!tpl) {
+      setError("还没选模板图。模板 = 你要找的那个小图标/小按钮的截图。");
       return;
     }
-    if (source === "image" && !hay?.b64) {
-      setError("请先载入搜索图（上传图片或粘贴）");
+    if (source === "image" && !hay) {
+      setError("还没载入搜索图。点「选搜索图」，或直接把图片拖进来。");
       return;
     }
     if (source === "window" && hwnd == null) {
-      setError("请先选择一个窗口");
+      setError("还没选窗口。先在上面选一个要搜的窗口。");
       return;
     }
     setBusy(true);
@@ -191,7 +206,7 @@ export function FindPanel({ inheritedImage }: Props) {
         source,
         mode,
         image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
-        template: tplB64,
+        template: tpl.b64,
         hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
         max_results: maxResults,
         min_score: Number.isFinite(parsed) ? parsed : undefined,
@@ -217,59 +232,243 @@ export function FindPanel({ inheritedImage }: Props) {
     }
   };
 
+  const copyCoord = async (h: FindHit, i: number) => {
+    // 给自动化脚本用：绝对屏幕坐标 = 图内坐标 + 截图原点
+    const ox = hay?.origin.x ?? 0;
+    const oy = hay?.origin.y ?? 0;
+    await navigator.clipboard.writeText(`${h.center_x + ox},${h.center_y + oy}`);
+    setCopiedIdx(i);
+    window.setTimeout(() => setCopiedIdx(null), 1400);
+  };
+
   const hits: FindHit[] = result?.matches ?? [];
+  const currentWindow = windows.find((w) => w.hwnd === hwnd) ?? null;
 
   return (
-    <div className="flex h-full flex-col gap-4">
-      {/* 工具栏 */}
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label className="text-[11px] text-neutral-500">搜索范围</Label>
-          <Select value={source} onValueChange={(v) => setSource(v as FindSource)}>
-            <SelectTrigger className="w-[150px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="image">
-                <FileImage className="mr-1.5 inline h-3.5 w-3.5" />
-                上传图片
-              </SelectItem>
-              <SelectItem value="screen">
-                <Monitor className="mr-1.5 inline h-3.5 w-3.5" />
-                整个屏幕
-              </SelectItem>
-              <SelectItem value="window">
-                <AppWindow className="mr-1.5 inline h-3.5 w-3.5" />
-                指定窗口
-              </SelectItem>
-            </SelectContent>
-          </Select>
+    <div className="relative flex min-h-0 flex-1 flex-col gap-3">
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-amber-50/80 backdrop-blur-[1px]">
+          <div className="flex flex-col items-center gap-2 text-amber-700">
+            <Upload className="h-7 w-7" />
+            <span className="text-[13px] font-medium">
+              {tpl ? "松手作为搜索图" : "松手作为模板图"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 三步式工具条 */}
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-2.5">
+        {/* ① 模板 */}
+        <div className="flex flex-col gap-1">
+          <Label className="text-[11px] text-neutral-500">① 要找什么（模板）</Label>
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="outline" onClick={() => tplInputRef.current?.click()}>
+              <ImageIcon className="h-3.5 w-3.5" />
+              {tpl ? "换模板" : "选模板图"}
+            </Button>
+            <input
+              ref={tplInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void loadFileTo(f, "tpl");
+                e.target.value = "";
+              }}
+            />
+            {tpl && (
+              <span
+                className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
+                title={tpl.name}
+              >
+                <img
+                  src={tpl.url}
+                  alt="模板"
+                  className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
+                />
+                <span className="font-mono text-[10.5px] text-neutral-500">
+                  {tpl.width}×{tpl.height}
+                </span>
+              </span>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label className="text-[11px] text-neutral-500">匹配精度</Label>
-          <Select value={mode} onValueChange={(v) => setMode(v as FindMode)}>
-            <SelectTrigger className="w-[130px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="exact">精准（≥0.92）</SelectItem>
-              <SelectItem value="loose">容错（≥0.72）</SelectItem>
-            </SelectContent>
-          </Select>
+        {/* ② 搜索范围 */}
+        <div className="flex flex-col gap-1">
+          <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+            ② 在哪里找
+            <Hint>{SOURCE_HINT[source]}</Hint>
+          </Label>
+          <div className="flex items-center gap-1.5">
+            <Select value={source} onValueChange={(v) => setSource(v as FindSource)}>
+              <SelectTrigger className="h-8 w-[122px] text-[12.5px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="window">
+                  <AppWindow className="mr-1.5 inline h-3.5 w-3.5" />
+                  某个窗口
+                </SelectItem>
+                <SelectItem value="screen">
+                  <Monitor className="mr-1.5 inline h-3.5 w-3.5" />
+                  整个屏幕
+                </SelectItem>
+                <SelectItem value="image">
+                  <FileImage className="mr-1.5 inline h-3.5 w-3.5" />
+                  上传的图片
+                </SelectItem>
+              </SelectContent>
+            </Select>
+
+            {source === "window" && (
+              <>
+                <Select
+                  value={hwnd == null ? "" : String(hwnd)}
+                  onValueChange={(v) => setHwnd(Number(v))}
+                >
+                  <SelectTrigger className="h-8 w-[180px] text-[12.5px]">
+                    <SelectValue placeholder="选择窗口" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {windows.length === 0 && (
+                      <SelectItem value="__none" disabled>
+                        没有可用窗口
+                      </SelectItem>
+                    )}
+                    {windows.map((w) => (
+                      <SelectItem key={w.hwnd} value={String(w.hwnd)}>
+                        {w.title.length > 30 ? `${w.title.slice(0, 30)}…` : w.title}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => void refreshWindows()}
+                  title="刷新窗口列表（新开的窗口要点这里才会出现）"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </Button>
+              </>
+            )}
+
+            {source === "screen" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void shootScreen(null)}
+                disabled={busy}
+              >
+                <Monitor className="h-3.5 w-3.5" />
+                先截一张
+              </Button>
+            )}
+
+            {source === "image" && (
+              <>
+                <Button variant="outline" size="sm" onClick={() => hayInputRef.current?.click()}>
+                  <FileImage className="h-3.5 w-3.5" />
+                  {hay ? "换搜索图" : "选搜索图"}
+                </Button>
+                <input
+                  ref={hayInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void loadFileTo(f, "hay");
+                    e.target.value = "";
+                  }}
+                />
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label className="text-[11px] text-neutral-500">阈值 / 数量</Label>
-          <div className="flex items-center gap-2">
+        {/* ③ 执行 */}
+        <div className="flex flex-col gap-1">
+          <Label className="text-[11px] text-neutral-500">③ 开始</Label>
+          <Button size="sm" onClick={() => void onFind()} disabled={busy || !tpl}>
+            <ScanSearch className="h-3.5 w-3.5" />
+            {busy ? "查找中…" : "开始找图"}
+          </Button>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            <Switch id="show-hits" checked={showHits} onCheckedChange={setShowHits} />
+            <Label
+              htmlFor="show-hits"
+              className="flex cursor-pointer items-center gap-1 text-[12px] font-normal text-neutral-600"
+            >
+              <Target className="h-3.5 w-3.5" />
+              显示命中框
+            </Label>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setAdvanced((a) => !a)}
+            title="匹配精度、阈值、返回数量"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            高级
+            <ChevronDown className={cn("h-3 w-3 transition-transform", advanced && "rotate-180")} />
+          </Button>
+        </div>
+      </div>
+
+      {/* 高级选项，默认收起，避免一上来一屏都是参数 */}
+      {advanced && (
+        <div className="flex flex-wrap items-end gap-3 rounded-lg bg-neutral-50/80 px-3 py-2.5">
+          <div className="flex flex-col gap-1">
+            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+              匹配精度
+              <Hint>
+                精准模式要求相似度 ≥ 0.92，几乎只命中完全一样的像素；
+                容错模式放到 0.72，能容忍轻微压缩/抗锯齿差异，但更容易误命中。
+              </Hint>
+            </Label>
+            <Select value={mode} onValueChange={(v) => setMode(v as FindMode)}>
+              <SelectTrigger className="h-8 w-[130px] text-[12.5px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="exact">精准（≥0.92）</SelectItem>
+                <SelectItem value="loose">容错（≥0.72）</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+              自定义阈值
+              <Hint>
+                相似度下限，0~1，越大越严格。留空则跟随上面的精度预设。
+                不确定就留空，先用精准模式试。
+              </Hint>
+            </Label>
             <Input
-              className="w-[76px]"
-              placeholder="预设"
+              className="h-8 w-[86px] text-[12.5px]"
+              placeholder="跟随预设"
               value={minScore}
               onChange={(e) => setMinScore(e.target.value)}
             />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+              最多返回
+              <Hint>1 表示只找最像的那一个；找多个相同按钮时调大（上限 64）。</Hint>
+            </Label>
             <Input
-              className="w-[62px]"
+              className="h-8 w-[70px] text-[12.5px]"
               type="number"
               min={1}
               max={64}
@@ -277,123 +476,27 @@ export function FindPanel({ inheritedImage }: Props) {
               onChange={(e) => setMaxResults(Math.max(1, Number(e.target.value) || 1))}
             />
           </div>
-        </div>
 
-        <Separator orientation="vertical" className="mx-1 h-9" />
-
-        <Button variant="outline" onClick={() => tplInputRef.current?.click()}>
-          <Upload className="h-4 w-4" />
-          {tplB64 ? "换模板" : "选模板"}
-        </Button>
-        <input
-          ref={tplInputRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void loadTplFile(f);
-            e.target.value = "";
-          }}
-        />
-
-        {source === "image" && (
-          <>
-            <Button variant="outline" onClick={() => hayInputRef.current?.click()}>
-              <FileImage className="h-4 w-4" />
-              选搜索图
-            </Button>
-            <input
-              ref={hayInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void loadHayFile(f);
-                e.target.value = "";
-              }}
-            />
-          </>
-        )}
-
-        {source === "screen" && (
-          <Button variant="outline" onClick={() => void shootScreen(null)} disabled={busy}>
-            <Monitor className="h-4 w-4" />
-            截取屏幕
-          </Button>
-        )}
-
-        {source === "window" && (
-          <>
-            <Select
-              value={hwnd == null ? "" : String(hwnd)}
-              onValueChange={(v) => setHwnd(Number(v))}
-            >
-              <SelectTrigger className="w-[240px]">
-                <SelectValue placeholder="选择窗口" />
-              </SelectTrigger>
-              <SelectContent>
-                {windows.map((w) => (
-                  <SelectItem key={w.hwnd} value={String(w.hwnd)}>
-                    {w.title.length > 26 ? `${w.title.slice(0, 26)}…` : w.title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => void refreshWindows()}
-              title="刷新窗口列表"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => void shootScreen(windows.find((w) => w.hwnd === hwnd) ?? null)}
-              disabled={busy || hwnd == null}
-            >
-              <AppWindow className="h-4 w-4" />
-              截取窗口
-            </Button>
-          </>
-        )}
-
-        <Button onClick={() => void onFind()} disabled={busy || !tplB64}>
-          <ScanSearch className="h-4 w-4" />
-          {busy ? "查找中…" : "开始找图"}
-        </Button>
-
-        <div className="ml-auto flex items-center gap-2">
-          <div className="flex items-center gap-2">
-            <Switch id="show-hits" checked={showHits} onCheckedChange={setShowHits} />
-            <Label htmlFor="show-hits" className="cursor-pointer">
-              <Target className="mr-1 inline h-3.5 w-3.5" />
-              显示命中框
-            </Label>
+          <div className="pb-1 text-[11.5px] text-neutral-400">
+            当前在「{SOURCE_LABEL[source]}」里找
+            {source === "window" && currentWindow ? ` · ${currentWindow.title.slice(0, 20)}` : ""}
           </div>
-          {result && (
-            <Badge variant={result.found ? "default" : "secondary"}>
-              {result.found ? `命中 ${result.matched}` : "未找到"} · {result.elapsed_ms} ms
-            </Badge>
-          )}
-        </div>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
         </div>
       )}
 
+      {error && (
+        <Callout variant="error" icon={<Crosshair className="h-4 w-4" />}>
+          {error}
+        </Callout>
+      )}
+
       {/* 主体 */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
-        <Card className="flex min-h-[420px] flex-col overflow-hidden">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Crosshair className="h-4 w-4 text-blue-600" />
-              {SOURCE_LABEL[source]}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[1.55fr_1fr]">
+        <Card className="flex min-h-[340px] flex-col overflow-hidden">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
+              <Crosshair className="h-3.5 w-3.5 text-blue-600" />
+              {hay ? SOURCE_LABEL[source] : "搜索范围预览"}
               {hay && (
                 <span className="font-normal text-neutral-400">
                   {hay.width} × {hay.height}
@@ -413,80 +516,109 @@ export function FindPanel({ inheritedImage }: Props) {
               showBoxes={showHits}
               hits={hits}
               hitsOffset={hay?.origin}
+              empty={
+                <EmptyState
+                  icon={<Hand className="h-5 w-5" />}
+                  title="还没确定搜索范围"
+                  description="模板是「要找的小图」，搜索范围是「去哪张图里找」。两个都有了才能开始。"
+                  steps={[
+                    {
+                      icon: <ImageIcon className="h-3.5 w-3.5" />,
+                      text: "① 选一张模板图（要找到的小图标）",
+                    },
+                    {
+                      icon: <AppWindow className="h-3.5 w-3.5" />,
+                      text: "② 选一个窗口，或整个屏幕",
+                      detail: "点「开始找图」时会自动截当前画面",
+                    },
+                    {
+                      icon: <ScanSearch className="h-3.5 w-3.5" />,
+                      text: "③ 点「开始找图」",
+                      detail: "命中的位置会用琥珀色框标出来",
+                    },
+                  ]}
+                />
+              }
             />
           </CardContent>
         </Card>
 
-        <Card className="flex min-h-[420px] flex-col overflow-hidden">
-          <CardHeader className="pb-3">
+        <Card className="flex min-h-[340px] flex-col overflow-hidden">
+          <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Target className="h-4 w-4 text-blue-600" />
+              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
+                <Target className="h-3.5 w-3.5 text-blue-600" />
                 命中结果
               </CardTitle>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!result}
-                onClick={() =>
-                  void navigator.clipboard.writeText(JSON.stringify(result, null, 2))
-                }
-              >
-                <Download className="h-3.5 w-3.5" />
-                复制 JSON
-              </Button>
+              {result && (
+                <Badge variant={result.found ? "warning" : "secondary"}>
+                  {result.found ? `命中 ${result.matched}` : "未找到"} · {result.elapsed_ms} ms
+                </Badge>
+              )}
             </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
-            <ScrollArea className="h-full rounded-md border border-neutral-200">
-              {result && result.found ? (
-                <ul className="divide-y divide-neutral-100">
-                  {result.matches.map((h, i) => (
-                    <li key={i} className="px-3 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-amber-600 text-[11px] font-semibold text-white">
+            {result && result.found && result.matches.length > 0 ? (
+              <>
+                <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
+                  <ul className="divide-y divide-neutral-200/60">
+                    {result.matches.map((h, i) => (
+                      <li key={i} className="group flex items-start gap-2.5 px-3 py-2">
+                        <span
+                          className="mt-0.5 flex shrink-0 items-center justify-center rounded bg-amber-600 text-[10px] font-semibold text-white"
+                          style={{ width: 18, height: 18 }}
+                        >
                           {i + 1}
                         </span>
-                        <span className="font-mono text-sm text-neutral-900">
-                          ({h.x}, {h.y})
-                        </span>
-                        <span className="ml-auto font-mono text-[11px] text-neutral-500">
-                          {h.score.toFixed(4)}
-                        </span>
-                      </div>
-                      <div className="mt-1 pl-7 font-mono text-[11px] text-neutral-400">
-                        center ({h.center_x.toFixed(1)}, {h.center_y.toFixed(1)}) ·{" "}
-                        {h.width}×{h.height}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="px-3 py-10 text-center text-sm text-neutral-400">
-                  {result ? "未找到匹配" : "（尚未查找）"}
-                </div>
-              )}
-            </ScrollArea>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[12.5px] text-neutral-900">
+                              ({h.x}, {h.y})
+                            </span>
+                            <span className="ml-auto font-mono text-[10.5px] text-neutral-400">
+                              相似 {h.score.toFixed(3)}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                            中心 ({h.center_x.toFixed(1)}, {h.center_y.toFixed(1)}) · {h.width}×
+                            {h.height}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void copyCoord(h, i)}
+                          title="复制屏幕绝对坐标（中心点），可直接喂给点击脚本"
+                          className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-300 hover:bg-white hover:text-neutral-600 group-hover:text-neutral-400"
+                        >
+                          {copiedIdx === i ? (
+                            <Check className="h-3.5 w-3.5 text-emerald-600" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
+                <p className="mt-1.5 text-[11px] text-neutral-400">
+                  点右侧复制按钮可拿到屏幕绝对坐标（中心点）。
+                </p>
+              </>
+            ) : (
+              <EmptyState
+                className="bg-neutral-50/40"
+                icon={<Target className="h-5 w-5" />}
+                title={result ? "没找到匹配" : "还没有结果"}
+                description={
+                  result
+                    ? "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
+                    : "模板和搜索范围都选好后，点「开始找图」。"
+                }
+              />
+            )}
           </CardContent>
         </Card>
       </div>
-
-      {/* 模板预览 */}
-      {tplUrl && (
-        <Card>
-          <CardContent className="flex items-center gap-4 py-3">
-            <span className="text-xs text-neutral-500">模板</span>
-            <img
-              src={tplUrl}
-              alt="模板"
-              className="max-h-16 rounded border border-neutral-200 bg-neutral-50 object-contain p-1"
-            />
-            <span className="font-mono text-[11px] text-neutral-400">
-              {tplSize.width} × {tplSize.height}
-            </span>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }

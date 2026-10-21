@@ -466,12 +466,30 @@ fn find_requires_template() {
 
 #[test]
 #[ignore = "重量级集成测试：需要模型与 DLL"]
-fn m2_endpoints_return_501() {
+fn danzijson_returns_char_boxes() {
     let srv = start_server();
+
+    // 缺 image 必须报 400，而不是 200 + 空结果
     let (status, body) = http(srv.addr, "POST", "/ocr/danzijson", "application/json", b"{}");
-    println!("/ocr/danzijson -> {status} {body}");
-    assert_eq!(status, 501, "/ocr/danzijson 应返回 501");
-    assert!(body.contains("\"code\":501"));
+    println!("/ocr/danzijson (no image) -> {status} {body}");
+    assert_eq!(status, 400, "缺 image 应返回 400: {body}");
+
+    // 有图：应返回逐字数据，且字数大于 0（test_zh.png 是中文样本）
+    let payload = format!("{{\"image\":\"{}\"}}", test_image_b64());
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/danzijson",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("/ocr/danzijson -> {status} {}", &body[..body.len().min(300)]);
+    assert_eq!(status, 200, "danzijson 应返回 200: {body}");
+    assert!(body.contains("\"code\":0"), "code 应为 0: {body}");
+    assert!(body.contains("\"lines\""), "应含 lines: {body}");
+    assert!(body.contains("\"frames\""), "应含 frames: {body}");
+    let chars = json_num(&body, "char_count").unwrap_or(0.0);
+    assert!(chars > 0.0, "应识别出至少一个字符，实际 {chars}: {body}");
 }
 
 #[test]

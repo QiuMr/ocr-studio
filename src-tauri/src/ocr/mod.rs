@@ -15,10 +15,10 @@ pub mod rec;
 
 pub use det::{db_postprocess, DetBox, DetConfig};
 pub use engine::{
-    engine_from_dir, engine_from_dir_with, ensure_ort_dylib_path, EngineConfig, HealthInfo,
-    OcrEngine, TextBox,
+    engine_from_dir, engine_from_dir_with, ensure_ort_dylib_path, CharBox, EngineConfig,
+    HealthInfo, LineDetail, OcrEngine, TextBox,
 };
 // Device / ModelLevel 统一定义在 crate::config，经此重新导出以保持 `ocr::Device` 路径可用
 pub use crate::config::{Device, ModelLevel};
 pub use preprocess::{det_preprocess, rec_preprocess, DetLimitType};
-pub use rec::{ctc_decode, RecResult};
+pub use rec::{ctc_decode, ctc_decode_spans, CharSpan, RecResult};

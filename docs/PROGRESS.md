@@ -1,23 +1,38 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-21（深夜，界面白屏问题修复并实测通过）
+> 最后更新：2026-10-21（深夜第二轮：界面精修 + 日志页 + 单字 JSON + 免安装分发）
 
 ---
 
 ## 0. 一句话现状
 
-**界面白屏已修复并实测通过**：`cargo build` 出来的 exe 会去连 `http://localhost:1420`
-（开发服务器）而不是加载内嵌前端，原因是 `tauri` 没开 `custom-protocol` feature。
-补齐后 release exe 双击即可正常显示仪表盘（引擎运行中 / DirectML / 字典 18708 / HTTP 8848）。
+**M2 全部收口**：找图 7 端点、单字 JSON（`/ocr/danzijson`）、实时日志页、界面精修
+四件事一起完成，40 单测 + 16 重量级（含精度基线 / 真实截图 / 逐字对齐）全绿。
 
-**M2 找图部分已完成**：截图（屏幕 / 窗口）+ 模板匹配引擎落地，7 个找图端点全部实现，
-Playground 增加找图面板；**真实屏幕自匹配实测 score=1.0、坐标零误差**。
+**分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
+`tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
+`exe + runtime/*.dll + models/ + 使用说明.txt` 的压缩包。**单独拷 exe 是跑不起来的**
+（缺 onnxruntime.dll 会静默退回 CPU，缺 DirectML.dll 直接起不来），这一点已写进分发说明。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
-M2-找图（截图 + 模板匹配 + 7 端点 + 前端面板）。
+M2（找图 + 单字 JSON + 日志页 + 界面精修）。
 
-M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页。前端技术栈见第 7 节。
+下一步：M3 多引擎（DDDDOCR / YOLO），设计见 `docs/ENGINES.md`。
+
+### 0.0 本轮（界面精修 + M2 收口）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 去分割线 | 标题栏底部、侧边栏右侧两条 1px 实线全部去掉，层级改用留白 + 底色表达 |
+| 侧边栏折叠 | 196px ↔ 60px 图标栏，折叠按钮在**标题栏左上角**，状态存 localStorage |
+| 全局手势 | 根因是 Tailwind v4 preflight 把 `button` 的 cursor 重置成 `default`，在 base 层统一纠正（含 disabled=not-allowed、hover/active/focus 三态） |
+| 小白引导 | 新增 `PageHeader`/`Hint`/`EmptyState`/`Callout`，每页一句话说明 + 三步空状态 + 术语问号 |
+| 拖拽上传 | `useImageDrop` 同时支持 Tauri 原生拖放（`onDragDropEvent`，DOM 收不到）与浏览器 HTML5 |
+| 图片交互 | Ctrl+滚轮缩放、双击复位、悬浮缩放控件 |
+| 日志页 | tracing Layer → 环形缓冲(2000) + broadcast → 攒批 emit `log-lines`；前端级别过滤/搜索/暂停/清屏/复制 |
+| 单字 JSON | `ctc_decode_spans` 给帧区间 → 按比例切行宽 → `WarpMap::to_source` 投回原图；cls 翻转时 x 取反 |
+| 免安装分发 | `bundle.active=false` + `scripts/pack_exe.ps1`（自动带 DLL/models/说明） |
 
 ### 0.1 白屏问题的完整结论（2026-10-21 深夜，排了三小时）
 
@@ -38,6 +53,7 @@ M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页
    不开的话**连 `--release` 也按开发模式加载 `build.devUrl`**。
    官方 `pnpm tauri build` 会自动带上，裸 `cargo build` 不会 —— 属于典型陷阱。
 5. GPU 崩溃与我们的代码无关：同一 exe 由资源管理器启动（干净环境）时 GPU 正常、
+
    界面正常；在本项目的 agent shell 里启动才必崩（该 shell 环境会让 WebView2 的
    GPU 子进程起不来）。仍加了自动兜底，见下。
 
@@ -60,14 +76,21 @@ M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页
 实测：由资源管理器启动 `D:\rust-target\release\ocr-studio.exe`，
 窗口 1116×729，仪表盘正常显示「引擎状态 运行中 / DirectML(GPU) / 字典 18708 / 端口 8848」。
 
-打包产物（`pnpm tauri build`，已重新生成，旧的安装版是坏的，请换新）：
-- `D:\rust-target\release\bundle\msi\OCR Studio_0.1.0_x64_en-US.msi`（21.2 MB）
-- `D:\rust-target\release\bundle\nsis\OCR Studio_0.1.0_x64-setup.exe`（17.6 MB）
+打包产物 ~~MSI / NSIS~~ —— **2026-10-21 起不再产出安装包**（用户要求直接 exe 分发）：
+
+- `tauri.conf.json`：`bundle.active = false`
+- 分发用 `scripts/pack_exe.ps1`，产出 `release/OCR-Studio-0.1.0-win64.zip`，
+  内含 `OCR Studio.exe + runtime/*.dll + models/ + 使用说明.txt`
+- **注意**：`bundle.resources` 只在打安装包时生效，`bundle.active=false` 后
+  必须靠这个脚本手动拷 DLL，否则拿出去的 exe 会缺 onnxruntime.dll
 
 打包注意：vite 的 `emptyOutDir` 会一次性删 `dist/assets` 下 60+ 个文件，
 本机 agent 环境的批量删除保护会拦下来（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），
-表现为 `beforeBuildCommand pnpm build failed`。**打包前先手动清空 `dist`**
-（`python -c "import shutil; shutil.rmtree('dist', ignore_errors=True)"`）即可。
+表现为 `pnpm build` 直接失败。**构建前先把 dist 改名**（`Rename-Item dist dist_old_x`），
+vite 就会新建空目录，比删安全。
+
+前端改完必须 `cargo build` 才生效：`generate_context!` 在**编译期**把 `dist`
+嵌进 exe，只跑 `pnpm build` 的话 exe 里还是旧界面（本轮踩过一次，白浪费一轮截图）。
 
 ---
 
@@ -77,7 +100,8 @@ M2 剩余：单字 JSON（`/ocr/danzijson`，仍需 CTC 帧对齐）与日志页
 cargo test                       # 40 个单元测试
 cargo test -- --ignored          # + 16 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
-pnpm tauri build --debug         # 全链路打包（exe + MSI + NSIS）
+cargo build --release            # 无安装包（bundle.active=false）
+powershell -File scripts/pack_exe.ps1   # 打免安装 zip
 ```
 
 | 测试 | 结果 |
@@ -88,9 +112,10 @@ pnpm tauri build --debug         # 全链路打包（exe + MSI + NSIS）
 | `tensor_diff::rec_tensor_matches_python_dump` | 通过（rec 输入张量与 Python dump 一致） |
 | `tensor_diff::warp_perspective_matches_python_crop` | 通过（透视裁剪 **0/3069 逐位一致**） |
 | `tensor_diff::rec_probe_matches_python_on_same_tensor` | 通过（同一张量下 Rust/Python 逐帧 argmax 一致） |
-| `api_smoke`（13 个） | **13 / 13 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、400 错误路径 |
+| `api_smoke`（13 个） | **13 / 13 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、**danzijson 逐字**、400 错误路径 |
 | `capture_live`（5 个，`--ignored`） | **5 / 5 通过**：全屏尺寸→自匹配**位置零误差、score=1.0**、区域截图坐标本地化、窗口枚举、窗口截图 136 万非黑像素 |
 | `scripts/e2e_find.py`（服务进程级） | **全部通过**：真实桌面自截模板 → `/ocr/pingmuzhaotu1` 命中**坐标零误差、score=1.0000**；容错端点一致；`tuzhaotu` 图内坐标与 `origin=(0,0)` 正确；缺模板返回 400 |
+| `scripts/e2e_danzi.py`（服务进程级） | **通过**：UI 截图 39 行 / 192 字，**每行字数与文本长度一致**、**每个字框都落在行框内** |
 | `matcher::bench_find_1080p`（`--ignored`） | 性能观测：灰阶 76ms / 建金字塔 129ms / **粗扫 38.5ms** / 精化 23ms（debug 构建） |
 
 **release 构建已实测**（2026-10-21）：
@@ -100,13 +125,13 @@ D:\rust-target\release\ocr-studio.exe    8.1 MB，启动 3s 内 /ocr/health 返�
 找图（1080p 全屏 + 64px 模板）            59~62 ms（截图 ~30ms + 匹配 ~30ms）
 ```
 
-打包产物实测（2026-10-21）：
+打包产物实测（2026-10-21，已改为免安装 zip，安装包不再产出）：
 ```
 D:\rust-target\debug\ocr-studio.exe                 启动 8s 不退出
 curl http://127.0.0.1:8848/ocr/health               {"status":"ok","model":"small",
                                                      "actual_device":"directml","dict_size":18708}
-bundle/msi/OCR Studio_0.1.0_x64_en-US.msi          25.52 MiB
-bundle/nsis/OCR Studio_0.1.0_x64-setup.exe         19.80 MiB
+release/OCR-Studio-0.1.0-win64.zip                  exe + 3 个 dll + models + 使用说明
+```
 ```
 
 基线文件：`models/small/reference_output.json`（由 `scripts/ref_pipeline.py` 生成）。
@@ -336,13 +361,14 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 | 4 | `model_manager.rs`：三档模型懒加载缓存 | 部分达成——`AppState` 已支持按请求热切换重载，但无 LRU 缓存，切档会整份重载 |
 | 5 | `cls_should_rotate` 阈值语义对齐 RapidOCR | 待办（需读 RapidOCR 源码确认 label 顺序） |
 | 6 | 截图/句柄找图 + 模板匹配 NCC → 7 个找图端点 | **已完成**（6 个端点 + 1 个仍 501；真实截图自匹配 score=1.0） |
-| 7 | 单字 JSON：CTC 帧对齐 + 逆透视映射得到字符级 box | **M2 剩余，未开始** |
-| 8 | 日志页：tracing → `app.emit` → 前端实时日志 | **M2 剩余，未开始** |
+| 7 | 单字 JSON：CTC 帧对齐 + 逆透视映射得到字符级 box | **已完成**（`ctc_decode_spans` + `WarpMap`；e2e 验证字数与文本一致、字框全部落在行框内） |
+| 8 | 日志页：tracing → `app.emit` → 前端实时日志 | **已完成**（环形缓冲 2000 + 批量 emit；级别过滤/搜索/暂停/清屏/复制） |
 | 9 | 模板匹配多尺度（±10%）开关 | 已评估，本轮**不做**：耗时 ×3，且容错模式已能覆盖大部分场景。做成可选参数留到有真实需求时加 |
 | 10 | 模板匹配旋转（18 档） | 已评估，**不做**：耗时 ×18 且旋转插值会自我降分，收益低于代价 |
 | 11 | 截图区域框选 UI（鼠标拖出 region） | 已评估，本轮**不做**：当前「整屏 / 整窗口」两种粒度够用，框选属交互打磨 |
 | 12 | MiSans 商用授权口径确认 | 待用户确认（随包分发前） |
-| 13 | release 打包（`pnpm tauri build`，LTO + strip）与安装包实测 | debug 已通；release 未跑 |
+| 13 | 免安装 exe 分发（**用户明确不要 MSI/NSIS**） | `bundle.active=false` + `scripts/pack_exe.ps1` 打 zip（exe + dll + models + 说明） |
+| 14 | 多引擎抽象（DDDDOCR / YOLO） | 设计完成 `docs/ENGINES.md`，代码骨架待落 |
 
 ---
 

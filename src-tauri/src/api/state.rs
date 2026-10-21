@@ -13,7 +13,9 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
-use crate::ocr::{engine_from_dir_with, Device, HealthInfo, ModelLevel, OcrEngine, TextBox};
+use crate::ocr::{
+    engine_from_dir_with, Device, HealthInfo, LineDetail, ModelLevel, OcrEngine, TextBox,
+};
 
 use super::dto::{ApiError, OcrOptions};
 
@@ -30,9 +32,14 @@ pub fn workspace_root() -> PathBuf {
 
 /// 解析模型根目录（其下应有 tiny/small/medium 子目录）。
 ///
-/// 优先级：环境变量 `OCR_MODELS_ROOT` → 编译期仓库根 → exe 相对路径（1~4 级上级）
-/// → 当前工作目录。逐个校验 `small/det.onnx` 存在，避免猜错目录后报一堆
-/// 「找不到模型」的误导性错误。
+/// 优先级：环境变量 `OCR_MODELS_ROOT` → **exe 旁的 models** → 编译期仓库根
+/// → exe 向上 1~4 级 → 当前工作目录。逐个校验 `small/det.onnx` 存在，
+/// 避免猜错目录后报一堆「找不到模型」的误导性错误。
+///
+/// 为什么 exe 旁要排在仓库根之前：免安装分发时用户解压出来就是
+/// `OCR Studio.exe + models/`，那才是**这份拷贝**该用的模型。若让编译期常量
+/// `CARGO_MANIFEST_DIR` 抢先，开发机上会把分发包偷偷指回源码目录的 models，
+/// 测起来一切正常、到别人机器上就找不到——典型的「只在本机能跑」。
 pub fn resolve_models_root() -> PathBuf {
     if let Ok(p) = std::env::var("OCR_MODELS_ROOT") {
         if !p.trim().is_empty() {
@@ -40,11 +47,12 @@ pub fn resolve_models_root() -> PathBuf {
         }
     }
 
-    let mut candidates: Vec<PathBuf> = vec![workspace_root().join("models")];
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // target/debug/exe → ../../models；release 打包后 DLL/模型多在 exe 旁
+            candidates.push(dir.join("models"));
+            // 打包/开发时 exe 在 target/{debug,release}，模型在仓库根的上两级
             for up in 1..=4 {
                 let mut p = dir.to_path_buf();
                 for _ in 0..up {
@@ -52,9 +60,10 @@ pub fn resolve_models_root() -> PathBuf {
                 }
                 candidates.push(p.join("models"));
             }
-            candidates.push(dir.join("models"));
         }
     }
+
+    candidates.push(workspace_root().join("models"));
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("models"));
     }
@@ -184,6 +193,24 @@ impl AppState {
                 .as_mut()
                 .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
             eng.recognize(&img)
+                .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
+    }
+
+    /// 识别并返回逐字框（`/ocr/danzijson` 用）。
+    pub async fn run_recognize_detailed(
+        self: &Arc<Self>,
+        img: image::DynamicImage,
+    ) -> Result<Vec<LineDetail>, ApiError> {
+        let st = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
+            let eng = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+            eng.recognize_detailed(&img)
                 .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
         })
         .await
