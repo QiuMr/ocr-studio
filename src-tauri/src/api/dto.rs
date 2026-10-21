@@ -80,6 +80,9 @@ pub struct OcrOptions {
     /// 只保留这些 class_id（仅 `/vision/detect`）。空/缺省 = 全部
     #[serde(default)]
     pub class_filter: Option<Vec<usize>>,
+    /// `/vision/pipeline` 的检测引擎。缺省 `yolo:v8`
+    #[serde(default)]
+    pub detect_engine: Option<String>,
 }
 
 /// 四点框（原图坐标，顺序 左上/右上/右下/左下）。
@@ -266,6 +269,35 @@ pub struct DetectData {
     /// 实际使用的引擎（缺省请求 = 当前 PP-OCR，检测只会失败，这里回请求值）
     pub engine: String,
     pub detections: Vec<DetectHitDto>,
+    pub count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// `/vision/pipeline` 的单区域结果：一个检测目标 + 框内识别出的文字。
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineRegionDto {
+    pub r#box: Box4,
+    pub class_id: usize,
+    pub class_name: String,
+    /// 检测置信度
+    pub score: f64,
+    /// 框内各行文本按阅读顺序拼接（行间 `\n`）
+    pub text: String,
+    /// 框内识别出的行（坐标已平移回原图）
+    pub lines: Vec<LineDto>,
+}
+
+/// `/vision/pipeline` 出参。
+#[derive(Debug, Serialize)]
+pub struct PipelineData {
+    /// 检测引擎标识
+    pub detect_engine: String,
+    /// 识别引擎标识
+    pub ocr_engine: String,
+    pub regions: Vec<PipelineRegionDto>,
+    /// 检出且成功识别的区域数（识别失败的区域不在其中）
     pub count: usize,
     pub width: u32,
     pub height: u32,

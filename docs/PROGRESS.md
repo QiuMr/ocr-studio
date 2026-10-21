@@ -1,22 +1,19 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（M3.2 YOLO 检测引擎落地）
+> 最后更新：2026-10-22（M3.3 pipeline 串联落地，M3 全部完成）
 
 ---
 
 ## 0. 一句话现状
 
-**M3.2 完成**：YOLO v8 通用目标检测接入完毕——`models/detect/yolo/v8/model.onnx`
-（官方权重 opset12 导出，`scripts/fetch_yolo.ps1` 一键复现），`POST /vision/detect`
-+ Tauri `vision_detect` 命令，测试台出现「目标检测」形态（类别徽章 + 置信度列表，
-检测模式下方向分类开关自动隐藏）。
-**与本机 ultralytics 逐框比对：8/8 框 IoU=1.0000、置信度差=0.0000**（letterbox
-复用 cv2 逐位 resize + Python 银行家舍入复刻 + class-aware 贪心 NMS）。
-63 单测 + 21 重量级全绿，PP-OCR 精度**零变化**（`pipeline_match` 仍然逐字全对）。
+**M3 全部完成**（抽象层 / DDDDOCR / YOLO 检测 / pipeline 串联）：
+`POST /vision/pipeline` = 检测引擎找区域 → PP-OCR 框内认字，`detect_engine`
+缺省 yolo:v8；测试台检测模式新增「框内识字」开关。bus.png 实测 5 区域 8 行
+（bus 框内 7 行）。63 单测 + 22 重量级全绿，PP-OCR 精度**零变化**。
 
 M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）、M3.0 抽象层、
-M3.1 DDDDOCR 均已完成。
+M3.1 DDDDOCR、M3.2 YOLO 检测均已完成。
 
 **分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
 `tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
@@ -26,11 +23,25 @@ M3.1 DDDDOCR 均已完成。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
 M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）、
-M3.2（YOLO 检测）。
+M3.2（YOLO 检测）、M3.3（pipeline 串联）。
 
-下一步：M3.3（`/vision/pipeline` 检测+识别串联），设计见 `docs/ENGINES.md`。
+下一步候选（见 0.0 末尾的待办）。
 
-### 0.0 本轮（M3.2 YOLO 检测）做了什么
+### 0.0 本轮（M3.3 pipeline 串联）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 后端 | `AppState::run_pipeline`：detect（alt 锁）→ 裁剪 → PP-OCR 逐区域（engine 锁），两把锁顺序持有不嵌套；单区域识别失败只记日志不拖垮整图；`OcrOptions` 增 `detect_engine`（缺省 yolo:v8） |
+| 接口 | `POST /vision/pipeline` + Tauri `vision_pipeline`；出参含每区域的 class/置信度/框内文本/行框（已平移回原图坐标） |
+| 前端 | 检测模式新增「框内识字」开关；开则走 pipeline，右侧「检测 + 识别结果」列表显示区域类别 + 框内文字，无文字区域明说「（框内没识别出文字）」 |
+| 踩坑 | **`crop_imm(x0,y0,x1-x0,y1-y1)` 高度手误算成 0**——0 高图 infer 静默返回空，一度以为链路断了（直接对同一裁剪跑 /ocr/shibie 有 7 行字）。靠集成测试打印每区域 crop 尺寸定位。教训：**裁剪后必须断言宽高** |
+| 环境事故 | D 盘 0 空闲 + **C 盘 0 字节**（回收站积了 81.5GB 构建产物 + Temp 7.9GB）。清了回收站中的构建类文件（.lib/.o/.pdb/.rlib 等 ≈75GB，保留 .onnx/.exe/.bin）和 npm/pip 缓存，D 恢复 38GB、C 恢复 1.4GB。**Rust 构建曾因此大面积 os error 5 / LNK1108**，与本轮代码无关 |
+| 验收 | 集成测试 `tests/pipeline_vision.rs`（bus.png 5 区域 8 行断言）；HTTP 实测同数；UI 实测「5 区域 · 8 行 · 2410ms」；63 lib + 22 ignored 全绿，pipeline_match（PP-OCR 基线）仍逐字全对 |
+
+待办：v5/v7 onnx 到手后跑 parity；pack_exe.ps1 复验（含新模型后 zip 体积）；
+C 盘长期只剩 1~2GB，建议用户自己清理（Temp 7.9GB 未动）。
+
+### 0.0.1 上轮（M3.2 YOLO 检测）做了什么
 
 | 项 | 结果 |
 |---|---|

@@ -153,7 +153,7 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `cla
 | M3.0 ✅ | 抽象层 + `OcrEngine` 实现 `VisionEngine` + `/engine/list` | 8 个新用例全绿；48 通过 / 1 忽略；推理路径零改动 |
 | M3.1 ✅ | `ddddocr` 引擎（common / old）+ 共享 PP-OCR det + `/ocr/*` 的 `engine` 字段 | 见 6.1 的实测验收（7 行逐字与官方 Python 完全一致） |
 | M3.2 ✅ | YOLO 通用检测（v8 优先，导出 ONNX opset 12+） | 与 ultralytics 逐框比对：8/8 框 IoU=1.0000、conf 差=0.0000（见 6.2） |
-| M3.3 | `/vision/pipeline` 串联 | 复杂版面（表格、多列）上比纯 PP-OCR 明显更准 |
+| M3.3 ✅ | `/vision/pipeline` 串联 | bus.png 实测：5 区域 8 行文字（bus 框内 7 行），UI「框内识字」可用（见 6.3） |
 
 M3.0 顺带完成的部分：`catalog::discover()` 9 个候选引擎（ppocr×3 + ddddocr×2 + yolo×4）
 的可用性探测、能力声明、缺失文件提示；前端设置页「识别引擎」卡片。
@@ -252,6 +252,20 @@ ultralytics 逐位一致。真实场景的 jpg 输入自带这点解码噪声，
 失败，把新版 wrapper 盖在旧版 native 上（症状：`InferenceSession` 没有
 `is_webgpu_graph_capture_enabled` 属性，且每次跑都重新破坏）。已改为安装
 `onnxruntime==1.24.3`（CPU 版）根治；代价是 RapidOCR 这类本机脚本退回 CPU 推理。
+
+
+### 6.3 M3.3 实现实录（/vision/pipeline）
+
+- 流程：`detect_engine`（默认 yolo:v8）找区域 → 轴对齐裁剪 → PP-OCR 逐区域认字 →
+  行坐标加框偏移平移回原图。两把引擎锁**顺序持有、绝不嵌套**（detect 用 alt 锁、
+  识别用 engine 锁，各自独立的 spawn_blocking）。
+- **验收口径要写清**：COCO 类别与文本区域基本不对齐，yolov8n+coco 跑文档截图
+  检出的是人/车不是文字块——这是预期，不是 bug。pipeline 面向**自训检测模型**
+  （按钮/标题/表格检测器）。bus.png 只用来验证链路：实测 5 区域 8 行
+  （bus 框内 7 行：3ATDOM/MADRID/eléctricamEMTe/cero/emisiones...）。
+- **踩过的坑（一度以为链路断了）**：直接对巴士裁剪图跑 `/ocr/shibie` 有 7 行字，
+  pipeline 却报 0——根因是 `crop_imm(x0, y0, x1 - x0, y1 - y1)`，高度算成 `y1-y1=0`
+  的手误，0 高图 infer 静默返回空。**裁剪后必须断言宽高 > 0**（现已在测试里锁）。
 
 
 ### YOLO 的已知坑（提前记）

@@ -372,35 +372,138 @@ impl AppState {
         img: image::DynamicImage,
         detect: DetectOptions,
     ) -> Result<Vec<Detection>, ApiError> {
-        match alt_spec_of(opts)? {
-            None => {
-                self.ensure_engine(opts).await?;
-                let st = Arc::clone(self);
-                tokio::task::spawn_blocking(move || {
-                    let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
-                    let eng = guard
-                        .as_mut()
-                        .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
-                    eng.detect(&img, &detect).map_err(map_engine_err)
-                })
-                .await
-                .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?
-            }
-            Some(spec) => {
-                let dev = opts.device.as_deref().and_then(parse_device);
-                self.ensure_alt_engine(spec, dev).await?;
-                let st = Arc::clone(self);
-                tokio::task::spawn_blocking(move || {
-                    let mut guard = st.alt.lock().unwrap_or_else(|e| e.into_inner());
-                    let alt = guard
-                        .as_mut()
-                        .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
-                    alt.engine.detect(&img, &detect).map_err(map_engine_err)
-                })
-                .await
-                .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?
-            }
+        self.detect_with(opts, img, detect, None).await
+    }
+
+    /// 检测的公共实现。`spec_override` 给 pipeline 用（显式指定检测引擎）。
+    async fn detect_with(
+        self: &Arc<Self>,
+        opts: &OcrOptions,
+        img: image::DynamicImage,
+        detect: DetectOptions,
+        spec_override: Option<EngineSpec>,
+    ) -> Result<Vec<Detection>, ApiError> {
+        let spec = match spec_override {
+            Some(s) => s,
+            None => match alt_spec_of(opts)? {
+                // 缺省 = PP-OCR（会走 1002），与 /vision/detect 的语义一致
+                None => {
+                    self.ensure_engine(opts).await?;
+                    let st = Arc::clone(self);
+                    return tokio::task::spawn_blocking(move || {
+                        let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
+                        let eng = guard
+                            .as_mut()
+                            .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+                        eng.detect(&img, &detect).map_err(map_engine_err)
+                    })
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?;
+                }
+                Some(s) => s,
+            },
+        };
+        let dev = opts.device.as_deref().and_then(parse_device);
+        self.ensure_alt_engine(spec, dev).await?;
+        let st = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = st.alt.lock().unwrap_or_else(|e| e.into_inner());
+            let alt = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+            alt.engine.detect(&img, &detect).map_err(map_engine_err)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("检测任务崩溃: {e}")))?
+    }
+
+    /// 检测 + 识别串联（`/vision/pipeline`）：检测引擎找区域，PP-OCR 在每个
+    /// 区域内认字。
+    ///
+    /// 两把引擎锁**顺序持有，绝不嵌套**：detect 拿 alt 锁、识别拿 engine 锁，
+    /// 分别在不同的 spawn_blocking 里完成，避免锁序问题。
+    ///
+    /// 验收口径（重要）：COCO 类别与「文本区域」基本不对齐——用 yolov8n+coco
+    /// 跑文档截图，检出的多半是人/车而不是文字块，这是**预期行为**。pipeline
+    /// 面向的是自训检测模型（例如「按钮/标题/表格」检测器），COCO 图只用来
+    /// 验证链路通不通。
+    pub async fn run_pipeline(
+        self: &Arc<Self>,
+        opts: &OcrOptions,
+        img: image::DynamicImage,
+        detect: DetectOptions,
+    ) -> Result<Vec<(Detection, Vec<TextLine>)>, ApiError> {
+        use crate::engine::EngineKind;
+        use image::GenericImageView;
+
+        // 检测引擎：显式指定 > 请求 engine 字段 > 默认 yolo:v8
+        let detect_spec = match opts
+            .detect_engine
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => EngineSpec::parse(raw).map_err(|e| match e {
+                VisionError::UnknownEngine(m) => ApiError::UnknownEngine(m),
+                other => ApiError::BadRequest(other.to_string()),
+            })?,
+            None => match alt_spec_of(opts)? {
+                Some(s) if matches!(s.kind, EngineKind::Yolo(_)) => s,
+                _ => EngineSpec::yolo(crate::engine::YoloVersion::V8),
+            },
+        };
+        if matches!(detect_spec.kind, EngineKind::PpOcr | EngineKind::DdddOcr) {
+            return Err(ApiError::Unsupported(
+                "pipeline 的检测引擎必须是 yolo:*（OCR 引擎不会找目标区域）".to_string(),
+            ));
         }
+
+        // 1) 检测
+        let dets = self
+            .detect_with(opts, img.clone(), detect, Some(detect_spec))
+            .await?;
+
+        // 2) PP-OCR 识别（区域为空就直接返回，别为了空结果加载 OCR）
+        if dets.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_engine(opts).await?;
+        let st = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = st.engine.lock().unwrap_or_else(|e| e.into_inner());
+            let eng = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
+
+            let (w, h) = img.dimensions();
+            let mut out = Vec::with_capacity(dets.len());
+            for d in dets {
+                // 轴对齐裁剪，钳到图内；退化区域直接跳过
+                let x0 = d.points[0].0.floor().max(0.0) as u32;
+                let y0 = d.points[0].1.floor().max(0.0) as u32;
+                let x1 = (d.points[2].0.ceil() as u32).min(w);
+                let y1 = (d.points[2].1.ceil() as u32).min(h);
+                if x1 <= x0 + 2 || y1 <= y0 + 2 {
+                    continue;
+                }
+                let crop = img.crop_imm(x0, y0, x1 - x0, y1 - y0);
+                let lines = match eng.infer(
+                    &crop,
+                    &RecognizeOptions { want_chars: false },
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // 单区域失败不该拖垮整张图：记日志，该区域标记为无文字
+                        tracing::warn!("pipeline 区域识别失败（{:?}）：{e}", d.class_name);
+                        Vec::new()
+                    }
+                };
+                out.push((d, lines));
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("pipeline 任务崩溃: {e}")))?
     }
 
     /// 按 spec 立即加载额外引擎（Tauri 命令用，不经过请求参数）。

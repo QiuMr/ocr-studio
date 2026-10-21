@@ -78,6 +78,7 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo:v8"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
+| `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 yolo:v8） |
 | `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
 
 请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`）。
@@ -100,6 +101,9 @@ models/                  模型（缺了会提示「引擎未加载」）
 `/vision/detect` 额外接受 `conf`（置信度下限，默认 0.25）、`iou`（NMS 阈值，默认 0.7）、
 `class_filter`（类别 id 数组，缺省全部）。后处理与 ultralytics 逐框对齐
 （实测 IoU=1.0 / conf 差=0，见 docs/ENGINES.md 6.2）。
+
+`/vision/pipeline` 额外接受 `detect_engine`（缺省 `yolo:v8`）。注意：COCO 类别与
+文本区域不对齐，yolov8n+coco 检出的是人/车不是文字块——**pipeline 面向自训检测模型**。
 
 DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文档很差），
 行检测**复用 PP-OCR 的 det 模型**，所以用 ddddocr 时 `models/small/det.onnx` 必须在。

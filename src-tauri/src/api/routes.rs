@@ -23,8 +23,8 @@ use image::{DynamicImage, RgbImage};
 use super::dto::{
     decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
     DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData, FindHitDto, FindOptions,
-    HealthDto, LineDto, OcrOptions, ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, EngineItemDto,
-    EngineListData,
+    HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto, ShibieData, ZhaoziData,
+    CODE_ENGINE_NOT_READY, EngineItemDto, EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -104,6 +104,7 @@ pub fn build_router() -> Router<Arc<AppState>> {
         .route("/ocr/health", get(health))
         .route("/engine/list", get(engine_list))
         .route("/vision/detect", post(vision_detect))
+        .route("/vision/pipeline", post(vision_pipeline))
 }
 
 // ---------------------------------------------------------------- 入参解析
@@ -185,6 +186,7 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
         class_filter: fields
             .get("class_filter")
             .and_then(|s| parse_id_list(s)),
+        detect_engine: fields.get("detect_engine").cloned(),
     };
     Ok((img, opts))
 }
@@ -476,6 +478,105 @@ async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Resp
         engine: engine_label,
         count: detections.len(),
         detections,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    }))
+    .into_response()
+}
+
+/// POST /vision/pipeline —— 检测 + 识别串联：检测引擎找区域，PP-OCR 框内认字。
+///
+/// `detect_engine` 缺省 `yolo:v8`；`engine` 字段若指向 yolo 也会被用作检测引擎。
+/// 用 yolov8n+coco 时检出的是人/车而不是文字块——**这是预期**，pipeline 面向
+/// 自训检测模型（见 docs/ENGINES.md 6.3）。
+async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+
+    let conf = opts.conf.unwrap_or(0.25);
+    let iou = opts.iou.unwrap_or(0.7);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return ApiError::BadRequest(format!("conf 必须在 0..1，收到 {conf}")).into_response();
+    }
+    if !iou.is_finite() || !(0.0..=1.0).contains(&iou) {
+        return ApiError::BadRequest(format!("iou 必须在 0..1，收到 {iou}")).into_response();
+    }
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        iou_thresh: iou,
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+
+    // 识别引擎标识：PP-OCR 当前档位（engine 字段指向 ppocr:* 也归到这）
+    let ocr_level = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .level;
+    let ocr_label = crate::engine::EngineSpec::ppocr(ocr_level).key();
+    let detect_label = opts
+        .detect_engine
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            opts.engine
+                .clone()
+                .filter(|s| s.starts_with("yolo"))
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| "yolo:v8".to_string());
+
+    let regions = match state.run_pipeline(&opts, img, detect).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let mut text_count = 0usize;
+    let region_dtos: Vec<PipelineRegionDto> = regions
+        .iter()
+        .map(|(d, lines)| {
+            text_count += lines.len();
+            PipelineRegionDto {
+                r#box: [
+                    [d.points[0].0, d.points[0].1],
+                    [d.points[1].0, d.points[1].1],
+                    [d.points[2].0, d.points[2].1],
+                    [d.points[3].0, d.points[3].1],
+                ],
+                class_id: d.class_id,
+                class_name: d.class_name.clone(),
+                score: d.score,
+                text: lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"),
+                // 行坐标在裁剪图坐标系，平移回原图（检测框是轴对齐的，直接加偏移）
+                lines: lines
+                    .iter()
+                    .map(|l| LineDto {
+                        text: l.text.clone(),
+                        r#box: [
+                            [l.points[0].0 + d.points[0].0, l.points[0].1 + d.points[0].1],
+                            [l.points[1].0 + d.points[0].0, l.points[1].1 + d.points[0].1],
+                            [l.points[2].0 + d.points[0].0, l.points[2].1 + d.points[0].1],
+                            [l.points[3].0 + d.points[0].0, l.points[3].1 + d.points[0].1],
+                        ],
+                        score: l.score,
+                        det_score: l.det_score,
+                        rotated: l.rotated,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    Json(ApiResp::ok(PipelineData {
+        detect_engine: detect_label,
+        ocr_engine: ocr_label,
+        count: text_count,
+        regions: region_dtos,
         width: w,
         height: h,
         elapsed_ms: t0.elapsed().as_millis(),

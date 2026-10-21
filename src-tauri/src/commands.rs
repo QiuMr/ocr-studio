@@ -65,6 +65,7 @@ pub async fn ocr_recognize(
         conf: None,
         iou: None,
         class_filter: None,
+        detect_engine: None,
     };
     let boxes = state
         .recognize_lines(&opts, img)
@@ -162,6 +163,7 @@ pub async fn vision_detect(
         conf,
         iou,
         class_filter,
+        detect_engine: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -187,6 +189,122 @@ pub async fn vision_detect(
         engine: engine_label,
         count: detections.len(),
         detections,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
+}
+
+// ---------------------------------------------------------------- pipeline
+
+/// 单个区域（检测框 + 框内文字），与 HTTP `/vision/pipeline` 一致。
+#[derive(Debug, Serialize)]
+pub struct PipelineRegionOut {
+    pub r#box: [[f64; 2]; 4],
+    pub class_id: usize,
+    pub class_name: String,
+    pub score: f64,
+    pub text: String,
+    pub lines: Vec<LineDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PipelineOut {
+    pub detect_engine: String,
+    pub ocr_engine: String,
+    pub regions: Vec<PipelineRegionOut>,
+    pub count: usize,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// 检测 + 识别串联（前端测试台「框内识字」用）。
+#[tauri::command]
+pub async fn vision_pipeline(
+    state: State<'_, Arc<AppState>>,
+    image: String,
+    detect_engine: Option<String>,
+    conf: Option<f32>,
+    iou: Option<f32>,
+    class_filter: Option<Vec<usize>>,
+) -> Result<PipelineOut, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?;
+    let (w, h) = (img.width(), img.height());
+
+    let opts = OcrOptions {
+        image,
+        level: None,
+        device: None,
+        use_cls: None,
+        engine: None,
+        keyword: None,
+        conf,
+        iou,
+        class_filter,
+        detect_engine,
+    };
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: opts.conf.unwrap_or(0.25),
+        iou_thresh: opts.iou.unwrap_or(0.7),
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+    let ocr_level = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .level;
+
+    let regions = state
+        .run_pipeline(&opts, img, detect)
+        .await
+        .map_err(|e| e.message())?;
+
+    let mut text_count = 0usize;
+    let region_out: Vec<PipelineRegionOut> = regions
+        .iter()
+        .map(|(d, lines)| {
+            text_count += lines.len();
+            PipelineRegionOut {
+                r#box: box4(&d.points),
+                class_id: d.class_id,
+                class_name: d.class_name.clone(),
+                score: d.score,
+                text: lines
+                    .iter()
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                lines: lines
+                    .iter()
+                    .map(|l| LineDto {
+                        text: l.text.clone(),
+                        r#box: [
+                            [l.points[0].0 + d.points[0].0, l.points[0].1 + d.points[0].1],
+                            [l.points[1].0 + d.points[0].0, l.points[1].1 + d.points[0].1],
+                            [l.points[2].0 + d.points[0].0, l.points[2].1 + d.points[0].1],
+                            [l.points[3].0 + d.points[0].0, l.points[3].1 + d.points[0].1],
+                        ],
+                        score: l.score,
+                        det_score: l.det_score,
+                        rotated: l.rotated,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    Ok(PipelineOut {
+        detect_engine: opts
+            .detect_engine
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "yolo:v8".to_string()),
+        ocr_engine: crate::engine::EngineSpec::ppocr(ocr_level).key(),
+        count: text_count,
+        regions: region_out,
         width: w,
         height: h,
         elapsed_ms: t0.elapsed().as_millis(),
@@ -257,6 +375,7 @@ pub async fn ocr_danzijson(
         conf: None,
         iou: None,
         class_filter: None,
+        detect_engine: None,
     };
     let details = state
         .recognize_details(&opts, img)

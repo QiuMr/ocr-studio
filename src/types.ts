@@ -108,6 +108,28 @@ export interface DetectResult {
   elapsed_ms: number;
 }
 
+/** pipeline 的单区域：检测框 + 框内识别出的文字 */
+export interface PipelineRegion {
+  box: Box4;
+  class_id: number;
+  class_name: string;
+  score: number;
+  /** 框内各行文本按阅读顺序拼接（行间 \n） */
+  text: string;
+  /** 框内识别出的行（坐标已在原图上） */
+  lines: LineResult[];
+}
+
+export interface PipelineResult {
+  detect_engine: string;
+  ocr_engine: string;
+  regions: PipelineRegion[];
+  count: number;
+  width: number;
+  height: number;
+  elapsed_ms: number;
+}
+
 // ---------------------------------------------------------------- 找图
 
 export type FindSource = "image" | "screen" | "window";

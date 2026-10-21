@@ -41,11 +41,19 @@ import {
   detectImage,
   imageSize,
   listEngines,
+  pipeline,
   recognize,
   recognizeChars,
 } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
-import type { DanziResult, DetectResult, EngineItem, LineResult, RecognizeResult } from "../types";
+import type {
+  DanziResult,
+  DetectResult,
+  EngineItem,
+  LineResult,
+  PipelineResult,
+  RecognizeResult,
+} from "../types";
 
 /** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
 function engineLabel(e: EngineItem): string {
@@ -100,6 +108,10 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   const [result, setResult] = useState<RecognizeResult | null>(null);
   /** 检测引擎（yolo 等）的结果；与 result 互斥 */
   const [detResult, setDetResult] = useState<DetectResult | null>(null);
+  /** 检测+识别串联（框内识字）的结果 */
+  const [pipeResult, setPipeResult] = useState<PipelineResult | null>(null);
+  /** 检测模式下：开始识别时是否顺带在框内认字 */
+  const [ocrInBoxes, setOcrInBoxes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showBoxes, setShowBoxes] = useState(true);
@@ -124,6 +136,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
       setName(label);
       setResult(null);
       setDetResult(null);
+      setPipeResult(null);
       setDetail(null);
       setTab("text");
       setError(null);
@@ -210,12 +223,18 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     setBusy(true);
     setError(null);
     try {
-      if (isDetector) {
+      if (isDetector && ocrInBoxes) {
+        setPipeResult(await pipeline(b64Ref.current, engine));
+        setResult(null);
+        setDetResult(null);
+      } else if (isDetector) {
         setDetResult(await detectImage(b64Ref.current, engine));
         setResult(null);
+        setPipeResult(null);
       } else {
         setResult(await recognize(b64Ref.current, useCls, engine));
         setDetResult(null);
+        setPipeResult(null);
       }
       setDetail(null); // 档位/参数可能变了，旧的逐字结果作废
       setTab("text");
@@ -246,6 +265,12 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   };
 
   const copyJson = async () => {
+    if (pipeResult) {
+      await navigator.clipboard.writeText(JSON.stringify(pipeResult.regions, null, 2));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+      return;
+    }
     if (detResult) {
       await navigator.clipboard.writeText(JSON.stringify(detResult.detections, null, 2));
       setCopied(true);
@@ -258,16 +283,25 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     window.setTimeout(() => setCopied(false), 1400);
   };
 
-  const lines: LineResult[] = detResult
-    ? // 检测框复用行框的画图逻辑：文本位置显示「类别 + 置信度」
-      detResult.detections.map((d) => ({
-        text: `${d.class_name} ${(d.score * 100).toFixed(0)}%`,
-        box: d.box,
-        score: d.score,
-        det_score: d.score,
+  // 图上画什么框：pipeline 模式画区域框（文字=框内识别出的内容），检测模式画类别框
+  const lines: LineResult[] = pipeResult
+    ? pipeResult.regions.map((r) => ({
+        text: r.text ? `${r.class_name} · ${r.text.split("\n")[0]}` : r.class_name,
+        box: r.box,
+        score: r.score,
+        det_score: r.score,
         rotated: false,
       }))
-    : (result?.lines ?? []);
+    : detResult
+      ? // 检测框复用行框的画图逻辑：文本位置显示「类别 + 置信度」
+        detResult.detections.map((d) => ({
+          text: `${d.class_name} ${(d.score * 100).toFixed(0)}%`,
+          box: d.box,
+          score: d.score,
+          det_score: d.score,
+          rotated: false,
+        }))
+      : (result?.lines ?? []);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
@@ -314,6 +348,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                 // 换引擎后旧结果一定作废，别让用户拿 A 的框对着 B 的图
                 setResult(null);
                 setDetResult(null);
+                setPipeResult(null);
                 setDetail(null);
               }}
             >
@@ -350,7 +385,22 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
         </div>
 
         <div className="flex items-center gap-1">
-          {!isDetector && (
+          {isDetector ? (
+            <>
+              <Switch id="ocr-in-boxes" checked={ocrInBoxes} onCheckedChange={setOcrInBoxes} />
+              <Label
+                htmlFor="ocr-in-boxes"
+                className="cursor-pointer text-[12.5px] font-normal text-neutral-600"
+              >
+                框内识字
+              </Label>
+              <Hint>
+                开启后每个检测框内会再跑一次 PP-OCR 识别文字（检测 + 识别串联）。
+                适合搭配自训检测模型找「按钮/标题/表格」等区域；用通用 COCO 模型时
+                检出的多是人和车，框里未必有字。
+              </Hint>
+            </>
+          ) : (
             <>
               <Switch id="use-cls" checked={useCls} onCheckedChange={setUseCls} />
               <Label
@@ -376,6 +426,12 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
           {detResult && (
             <Badge variant="secondary">
               {detResult.count} 目标 · {detResult.elapsed_ms} ms
+            </Badge>
+          )}
+          {pipeResult && (
+            <Badge variant="secondary">
+              {pipeResult.regions.length} 区域 · {pipeResult.count} 行 ·{" "}
+              {pipeResult.elapsed_ms} ms
             </Badge>
           )}
           <span className="hidden items-center gap-1 text-[11.5px] text-neutral-400 sm:flex">
@@ -453,17 +509,19 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
             <div className="flex items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
                 <ScanText className="h-3.5 w-3.5 text-blue-600" />
-                {detResult
-                  ? "检测结果"
-                  : result
-                    ? "识别结果"
-                    : "识别结果会显示在这里"}
+                {pipeResult
+                  ? "检测 + 识别结果"
+                  : detResult
+                    ? "检测结果"
+                    : result
+                      ? "识别结果"
+                      : "识别结果会显示在这里"}
               </CardTitle>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => void copyJson()}
-                disabled={!result && !detResult}
+                disabled={!result && !detResult && !pipeResult}
               >
                 {copied ? (
                   <Copy className="h-3.5 w-3.5 text-emerald-600" />
@@ -475,7 +533,50 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
             </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
-            {detResult ? (
+            {pipeResult ? (
+              <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
+                <ul className="divide-y divide-neutral-200/60">
+                  {pipeResult.regions.map((r, i) => (
+                    <li key={i} className="flex items-start gap-2.5 px-3 py-2">
+                      <span
+                        className="mt-0.5 flex shrink-0 items-center justify-center rounded text-[10px] font-semibold text-white"
+                        style={{
+                          width: 18,
+                          height: 18,
+                          background: `hsl(${(r.class_id * 47) % 360} 70% 45%)`,
+                        }}
+                      >
+                        {r.class_id}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="selectable truncate text-[12.5px] font-medium text-neutral-900">
+                            {r.class_name}
+                          </span>
+                          <span className="font-mono text-[10.5px] text-neutral-400">
+                            置信 {r.score.toFixed(3)}
+                          </span>
+                        </div>
+                        {r.text ? (
+                          <div className="selectable mt-0.5 whitespace-pre-wrap text-[12.5px] leading-5 text-neutral-700">
+                            {r.text}
+                          </div>
+                        ) : (
+                          <div className="mt-0.5 text-[11.5px] text-neutral-400">
+                            （框内没识别出文字）
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                  {pipeResult.regions.length === 0 && (
+                    <li className="px-3 py-8 text-center text-[12.5px] text-neutral-400">
+                      （没有检出区域）
+                    </li>
+                  )}
+                </ul>
+              </ScrollArea>
+            ) : detResult ? (
               <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
                 <ul className="divide-y divide-neutral-200/60">
                   {detResult.detections.map((d, i) => (
@@ -634,13 +735,15 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
       </div>
 
       {/* 底部提示：为什么框和字对不上之类的小白困惑 */}
-      {detResult && detResult.detections.length > 0 && showBoxes && (
+      {(detResult || pipeResult) && (detResult?.detections.length ?? 0) + (pipeResult?.regions.length ?? 0) > 0 && showBoxes && (
         <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
           <GripHorizontal className="h-3 w-3" />
-          框上的文字是「类别 + 置信度」，左侧列表的编号就是类别 id。
+          {pipeResult
+            ? "框上的文字是「类别 · 框内识别出的第一行」，左侧列表有完整文字。"
+            : "框上的文字是「类别 + 置信度」，左侧列表的编号就是类别 id。"}
         </div>
       )}
-      {!detResult && result && result.lines.length > 0 && showBoxes && (
+      {!detResult && !pipeResult && result && result.lines.length > 0 && showBoxes && (
         <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
           <GripHorizontal className="h-3 w-3" />
           图上的蓝框就是每一行的位置，编号与「逐行」列表一一对应。

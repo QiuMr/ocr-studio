@@ -19,6 +19,7 @@ import type {
   Health,
   LogLine,
   ModelLevel,
+  PipelineResult,
   RecognizeResult,
   WindowInfo,
 } from "../types";
@@ -172,6 +173,41 @@ export async function detectImage(
     throw new Error(json.msg || `HTTP ${res.status}`);
   }
   return json.data as DetectResult;
+}
+
+/**
+ * 检测 + 识别串联：检测引擎找区域，PP-OCR 在每个区域内认字。
+ * 测试台「框内识字」开关打开时走这条。
+ */
+export async function pipeline(
+  image: string,
+  detectEngine?: string,
+  opts?: { conf?: number; iou?: number },
+): Promise<PipelineResult> {
+  if (isTauri()) {
+    return invoke<PipelineResult>("vision_pipeline", {
+      image,
+      detect_engine: detectEngine || null,
+      conf: opts?.conf ?? null,
+      iou: opts?.iou ?? null,
+      class_filter: null,
+    });
+  }
+  const res = await fetch(`${HTTP_BASE}/vision/pipeline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image,
+      ...(detectEngine ? { detect_engine: detectEngine } : {}),
+      ...(opts?.conf != null ? { conf: opts.conf } : {}),
+      ...(opts?.iou != null ? { iou: opts.iou } : {}),
+    }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as PipelineResult;
 }
 
 /**

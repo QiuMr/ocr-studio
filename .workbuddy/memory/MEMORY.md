@@ -51,14 +51,22 @@
 - 跑 find 类接口时，截图必须和匹配用**同一份像素**（`find_image` 返回 `preview`），
   否则两次截屏之间画面变了，框会画在过时背景上。
 
-## 当前进度（2026-10-21 深夜第三轮）
-- M0/M1/M2 完成；M3.0 完成 —— 多引擎抽象层落地：
-  - `src-tauri/src/engine/{mod,catalog}.rs`；`OcrEngine` 实现 `VisionEngine`（内部零改动）。
-  - **trait 方法名必须是 `infer` / `status`，不能叫 `recognize` / `health`**：
-    `OcrEngine` 有同名 inherent 方法，同名会让「具体类型 / `dyn`」解析出两套行为。
-  - `/engine/list` + `list_engines` 只扫目录、**不加载模型**（加载一次几秒还吃显存）。
-  - `ppocr_dir` 新路径 `models/ocr/ppocr/<lvl>/` 优先，回退旧 `models/<lvl>/`。
-- 测试基线：`cargo test --lib` 48 通过 / 1 忽略；`cargo test -- --ignored` 17 项全绿。
-- M3 剩余：M3.1 DDDDOCR（**缺 onnx 模型与字典，得先弄到**）、M3.2 YOLO v8、
-  M3.3 `/vision/pipeline`；引擎注册表（LRU 单活）留到 M3.1 一起做。
-- 详细记录见 `docs/PROGRESS.md`；多引擎契约见 `docs/ENGINES.md`。
+## 多引擎进度（2026-10-22）
+- M3.0/M3.1/M3.2 完成：DDDDOCR（共享 PP-OCR det 行检测）+ YOLO v8 检测均已实测落地并提交。
+  - M3.1：`engine/ddddocr.rs`，`engine` 参数贯通 HTTP/Tauri，AltEngine 单槽；提交 e67699c。
+  - M3.2：`engine/yolo.rs` + `/vision/detect` + 错误码 1002/1003；提交 c78b006。
+- **跨引擎对齐测试图必须用 PNG**：JPEG 各家解码器 IDCT 有 ±1 抖动，会把 YOLO 置信度
+  推动 0.001~0.01、大框 IoU 压到 0.97，全是噪声不是 bug。换 PNG 后 yolo_parity
+  8/8 框 IoU=1.0000、conf 差=0。
+- **letterbox 复刻要点**：Python `round()` = 银行家舍入 → Rust `round_ties_even()`；
+  缩放复用 `ocr::preprocess::resize_bilinear`（cv2 逐位复刻）；v8 填 114；先 NMS 后还原坐标。
+- **ultralytics 会按发行版名自动装 `onnxruntime` 最新版**（本机原是 onnxruntime-directml），
+  半途失败会混装出新 wrapper+旧 native 的坏包。已改装 onnxruntime==1.24.3（CPU）根治，
+  本机 Python 的 RapidOCR 退回 CPU 推理。
+- 无人值守 UI 验收：`scripts/ui_probe.py`（激活→按键→点击→同进程立刻截图）、
+  `scripts/ui_paste.py`（CF_DIB 剪贴板 + Ctrl+V；**GlobalAlloc/GlobalLock 必须显式声明
+  64 位 restype，否则句柄截断 access violation**）。
+- 测试基线：`cargo test --lib` 63 通过；`--ignored` 21 项全绿（PP-OCR 基线 pipeline_match 逐字全对）。
+- M3 剩余：M3.3 `/vision/pipeline`（YOLO 找区域 → PP-OCR 认字）；v5/v7 缺模型未实测；
+  pack_exe.ps1 未复验（zip 已含 ddddocr 54MB + yolo 19MB）。
+- 详细记录见 `docs/PROGRESS.md`；多引擎契约与实录见 `docs/ENGINES.md` 6.1/6.2。

@@ -232,6 +232,7 @@ pub fn run() {
             commands::ocr_recognize,
             commands::ocr_danzijson,
             commands::vision_detect,
+            commands::vision_pipeline,
             commands::get_health,
             commands::list_engines,
             commands::get_config,
