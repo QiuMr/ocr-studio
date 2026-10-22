@@ -101,11 +101,30 @@
   最小化 `w-96`，y=22。**别按截图比例估坐标**，截图与窗口 rect 不是 1:1。
 
 ## 界面规范补充（2026-10-22 用户反馈）
-- 侧栏**不要蓝色、不要选中项左侧竖条**：选中态 `bg-neutral-100 + text-neutral-900`，
-  图标同色；hover 用 `neutral-100/70`。整体仍是「纯白为主、黑色为辅、蓝色点缀」，
-  但蓝只给主动作按钮/图标，不进导航。
+- 侧栏**不要蓝色、不要选中项左侧竖条**，蓝只给主动作按钮/图标，不进导航。
+- **外壳配色（10-22 晚用户要求「大家都在用的那种稍微灰一点」）**：
+  标题栏 + 左侧栏 `bg-chrome`（`--color-chrome: #f7f7f8`，在 `styles.css` 的 @theme 里），
+  主区保持纯白，**靠底色差分层、不加分割线**。灰底上选中态用**纯白浮起**
+  （`bg-white + ring-1 ring-black/[0.04]` + 极淡阴影），不要再用 `bg-neutral-100`（显脏）；
+  hover 用黑 4~7% 叠加而不是 neutral 色阶。
 - **卡片头第一行统一 `h-8 items-center`**：CardHeader 是 flex-col，若某些卡的标题行里塞了
   32px 按钮/徽章而别的卡没有，items-center 会让两类标题差 7px。所有 CardHeader 第一行都包
   一层 `flex h-8 items-center`。
 - 小字号中文与 14px 图标混排时一律加 `leading-none`，否则文字盒 1.5 行高会让文字比图标偏下。
 - PageHeader 用 `items-center`（不是 items-start），右上按钮才与「标题+描述」块视觉居中。
+
+## 目标检测模型（2026-10-22 晚，已落地）
+- **模型是用户自己的**：`models/detect/yolo/` 下每个 `*.onnx` 都是可选项（`model.onnx` 是默认），
+  另外 config 的 `detect_models: Vec<String>` 记外部绝对路径（**只记路径不复制文件**）。
+- **类名从 ONNX metadata 读**：`sess.metadata()?.custom("names")`（ultralytics 会写
+  `names`/`task`/`imgsz`/`description`）。`labels.txt` 只是兜底，别再要求用户手写。
+  解析 Python dict repr 的坑：单双引号、`\'` 转义、乱序 key、值里带数字都要处理。
+- **用 metadata 的 `task` 拦非检测模型**（segment/pose/obb/classify）：它们输出多 mask 系数
+  或关键点通道，按检测解不会崩、只会给错类别的框。
+- `EngineSpec` 的 yolo variant = 模型 id（文件名去扩展名）：`yolo` = 默认，`yolo:<id>` = 指定。
+  `yolo:v8` 这类旧写法仍解析但落回默认。**外部模型的 id 不能「像版本号」**，否则被当旧写法吃掉。
+- `/engine/list` 只扫目录**不加载模型**，所以那时读不到类名；加载过后由
+  `AppState::engine_status_list()`（HTTP/IPC 共用）回填 classes 并把 note 换成「已加载 N 类」。
+- 文件选择框用 Win32 `GetOpenFileNameW`（feature `Win32_UI_Controls_Dialogs`）。
+  **`lpstrDefExt`/`lpstrTitle` 的 `vec.as_ptr()` 必须先绑定到变量**，否则指向已 drop 的临时 Vec。
+- `save_config` 里要**保留后端维护的 `detect_models`**（前端传的是旧快照），同 `webview_compat`。
