@@ -96,7 +96,9 @@ export function Playground({
           <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">
             {tab === "ocr"
               ? "丢一张图进去，看 /ocr/shibie 返回什么。放进来就自动跑，不用点按钮。"
-              : "给一张大图、一张小图，看 /ocr/tuzhaotu1 找不找得到位置。"}
+              : // 两种找图模式的「要找什么」不一样（小图 vs 模型），这里别写死
+                // 某一个端点路径——语义找图走的是 /ocr/yuyizhaotu。
+                "给一张大图，再给一张小图或一个检测模型，看找不找得到位置。"}
           </p>
         </div>
 

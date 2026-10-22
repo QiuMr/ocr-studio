@@ -156,8 +156,12 @@
 
 
 ## 目标检测模型（2026-10-22 晚，已落地）
-- **模型是用户自己的**：`models/detect/yolo/` 下每个 `*.onnx` 都是可选项（`model.onnx` 是默认），
+- **模型是用户自己的**：`models/detect/yolo/` 下每个 `*.onnx` 都是可选项，**默认模型 =
+  同名级 onnx 按文件名排序的第一个**（早期硬编码 `model.onnx` 优先，已删）。
   另外 config 的 `detect_models: Vec<String>` 记外部绝对路径（**只记路径不复制文件**）。
+- **出厂目录为空**（只有 `README.txt`）：程序不预置任何检测模型。**`pack_exe.ps1` 必须
+  把 `models/detect/yolo/` 里的模型从分发包剔掉**，否则开发机上的模型跟着发出去，
+  又变回「内置模型」（用户明确反对这件事）。
 - **类名从 ONNX metadata 读**：`sess.metadata()?.custom("names")`（ultralytics 会写
   `names`/`task`/`imgsz`/`description`）。`labels.txt` 只是兜底，别再要求用户手写。
   解析 Python dict repr 的坑：单双引号、`\'` 转义、乱序 key、值里带数字都要处理。
@@ -170,3 +174,19 @@
 - 文件选择框用 Win32 `GetOpenFileNameW`（feature `Win32_UI_Controls_Dialogs`）。
   **`lpstrDefExt`/`lpstrTitle` 的 `vec.as_ptr()` 必须先绑定到变量**，否则指向已 drop 的临时 Vec。
 - `save_config` 里要**保留后端维护的 `detect_models`**（前端传的是旧快照），同 `webview_compat`。
+
+## 语义找图（2026-10-22 深夜，提交 4a6ec9f，**卖点，别削弱**）
+- 端点 `/ocr/yuyizhaotu`（第 15 个）。来源由 body 的 `source` 给（image/screen/window，
+  复用 `acquire_haystack`），阈值 `conf`（0.25），`class_filter` 按类别 id。
+- **出参与模板找图刻意同构**：`assemble_find_data()` 是唯一组装点，
+  `to_find_data`（模板）/ `to_find_data_from_dets`（语义）都走它。
+  新字段 `engine`/`class_id`/`class_name` 带 `skip_serializing_if`，
+  **模板找图出参一个字节没变**。已有脚本换路径即可，不许改成新格式。
+- **不暴露 `iou`**（NMS-free 模型不做 NMS）；**不按来源分三个端点**（用 `source`）。
+- `OutputLayout::EndToEnd`（`[1,N,6+nm]`）判据是 **`anchors < grid && channels >= 6`**：
+  只看通道数会误吃 v5 系 6 通道 raw head。`class_channels()` 的 base
+  **`EndToEnd` 是 5 不是 6**（4 坐标 + 1 类别下标列），写错会让分割模型类别整体错位。
+- YOLOE-26 导出 `scripts/fetch_yoloe.py`：**本机只能走视觉提示**（文本提示要 ultralytics
+  的 CLIP fork，拉 git 子模块在本机 MSYS 必失败 `0xC0000142`）。必须打补丁绕开
+  ultralytics 8.4.13 的 end2end fuse bug（先置空 cv3/cv4 再 fuse）；补丁内要 `import torch`。
+  配 `-seg` 模型要用 `YOLOEVPSegPredictor`。权重缓存到 `models/_fixtures/weights/`。
