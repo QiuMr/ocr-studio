@@ -58,10 +58,16 @@ import type {
 /** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
 function engineLabel(e: EngineItem): string {
   if (e.family === "ddddocr") return `DDDDOCR（${e.variant ?? "common"}·验证码快）`;
-  // 目标检测不按版本分家，模型结构由后端自动识别，这里不显示版本号
-  if (e.family === "yolo") return "目标检测（YOLO）";
+  // 目标检测可以挂多个模型（用户自己的）：默认那条不带 variant，
+  // 其余用模型名区分——`variant` 就是 onnx 文件名去掉扩展名
+  if (e.family === "yolo") {
+    return e.variant ? `目标检测 · ${e.variant}` : "目标检测（默认模型）";
+  }
   return e.name;
 }
+
+/** 上次选的引擎：检测模型是用户自己加的，每次开 App 都要重选很烦 */
+const ENGINE_KEY = "ocr-studio:engine";
 
 export function Playground() {
   // 识别页载入的图会传下来，切到找图页可以直接当搜索图
@@ -118,7 +124,13 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   const [showBoxes, setShowBoxes] = useState(true);
   const [useCls, setUseCls] = useState(true);
   /** 空字符串 = 用当前 PP-OCR 配置（历史行为）；其它值为 `family:variant` */
-  const [engine, setEngine] = useState("");
+  const [engine, setEngine] = useState<string>(() => {
+    try {
+      return localStorage.getItem(ENGINE_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [engines, setEngines] = useState<EngineItem[]>([]);
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState("text");
@@ -345,7 +357,14 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
             <Select
               value={engine || "default"}
               onValueChange={(v) => {
-                setEngine(v === "default" ? "" : v);
+                const next = v === "default" ? "" : v;
+                setEngine(next);
+                try {
+                  if (next) localStorage.setItem(ENGINE_KEY, next);
+                  else localStorage.removeItem(ENGINE_KEY);
+                } catch {
+                  /* 隐私模式下 localStorage 可能不可写，忽略 */
+                }
                 // 换引擎后旧结果一定作废，别让用户拿 A 的框对着 B 的图
                 setResult(null);
                 setDetResult(null);
@@ -353,7 +372,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                 setDetail(null);
               }}
             >
-              <SelectTrigger className="h-8 w-[190px] text-[12.5px]">
+              <SelectTrigger className="h-8 w-[210px] text-[12.5px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -367,7 +386,8 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
             </Select>
             <Hint>
               不同引擎擅长的东西不一样：PP-OCR 适合成段文字（截图、扫描件），
-              DDDDOCR 训练在验证码上，短英文数字更快。切换后要重新点「开始识别」。
+              DDDDOCR 训练在验证码上，短英文数字更快；目标检测会框出物体类别，
+              选哪个模型在设置页里管。切换后要重新点「开始识别」。
             </Hint>
           </div>
         )}

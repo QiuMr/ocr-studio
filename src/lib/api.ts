@@ -11,6 +11,7 @@ import { invoke, isTauri } from "./tauri";
 import type {
   AppConfig,
   DanziResult,
+  DetectModel,
   DetectResult,
   Device,
   EngineList,
@@ -46,6 +47,37 @@ export async function listEngines(): Promise<EngineList> {
 
 export async function getConfig(): Promise<AppConfig> {
   return invoke<AppConfig>("get_config");
+}
+
+// ---------------------------------------------------------------- 检测模型
+
+/**
+ * 可用的目标检测模型：`models/detect/yolo/` 下扫到的 + 设置里加的外部路径。
+ *
+ * 检测模型天生是「用户自己的」——不同人训的模型放在哪都可能，所以这里
+ * 既支持目录约定，也支持任意路径（只记路径、不复制文件）。
+ */
+export async function detectModels(): Promise<DetectModel[]> {
+  if (!isTauri()) return [];
+  return invoke<DetectModel[]>("detect_models");
+}
+
+/** 弹系统文件选择框挑一个 .onnx；取消则原样返回当前列表 */
+export async function pickDetectModel(): Promise<DetectModel[]> {
+  if (!isTauri()) return [];
+  return invoke<DetectModel[]>("pick_detect_model");
+}
+
+/** 按路径加一个模型（把 onnx 拖进窗口也走这里） */
+export async function addDetectModel(path: string): Promise<DetectModel[]> {
+  if (!isTauri()) return [];
+  return invoke<DetectModel[]>("add_detect_model", { path });
+}
+
+/** 从列表移除一个外部模型（只删记录，不动磁盘上的文件） */
+export async function removeDetectModel(path: string): Promise<DetectModel[]> {
+  if (!isTauri()) return [];
+  return invoke<DetectModel[]>("remove_detect_model", { path });
 }
 
 export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {

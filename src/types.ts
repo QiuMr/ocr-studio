@@ -224,6 +224,24 @@ export interface EngineList {
   engines: EngineItem[];
 }
 
+/**
+ * 一个可用的目标检测模型。
+ *
+ * 检测模型是「用户自己的」：既可以是 `models/detect/yolo/` 下扫到的，
+ * 也可以是设置里从任意目录「添加」进来的（只记路径，不复制文件）。
+ */
+export interface DetectModel {
+  /** 模型 id（`yolo:<id>` 的后半段） */
+  id: string;
+  /** 引擎标识，可直接传给 detectImage / recognize */
+  engine: string;
+  /** onnx 完整路径 */
+  path: string;
+  file_name: string;
+  /** true = 从任意目录加的（配置里记着路径） */
+  external: boolean;
+}
+
 // ---------------------------------------------------------------- 日志
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";

@@ -83,10 +83,10 @@ export default function App() {
         <TitleBar collapsed={collapsed} onToggleSidebar={toggleSidebar} />
 
         <div className="flex min-h-0 flex-1">
-          {/* 侧边导航：无右边框，靠留白与选中底色区分 */}
+          {/* 侧边导航：与标题栏同色（浅灰外壳），靠底色差与白色主区分层，不加边框 */}
           <aside
             className={cn(
-              "ease-sidebar flex shrink-0 flex-col overflow-hidden",
+              "ease-sidebar flex shrink-0 flex-col overflow-hidden bg-chrome",
               collapsed ? "w-[60px]" : "w-[196px]",
             )}
           >
@@ -172,15 +172,17 @@ function NavItem({
         // leading-none：13px 文字默认行高 1.5（19.5px），配 18px 图标会看起来偏下
         "group flex h-9 items-center rounded-lg text-[13px] leading-none",
         collapsed ? "w-9 justify-center" : "w-full gap-2.5 px-2.5",
+        // 浅灰外壳上，选中项用**纯白浮起**（VS Code / Notion 的做法）：
+        // 在 #f7f7f8 底上加深灰块会显得脏，白色 + 极淡描边 + 微阴影更干净
         active
-          ? "bg-neutral-100 font-medium text-neutral-900"
-          : "font-normal text-neutral-500 hover:bg-neutral-100/70 hover:text-neutral-900 active:bg-neutral-200/70",
+          ? "bg-white font-medium text-neutral-900 shadow-[0_1px_2px_rgba(16,24,40,0.06)] ring-1 ring-black/[0.04]"
+          : "font-normal text-neutral-600 hover:bg-black/[0.04] hover:text-neutral-900 active:bg-black/[0.07]",
       )}
     >
       <span
         className={cn(
           "flex h-[18px] w-[18px] shrink-0 items-center justify-center",
-          active ? "text-neutral-900" : "text-neutral-400 group-hover:text-neutral-700",
+          active ? "text-neutral-800" : "text-neutral-400 group-hover:text-neutral-600",
         )}
       >
         {icon}

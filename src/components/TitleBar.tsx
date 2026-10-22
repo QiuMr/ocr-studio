@@ -34,7 +34,7 @@ export function TitleBar({ collapsed, onToggleSidebar }: Props) {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-11 shrink-0 select-none items-center bg-white px-2"
+      className="flex h-11 shrink-0 select-none items-center bg-chrome px-2"
     >
       {/* 左上角：侧边栏折叠开关 */}
       <button
@@ -44,7 +44,7 @@ export function TitleBar({ collapsed, onToggleSidebar }: Props) {
         aria-expanded={!collapsed}
         onClick={onToggleSidebar}
         onMouseDown={(e) => e.stopPropagation()}
-        className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 active:bg-neutral-200"
+        className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 hover:bg-black/[0.06] hover:text-neutral-900 active:bg-black/[0.1]"
       >
         {collapsed ? (
           <PanelLeft className="h-4 w-4" strokeWidth={1.75} />
@@ -100,7 +100,7 @@ function WinButton({
       className={
         danger
           ? "flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 hover:bg-red-500 hover:text-white active:bg-red-600"
-          : "flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900 active:bg-neutral-200"
+          : "flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 hover:bg-black/[0.06] hover:text-neutral-900 active:bg-black/[0.1]"
       }
     >
       {children}
