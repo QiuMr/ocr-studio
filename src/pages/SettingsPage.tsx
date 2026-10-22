@@ -1,19 +1,26 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Boxes,
   Check,
+  ChevronDown,
+  Copy,
+  Cpu,
+  ExternalLink,
   FolderOpen,
+  Gauge,
   Info,
+  Loader2,
+  Play,
   Plus,
   RotateCcw,
-  Save,
   ScanSearch,
   Server,
   Settings as SettingsIcon,
   Shield,
+  Square,
   Trash2,
+  Zap,
 } from "lucide-react";
-import { PageHeader } from "../components/ui/page-header";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
@@ -21,21 +28,22 @@ import { Callout } from "../components/ui/callout";
 import { Hint } from "../components/ui/hint";
 import { Label } from "../components/ui/label";
 import { Input } from "../components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
+import { Switch } from "../components/ui/switch";
+import { Slider } from "../components/ui/slider";
 import {
   detectModels,
   getConfig,
+  getHealth,
   listEngines,
   modelsRoot,
   pickDetectModel,
   removeDetectModel,
   saveConfig,
+  serverStart,
+  serverStatus,
+  serverStop,
+  setDevice,
+  setLevel,
 } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
@@ -46,39 +54,129 @@ import {
   type Device,
   type EngineItem,
   type EngineList,
+  type Health,
   type ModelLevel,
 } from "../types";
 
+/*
+ * 设置页的信息架构（2026-10-22 重做）：
+ *
+ *   常用   —— 小白真的会动的三样：识别快慢、要不要用显卡、找图像不像
+ *   服务   —— 给脚本用的人：开关、地址、端口
+ *   模型   —— 自己的检测模型
+ *   高级   —— 引擎清单、目录、窗口渲染、关于（默认收起，看的人自己展开）
+ *
+ * 改动**自动保存**，不再要求用户去右上角找「保存」按钮。
+ * 这页里没有一样是「改错了会炸」的，多一个保存步骤只会让人以为没生效。
+ */
 export function SettingsPage() {
   const [cfg, setCfg] = useState<AppConfig>(DEFAULT_CONFIG);
-  /** 磁盘上的值，用来判断「有没有改动」 */
-  const [initial, setInitial] = useState<AppConfig | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
   const [root, setRoot] = useState("-");
   const [engines, setEngines] = useState<EngineList | null>(null);
   const [models, setModels] = useState<DetectModel[]>([]);
   const [picking, setPicking] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [running, setRunning] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [savedAt, setSavedAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  useEffect(() => {
+  const saveTimer = useRef<number | undefined>(undefined);
+
+  const loadAll = useCallback(async () => {
     if (!isTauri()) return;
-    void (async () => {
-      try {
-        const c = await getConfig();
-        setCfg(c);
-        setInitial(c);
-        setRoot(await modelsRoot());
-        setEngines(await listEngines());
-        setModels(await detectModels());
-      } catch (e) {
-        setError(String(e));
-      }
-    })();
+    try {
+      const [c, h, s, r, e, m] = await Promise.all([
+        getConfig(),
+        getHealth(),
+        serverStatus(),
+        modelsRoot(),
+        listEngines(),
+        detectModels(),
+      ]);
+      setCfg(c);
+      setHealth(h);
+      setRunning(s);
+      setRoot(r);
+      setEngines(e);
+      setModels(m);
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
 
-  /** 弹系统文件选择框；取消时后端原样返回列表，不用特殊处理 */
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
+
+  /** 写盘（延迟 600ms 合并连点；改坏了也不会写一半） */
+  const persist = useCallback((next: AppConfig) => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await saveConfig(next);
+          setSavedAt(Date.now());
+          setError(null);
+        } catch (e) {
+          setError(`保存失败：${e}`);
+        }
+      })();
+    }, 600);
+  }, []);
+
+  const patch = (p: Partial<AppConfig>) => {
+    const next = { ...cfg, ...p };
+    setCfg(next);
+    persist(next);
+  };
+
+  const onLevel = async (level: ModelLevel) => {
+    const next = { ...cfg, level };
+    setCfg(next);
+    persist(next);
+    if (!isTauri()) return;
+    try {
+      setHealth(await setLevel(level));
+    } catch (e) {
+      setError(`切换识别精度失败：${e}`);
+    }
+  };
+
+  const onDevice = async (useGpu: boolean) => {
+    const device: Device = useGpu ? "directml" : "cpu";
+    const next = { ...cfg, device };
+    setCfg(next);
+    persist(next);
+    if (!isTauri()) return;
+    try {
+      setHealth(await setDevice(device));
+    } catch (e) {
+      setError(`切换显卡加速失败：${e}`);
+    }
+  };
+
+  const onToggleServer = async () => {
+    setBusy(true);
+    try {
+      if (running) {
+        await serverStop();
+        setRunning(false);
+      } else {
+        await serverStart();
+        setRunning(true);
+      }
+      setError(null);
+    } catch (e) {
+      setError(`服务操作失败：${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onAddModel = async () => {
     setError(null);
     setPicking(true);
@@ -122,24 +220,15 @@ export function SettingsPage() {
     }
   };
 
-  // 只看用户能改的四项；webview_compat 由后端维护，不该让它把「已保存」一直点亮
-  const fingerprint = (c: AppConfig) =>
-    `${c.level}|${c.device}|${c.port}|${c.template_threshold}`;
-  const dirty = initial !== null && fingerprint(cfg) !== fingerprint(initial);
+  const onOpenHealth = async () => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(`http://127.0.0.1:${cfg.port}/ocr/health`);
+  };
 
-  const onSave = async () => {
-    setError(null);
-    setSaved(false);
-    setBusy(true);
-    try {
-      setCfg(await saveConfig(cfg));
-      setSaved(true);
-      window.setTimeout(() => setSaved(false), 2200);
-    } catch (e) {
-      setError(`保存失败: ${e}`);
-    } finally {
-      setBusy(false);
-    }
+  const copy = async (text: string, tag = "") => {
+    await navigator.clipboard.writeText(text);
+    setCopied(!!tag);
+    window.setTimeout(() => setCopied(false), 1400);
   };
 
   const onReset = () => {
@@ -148,45 +237,44 @@ export function SettingsPage() {
       window.setTimeout(() => setConfirmReset(false), 4000);
       return;
     }
-    setCfg({ ...DEFAULT_CONFIG, webview_compat: cfg.webview_compat });
+    const next = { ...DEFAULT_CONFIG, webview_compat: cfg.webview_compat };
+    setCfg(next);
+    persist(next);
     setConfirmReset(false);
   };
 
   const portValid = Number.isInteger(cfg.port) && cfg.port >= 1024 && cfg.port <= 65535;
+  const gpu = cfg.device === "directml";
+  const endpoint = `http://127.0.0.1:${cfg.port}`;
+  const justSaved = savedAt > 0 && Date.now() - savedAt < 2200;
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader
-        icon={<SettingsIcon className="h-[18px] w-[18px]" />}
-        title="设置"
-        description="这些是全局默认值，改完要点右上角「保存」。日常用得上的其实只有端口和默认设备。"
-        actions={
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onReset}
-              className={confirmReset ? "text-red-600" : undefined}
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {confirmReset ? "再点一次确认恢复" : "恢复默认"}
-            </Button>
-            <Button
-              size="sm"
-              variant={dirty ? "default" : "outline"}
-              onClick={() => void onSave()}
-              disabled={busy || !isTauri()}
-            >
-              {saved ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              {busy ? "保存中…" : saved ? "已保存" : dirty ? "保存修改" : "保存"}
-            </Button>
-          </>
-        }
-      />
+      <div className="mb-1 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-[26px] font-bold leading-none tracking-tight text-neutral-900">
+            设置
+          </h1>
+          <p className="mt-2 flex items-center gap-1.5 text-[13px] font-medium leading-5 text-neutral-500">
+            改完自动保存，不用点按钮。
+            {justSaved && (
+              <span className="flex items-center gap-1 font-medium text-emerald-600">
+                <Check className="h-3 w-3" strokeWidth={3} />
+                已保存
+              </span>
+            )}
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onReset}
+          className={confirmReset ? "text-red-600" : undefined}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          {confirmReset ? "再点一次确认恢复" : "恢复默认"}
+        </Button>
+      </div>
 
       {error && (
         <Callout variant="warn" icon={<Info className="h-4 w-4" />}>
@@ -199,157 +287,223 @@ export function SettingsPage() {
         </Callout>
       )}
 
+      {/* ------------------------------------------------------------ 常用 */}
       <Card>
         <CardHeader>
-          {/* h-8：卡片头第一行统一高度，标题不会因为右侧有没有控件而错位 */}
           <div className="flex h-8 items-center">
             <CardTitle className="flex items-center gap-2">
-              <Server className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              推理与服务
+              <Gauge className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              常用
             </CardTitle>
           </div>
-          <CardDescription>
-            换档位或换设备会立刻重载引擎（几秒）；改端口会重启 HTTP 服务。
-          </CardDescription>
+          <CardDescription>这三样决定了「快不快、准不准」，换完立刻生效。</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-x-5 gap-y-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
-                默认模型档位
-                <Hint>
-                  每次启动用哪套模型。Tiny 最快、Small 均衡（推荐）、Medium 最准但慢。
-                </Hint>
-              </Label>
-              <Select
-                value={cfg.level}
-                onValueChange={(v) => setCfg({ ...cfg, level: v as ModelLevel })}
+        <CardContent className="flex flex-col gap-5">
+          {/* 识别精度：三段按钮比下拉直观，选中的一眼看得出来 */}
+          <div className="flex flex-col gap-2">
+            <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
+              识别精度
+              <Hint>
+                「快」用的模型小，几乎秒出，适合界面文字清晰的截图；「均衡」是默认推荐；
+                「准」最准也最慢，适合字小、模糊、背景花的图。换完引擎会重载几秒。
+              </Hint>
+            </Label>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { v: "tiny" as ModelLevel, title: "快", desc: "秒出，够用" },
+                  { v: "small" as ModelLevel, title: "均衡", desc: "推荐" },
+                  { v: "medium" as ModelLevel, title: "准", desc: "慢一点，最准" },
+                ]
+              ).map((it) => (
+                <button
+                  key={it.v}
+                  type="button"
+                  onClick={() => void onLevel(it.v)}
+                  disabled={!isTauri()}
+                  className={cn(
+                    "flex flex-col items-start rounded-[10px] border-2 px-3 py-2 text-left transition-colors",
+                    cfg.level === it.v
+                      ? "border-[#2563EB] bg-[#EFF4FF]"
+                      : "border-neutral-200 bg-white hover:border-neutral-300",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "flex items-center gap-1.5 text-[13px] font-bold",
+                      cfg.level === it.v ? "text-[#2563EB]" : "text-neutral-800",
+                    )}
+                  >
+                    {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                    {it.title}
+                  </span>
+                  <span className="mt-0.5 text-[11.5px] text-neutral-500">{it.desc}</span>
+                </button>
+              ))}
+            </div>
+            {health && (
+              <p className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+                <Cpu className="h-3 w-3" />
+                当前实际使用：{health.model} · {health.actual_device === "directml" ? "显卡" : "处理器"}
+              </p>
+            )}
+          </div>
+
+          {/* 显卡加速 */}
+          <div className="flex items-start justify-between gap-4 rounded-[10px] bg-neutral-50 px-3.5 py-3">
+            <div className="min-w-0">
+              <Label
+                htmlFor="gpu"
+                className="flex cursor-pointer items-center gap-1.5 text-[12.5px] font-medium text-neutral-800"
               >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="tiny">Tiny（最快）</SelectItem>
-                  <SelectItem value="small">Small（均衡，推荐）</SelectItem>
-                  <SelectItem value="medium">Medium（最准）</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
-                默认推理设备
+                <Zap className="h-3.5 w-3.5 text-neutral-400" />
+                用显卡加速
                 <Hint>
-                  有独显选 DirectML；识别报显存/驱动错误，或换机器后异常，改成 CPU 最稳。
+                  有独立显卡就开着，通常比处理器快好几倍。如果识别时报显存/驱动错误，
+                  关掉它退回处理器最稳（会慢，但一定能跑）。
                 </Hint>
               </Label>
-              <Select
-                value={cfg.device}
-                onValueChange={(v) => setCfg({ ...cfg, device: v as Device })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="directml">DirectML（GPU，推荐）</SelectItem>
-                  <SelectItem value="cpu">CPU（兼容性最好）</SelectItem>
-                </SelectContent>
-              </Select>
+              <p className="mt-1 text-[11.5px] leading-4 text-neutral-500">
+                {gpu ? "正在用显卡跑识别" : "正在用处理器跑识别，兼容性最好"}
+                {health && health.actual_device !== cfg.device && (
+                  <span className="ml-1 text-amber-600">
+                    （当前实际是{health.actual_device === "directml" ? "显卡" : "处理器"}，可能缺运行库）
+                  </span>
+                )}
+              </p>
             </div>
+            <Switch id="gpu" checked={gpu} onCheckedChange={(v) => void onDevice(v)} disabled={!isTauri()} />
+          </div>
 
-            <div className="flex flex-col gap-1.5">
+          {/* 找图相似度 */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
               <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
-                HTTP 服务端口
+                找图要多像才算找到
                 <Hint>
-                  外部脚本调接口用这个端口，范围 1024~65535。被占用时启动会失败，
-                  换一个（比如 8850）再存。
+                  0.9 表示「几乎一模一样」才算命中。找不到就调低，误报多就调高。
+                  脚本调接口时没传阈值就用这个值。
                 </Hint>
               </Label>
-              <Input
-                type="number"
-                min={1024}
-                max={65535}
-                value={cfg.port}
-                onChange={(e) => setCfg({ ...cfg, port: Number(e.target.value) })}
-                className={portValid ? undefined : "border-red-300 focus-visible:ring-red-400"}
-              />
-              {!portValid && (
-                <span className="text-[11.5px] text-red-600">端口需在 1024~65535 之间</span>
-              )}
+              <span className="font-mono text-[12.5px] font-semibold text-neutral-700">
+                {cfg.template_threshold.toFixed(2)}
+              </span>
             </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
-                找图默认阈值
-                <Hint>
-                  模板匹配的相似度下限，0~1。0.9 表示「几乎要一模一样」。
-                  易语言/按键精灵脚本不传阈值时就用这个值。
-                </Hint>
-              </Label>
-              <Input
-                type="number"
-                step={0.01}
-                min={0}
-                max={1}
-                value={cfg.template_threshold}
-                onChange={(e) => setCfg({ ...cfg, template_threshold: Number(e.target.value) })}
-              />
+            <Slider
+              value={[cfg.template_threshold]}
+              min={0.5}
+              max={1}
+              step={0.01}
+              onValueChange={([v]) => setCfg({ ...cfg, template_threshold: v })}
+              onValueCommit={([v]) => patch({ template_threshold: v })}
+              disabled={!isTauri()}
+            />
+            <div className="flex justify-between text-[11px] text-neutral-400">
+              <span>宽松（容易误报）</span>
+              <span>严格（容易找不到）</span>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* 引擎清单：只读，告诉用户「本机能用哪些、缺什么」 */}
-      {engines && engines.engines.length > 0 && (
-        <Card>
-          <CardHeader>
-            <div className="flex h-8 items-center">
-              <CardTitle className="flex items-center gap-2">
-                <Boxes className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-                识别引擎
-              </CardTitle>
-            </div>
-            <CardDescription>
-              这是 App 扫描模型目录得到的结果，只看文件齐不齐、没有加载模型。
-              「未安装」的补上对应文件就能用，不用改任何设置。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-1.5">
-            {engines.engines.map((e) => (
-              <EngineRow key={e.name} e={e} isDefault={e.name === engines.default_engine} />
-            ))}
-          </CardContent>
-        </Card>
-      )}
+      {/* -------------------------------------------------------- 本地服务 */}
+      <Card>
+        <CardHeader>
+          <div className="flex h-8 items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Server className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              本地服务
+            </CardTitle>
+            <Badge variant={running ? "success" : "secondary"} className="shrink-0 whitespace-nowrap">
+              {running ? "运行中" : "已停止"}
+            </Badge>
+          </div>
+          <CardDescription>
+            易语言、按键精灵、Python 脚本通过下面这个地址调识别能力。自己用 App 界面的话，这里可以一直关着。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center gap-2 rounded-lg bg-neutral-50 px-3 py-2">
+            <code className="selectable min-w-0 flex-1 truncate font-mono text-[12px] text-neutral-700">
+              {endpoint}
+            </code>
+            <button
+              type="button"
+              onClick={() => void copy(endpoint, "url")}
+              title="复制地址"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-white hover:text-neutral-700"
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5 text-emerald-600" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
 
-      {/* 目标检测模型：用户自己的模型，放目录或指向任意位置 */}
+          <div className="flex flex-wrap items-end gap-3">
+            <Button onClick={() => void onToggleServer()} disabled={busy || !isTauri()}>
+              {busy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : running ? (
+                <Square className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+              {running ? "停止服务" : "启动服务"}
+            </Button>
+            <Button variant="outline" onClick={() => void onOpenHealth()} disabled={!running}>
+              <ExternalLink className="h-3.5 w-3.5" />
+              打开健康检查
+            </Button>
+
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="port" className="text-[11.5px] text-neutral-500">
+                端口
+              </Label>
+              <Input
+                id="port"
+                type="number"
+                min={1024}
+                max={65535}
+                value={cfg.port}
+                onChange={(e) => setCfg({ ...cfg, port: Number(e.target.value) })}
+                onBlur={() => portValid && patch({ port: cfg.port })}
+                className={cn("w-[120px]", !portValid && "border-red-300 focus-visible:ring-red-400")}
+              />
+            </div>
+            {!portValid && (
+              <span className="pb-2 text-[11.5px] text-red-600">端口需在 1024~65535 之间</span>
+            )}
+          </div>
+
+          <p className="text-[11.5px] leading-5 text-neutral-400">
+            服务只监听本机 127.0.0.1，不对外网开放，别人连不进来。
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* ------------------------------------------------------ 目标检测模型 */}
       <Card>
         <CardHeader>
           <div className="flex h-8 items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2">
               <ScanSearch className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              目标检测模型
+              我自己的检测模型
             </CardTitle>
-            <div className="flex items-center gap-2">
-              <Badge variant={models.length > 0 ? "success" : "outline"}>
-                {models.length > 0 ? `${models.length} 个` : "未添加"}
-              </Badge>
-            </div>
+            <Badge variant={models.length > 0 ? "success" : "outline"}>
+              {models.length > 0 ? `${models.length} 个` : "未添加"}
+            </Badge>
           </div>
           <CardDescription>
-            检测模型是你自己的：丢一个 ultralytics 导出的 onnx 到
-            <code className="mx-1 rounded bg-neutral-100 px-1 py-0.5 font-mono text-[11px]">
-              models\detect\yolo\
-            </code>
-            就能用，也可以点「添加模型」直接指向任意位置的 onnx（不会复制文件）。
-            类别名会<span className="font-medium text-neutral-700">自动从模型里读</span>
-            ，不用手写 labels.txt；类别数要跑过一次识别才显示（读类名必须加载模型）。
+            你要是训练过 YOLO 模型（v5~v12、v26 都行），把导出的 onnx 加进来，识别页就能选它找物体。
+            没有模型也不影响认字。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {models.length === 0 ? (
             <div className="rounded-lg bg-neutral-50/70 px-3 py-4 text-center text-[12px] leading-5 text-neutral-500">
-              还没有检测模型。加一个之后，测试台里就能选「目标检测」并对图出框。
+              还没有检测模型。加一个之后，识别页的「识别方式」里会多出「找物体」这一项。
             </div>
           ) : (
             models.map((m, i) => {
@@ -400,77 +554,115 @@ export function SettingsPage() {
               <Plus className="h-3.5 w-3.5" />
               {picking ? "选择中…" : "添加模型"}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void onOpenFolder()} disabled={!isTauri()}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void onOpenFolder()}
+              disabled={!isTauri()}
+            >
               <FolderOpen className="h-3.5 w-3.5" />
               打开模型目录
             </Button>
             <span className="text-[11.5px] leading-4 text-neutral-400">
-              列表第一项就是默认模型（测试台里显示为「目标检测」）
+              列表第一项就是默认模型；类别名会自动从模型里读，不用手写 labels.txt
             </span>
           </div>
         </CardContent>
       </Card>
 
-      {/* 渲染兼容：只读，解释给用户听 */}
+      {/* ---------------------------------------------------------- 高级 */}
       <Card>
-        <CardHeader>
-          <div className="flex h-8 items-center justify-between gap-2">
-            <CardTitle className="flex items-center gap-2">
-              <Shield className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              窗口渲染
-            </CardTitle>
-            <Badge variant={cfg.webview_compat ? "warning" : "success"}>
-              {cfg.webview_compat ? "兼容模式" : "硬件加速"}
-            </Badge>
-          </div>
-          <CardDescription>
-            部分机器的显卡驱动会让 WebView 加载失败（表现为窗口一片白），App 会自动切到兼容模式。
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-start gap-2 rounded-lg bg-neutral-50/80 px-3 py-2.5 text-[12px] leading-5 text-neutral-600">
-            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-400" />
-            <span>
-              {cfg.webview_compat
-                ? "已启用软件合成（--disable-gpu-compositing）。界面会略微不那么顺滑，但能正常显示。想强制回到硬件加速，删掉配置文件里的 webview_compat 字段再启动。"
-                : "当前使用硬件加速。如果双击后窗口一直是白的，说明触发了自动兜底，重启一次就会进兼容模式。"}
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="flex w-full items-center justify-between gap-2 px-5 py-3.5 text-left"
+          aria-expanded={showAdvanced}
+        >
+          <span className="flex items-center gap-2 text-[13.5px] font-semibold text-neutral-900">
+            <SettingsIcon className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+            高级信息
+            <span className="text-[11.5px] font-normal text-neutral-400">
+              引擎清单、文件位置、渲染方式
             </span>
-          </div>
-        </CardContent>
-      </Card>
+          </span>
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 shrink-0 text-neutral-400 transition-transform",
+              showAdvanced && "rotate-180",
+            )}
+          />
+        </button>
 
-      <Card>
-        <CardHeader>
-          <div className="flex h-8 items-center">
-            <CardTitle className="flex items-center gap-2">
-              <Info className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              关于
-            </CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2.5 text-[12px] text-neutral-600">
-          <Row label="模型根目录">
-            <code className="selectable break-all font-mono text-[11px] text-neutral-700">
-              {root}
-            </code>
-          </Row>
-          <Row label="配置文件">
-            <code className="selectable font-mono text-[11px] text-neutral-700">
-              {"<应用数据目录>\\config.json"}
-            </code>
-          </Row>
-          <Row label="日志文件">
-            <code className="selectable font-mono text-[11px] text-neutral-700">
-              {"<应用数据目录>\\ocr-studio.log"}
-            </code>
-          </Row>
-          <Row label="字体">
-            <span>MiSans（小米）</span>
-          </Row>
-          <Row label="版本">
-            <span className="font-mono">0.1.0</span>
-          </Row>
-        </CardContent>
+        {showAdvanced && (
+          <CardContent className="flex flex-col gap-4 pt-0">
+            {/* 引擎清单：只读，告诉用户「本机能用哪些、缺什么」 */}
+            {engines && engines.engines.length > 0 && (
+              <section className="flex flex-col gap-1.5">
+                <h3 className="flex items-center gap-1.5 text-[12px] font-semibold text-neutral-700">
+                  <Boxes className="h-3.5 w-3.5 text-neutral-400" />
+                  本机可用的识别引擎
+                </h3>
+                <p className="text-[11.5px] leading-4 text-neutral-400">
+                  扫描模型目录得到的结果，只看文件齐不齐、没有加载模型。「未安装」的补上对应文件就能用，不用改任何设置。
+                </p>
+                {engines.engines.map((e) => (
+                  <EngineRow key={e.name} e={e} isDefault={e.name === engines.default_engine} />
+                ))}
+              </section>
+            )}
+
+            {/* 窗口渲染 */}
+            <section className="flex flex-col gap-1.5">
+              <h3 className="flex items-center gap-1.5 text-[12px] font-semibold text-neutral-700">
+                <Shield className="h-3.5 w-3.5 text-neutral-400" />
+                窗口渲染
+                <Badge variant={cfg.webview_compat ? "warning" : "success"}>
+                  {cfg.webview_compat ? "兼容模式" : "硬件加速"}
+                </Badge>
+              </h3>
+              <div className="flex items-start gap-2 rounded-lg bg-neutral-50/80 px-3 py-2.5 text-[12px] leading-5 text-neutral-600">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-400" />
+                <span>
+                  {cfg.webview_compat
+                    ? "已启用软件合成（--disable-gpu-compositing）。界面会略微不那么顺滑，但能正常显示。想强制回到硬件加速，删掉配置文件里的 webview_compat 字段再启动。"
+                    : "当前使用硬件加速。如果双击后窗口一直是白的，说明显卡驱动有兼容问题，重启一次会自动进兼容模式。"}
+                </span>
+              </div>
+            </section>
+
+            {/* 位置与版本 */}
+            <section className="flex flex-col gap-2">
+              <h3 className="flex items-center gap-1.5 text-[12px] font-semibold text-neutral-700">
+                <Info className="h-3.5 w-3.5 text-neutral-400" />
+                文件位置
+              </h3>
+              <Row label="模型根目录">
+                <code className="selectable break-all font-mono text-[11px] text-neutral-700">
+                  {root}
+                </code>
+              </Row>
+              <Row label="配置文件">
+                <code className="selectable font-mono text-[11px] text-neutral-700">
+                  {"<应用数据目录>\\config.json"}
+                </code>
+              </Row>
+              <Row label="日志文件">
+                <code className="selectable font-mono text-[11px] text-neutral-700">
+                  {"<应用数据目录>\\ocr-studio.log"}
+                </code>
+              </Row>
+              <Row label="字体">
+                <span className="text-[12px] text-neutral-600">MiSans（小米）</span>
+              </Row>
+              <Row label="版本">
+                <span className="font-mono text-[12px] text-neutral-600">0.1.0</span>
+              </Row>
+              <p className="text-[11.5px] text-neutral-400">
+                环境变量 <code className="font-mono">OCR_MODELS_ROOT</code> 可覆盖模型目录，适合把模型放到别的盘。
+              </p>
+            </section>
+          </CardContent>
+        )}
       </Card>
     </div>
   );
@@ -479,7 +671,7 @@ export function SettingsPage() {
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4">
-      <span className="shrink-0 text-neutral-500">{label}</span>
+      <span className="shrink-0 text-[12px] text-neutral-500">{label}</span>
       <span className="min-w-0 text-right">{children}</span>
     </div>
   );
@@ -491,7 +683,7 @@ function EngineRow({ e, isDefault }: { e: EngineItem; isDefault: boolean }) {
     e.capabilities.line_boxes && "逐行",
     e.capabilities.char_boxes && "逐字",
     e.capabilities.rotation_cls && "方向矫正",
-    e.capabilities.detect && "目标检测",
+    e.capabilities.detect && "找物体",
   ].filter(Boolean) as string[];
 
   return (
@@ -515,9 +707,7 @@ function EngineRow({ e, isDefault }: { e: EngineItem; isDefault: boolean }) {
           {e.available ? "可用" : "未安装"}
         </Badge>
         {e.actual_device && (
-          <Badge variant="secondary">
-            {e.actual_device === "directml" ? "GPU" : "CPU"}
-          </Badge>
+          <Badge variant="secondary">{e.actual_device === "directml" ? "GPU" : "CPU"}</Badge>
         )}
         {caps.length > 0 && (
           <span className="ml-auto flex flex-wrap justify-end gap-1">
@@ -533,9 +723,7 @@ function EngineRow({ e, isDefault }: { e: EngineItem; isDefault: boolean }) {
         )}
       </div>
       {e.note && (
-        <p className="mt-1 break-all font-mono text-[11px] leading-4 text-neutral-500">
-          {e.note}
-        </p>
+        <p className="mt-1 break-all font-mono text-[11px] leading-4 text-neutral-500">{e.note}</p>
       )}
     </div>
   );

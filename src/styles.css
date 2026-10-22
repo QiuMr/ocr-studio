@@ -156,7 +156,7 @@
   @keyframes fade-rise {
     from {
       opacity: 0;
-      transform: translateY(4px);
+      transform: translateY(6px);
     }
     to {
       opacity: 1;
@@ -165,11 +165,201 @@
   }
 
   .animate-fade-rise {
-    animation: fade-rise 180ms ease-out both;
+    animation: fade-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   /* 折叠动画用的缓动，比默认 linear 自然 */
   .ease-sidebar {
     transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* ------------------------------------------------- 一套统一的「浮起」语汇 */
+
+  /*
+   * 2026-10-22 视觉统一：外壳浅灰、内容纯白之后，阴影不再用来分隔区域，
+   * 只用来表达「这块是可以点/浮起来的」。所以这里只留三档，其余地方用边框。
+   */
+  .shadow-card {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.04),
+      0 1px 3px rgba(16, 24, 40, 0.06);
+  }
+  .shadow-hover {
+    box-shadow:
+      0 10px 28px rgba(16, 24, 40, 0.12),
+      0 3px 8px rgba(16, 24, 40, 0.07);
+  }
+  /* 面板级：整块区域浮在页面上方（服务卡、文档大块） */
+  .shadow-panel {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.06),
+      0 12px 32px -8px rgba(16, 24, 40, 0.14);
+  }
+
+  /* 可点卡片：上浮 2px + 阴影加深，鼠标移上去就知道能点 */
+  .card-lift {
+    cursor: pointer;
+    transition:
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 200ms ease;
+  }
+  .card-lift:hover:not(:disabled) {
+    transform: translateY(-3px);
+    box-shadow:
+      0 12px 28px rgba(16, 24, 40, 0.12),
+      0 3px 8px rgba(16, 24, 40, 0.06);
+  }
+  .card-lift:active:not(:disabled) {
+    transform: translateY(-1px) scale(0.995);
+  }
+
+  /* 主按钮：轻微渐变 + 上沿高光，有「实体按键」的厚度感 */
+  .btn-brand {
+    background-image: linear-gradient(180deg, #5b8ff9 0%, #3a7bf9 55%, #2563eb 100%);
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.12),
+      0 6px 18px rgba(37, 99, 235, 0.26),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 180ms ease,
+      filter 180ms ease;
+  }
+  .btn-brand:hover:not(:disabled) {
+    transform: translateY(-1px);
+    filter: brightness(1.04);
+    box-shadow:
+      0 2px 4px rgba(16, 24, 40, 0.14),
+      0 10px 26px rgba(37, 99, 235, 0.34),
+      inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+  .btn-brand:active:not(:disabled) {
+    transform: translateY(0) scale(0.99);
+    filter: brightness(0.98);
+  }
+
+  /* 选中卡片的柔光边：比单纯换边框更「亮」，一眼看出选中了 */
+  .ring-brand-glow {
+    box-shadow:
+      0 0 0 4px rgba(37, 99, 235, 0.13),
+      0 8px 24px rgba(37, 99, 235, 0.16);
+  }
+
+  /* ---------------------------------------------- 深色面板（服务台主卡） */
+
+  /*
+   * 全站只有这一块是深色。作用是「锚点」：一进来看见它就知道
+   * 这软件的核心是那台服务，不是中间那些按钮。
+   * 底色取 #0E1016 → #171A22（略带蓝，和主色同一色相），
+   * 再用一层极淡的蓝色径向光把左上角提亮，避免大块死黑。
+   */
+  .panel-dark {
+    position: relative;
+    isolation: isolate;
+    background-image:
+      radial-gradient(120% 140% at 0% 0%, rgba(59, 130, 246, 0.22) 0%, rgba(59, 130, 246, 0) 52%),
+      linear-gradient(160deg, #12141b 0%, #0d0f14 60%, #0a0c11 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 1px 2px rgba(9, 12, 20, 0.4),
+      0 18px 40px -12px rgba(9, 12, 20, 0.55);
+  }
+  /* 呼吸光斑：极慢的位移，让深色块「活着」但不抢注意力 */
+  .panel-dark::after {
+    content: "";
+    position: absolute;
+    inset: -40% -10% auto auto;
+    width: 420px;
+    height: 420px;
+    border-radius: 9999px;
+    background: radial-gradient(circle, rgba(37, 99, 235, 0.28) 0%, rgba(37, 99, 235, 0) 68%);
+    filter: blur(6px);
+    pointer-events: none;
+    z-index: -1;
+    animation: drift 14s ease-in-out infinite alternate;
+  }
+
+  @keyframes drift {
+    from {
+      transform: translate3d(0, 0, 0) scale(1);
+      opacity: 0.85;
+    }
+    to {
+      transform: translate3d(-46px, 26px, 0) scale(1.12);
+      opacity: 1;
+    }
+  }
+
+  /* 状态点的呼吸感：只在「正在跑」时用，静止状态不要动 */
+  @keyframes soft-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+  .animate-soft-pulse {
+    animation: soft-pulse 2s ease-in-out infinite;
+  }
+
+  /* 运行中状态点外扩的一圈水波，强调「服务活着」 */
+  @keyframes ping-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.55;
+    }
+    70% {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+  }
+  .animate-ping-ring {
+    animation: ping-ring 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  /* 复制成功：图标弹一下，比单纯换颜色更容易被注意到 */
+  @keyframes pop {
+    0% {
+      transform: scale(0.6);
+      opacity: 0;
+    }
+    60% {
+      transform: scale(1.15);
+      opacity: 1;
+    }
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+  .animate-pop {
+    animation: pop 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* 数字变化时的翻入（运行时长、请求数用） */
+  @keyframes num-in {
+    from {
+      transform: translateY(0.35em);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+  .animate-num {
+    animation: num-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* 数字等宽：运行时长、毫秒数每秒都在变，不等宽会左右抽搐 */
+  .tnum {
+    font-variant-numeric: tabular-nums;
   }
 }

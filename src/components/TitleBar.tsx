@@ -34,7 +34,7 @@ export function TitleBar({ collapsed, onToggleSidebar }: Props) {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-11 shrink-0 select-none items-center bg-chrome px-2"
+      className="flex h-10 shrink-0 select-none items-center bg-chrome px-2"
     >
       {/* 左上角：侧边栏折叠开关 */}
       <button

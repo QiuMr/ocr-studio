@@ -7,14 +7,15 @@ import {
   Eye,
   EyeOff,
   FileImage,
-  GripHorizontal,
-  Hand,
+  ImagePlus,
   Keyboard,
   List,
+  Loader2,
+  RefreshCw,
   ScanText,
+  Settings2,
   Sparkles,
   Type,
-  Upload,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -30,7 +31,6 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { ScrollArea } from "../components/ui/scroll-area";
-import { PageHeader } from "../components/ui/page-header";
 import { EmptyState } from "../components/ui/empty-state";
 import { Callout } from "../components/ui/callout";
 import { Hint } from "../components/ui/hint";
@@ -46,6 +46,8 @@ import {
   recognizeChars,
 } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
+import { cn } from "../lib/utils";
+import type { OcrTab } from "../App";
 import type {
   DanziResult,
   DetectResult,
@@ -57,48 +59,78 @@ import type {
 
 /** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
 function engineLabel(e: EngineItem): string {
-  if (e.family === "ddddocr") return `DDDDOCR（${e.variant ?? "common"}·验证码快）`;
+  if (e.family === "ddddocr") return `验证码识别（DDDDOCR）`;
   // 目标检测可以挂多个模型（用户自己的）：默认那条不带 variant，
   // 其余用模型名区分——`variant` 就是 onnx 文件名去掉扩展名
   if (e.family === "yolo") {
-    return e.variant ? `目标检测 · ${e.variant}` : "目标检测（默认模型）";
+    return e.variant ? `找物体 · ${e.variant}` : "找物体（默认模型）";
   }
   return e.name;
 }
 
 /** 上次选的引擎：检测模型是用户自己加的，每次开 App 都要重选很烦 */
 const ENGINE_KEY = "ocr-studio:engine";
+/** 换图后要不要自动识别。默认开——小白最常问的就是「图放进去了怎么没反应」 */
+const AUTO_KEY = "ocr-studio:auto-run";
 
-export function Playground() {
+export function Playground({
+  tab,
+  onTabChange,
+  pickToken,
+}: {
+  tab: OcrTab;
+  onTabChange: (t: OcrTab) => void;
+  /** 每次自增 = 请把选图框弹出来（首页那个大按钮触发的） */
+  pickToken: number;
+}) {
   // 识别页载入的图会传下来，切到找图页可以直接当搜索图
   const [b64, setB64] = useState<string | null>(null);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <PageHeader
-        icon={<ScanText className="h-[18px] w-[18px]" />}
-        title="测试台"
-        description="不用写代码就能试能力。先把图放进来，再点按钮；识别框会直接画在图上。"
-      />
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-[26px] font-bold leading-none tracking-tight text-neutral-900">
+            试跑
+          </h1>
+          <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">
+            {tab === "ocr"
+              ? "丢一张图进去，看 /ocr/shibie 返回什么。放进来就自动跑，不用点按钮。"
+              : "给一张大图、一张小图，看 /ocr/tuzhaotu1 找不找得到位置。"}
+          </p>
+        </div>
 
-      <Tabs defaultValue="ocr" className="flex min-h-0 flex-1 flex-col gap-3">
-        <TabsList className="self-start">
-          <TabsTrigger value="ocr">
-            <Type />
-            文字识别
-          </TabsTrigger>
-          <TabsTrigger value="find">
-            <Crosshair />
-            找图定位
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="ocr" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <OcrPanel onImageLoaded={setB64} />
-        </TabsContent>
-        <TabsContent value="find" className="mt-0 flex min-h-0 flex-1 flex-col">
-          <FindPanel inheritedImage={b64} />
-        </TabsContent>
-      </Tabs>
+        {/* 用普通按钮而不是 Tab 条：两个功能差别很大，分开显示标题更清楚 */}
+        <div className="flex items-center gap-1 rounded-[10px] bg-neutral-100 p-1">
+          {(
+            [
+              { v: "ocr" as OcrTab, label: "文字识别", icon: <Type className="h-3.5 w-3.5" /> },
+              { v: "find" as OcrTab, label: "找图定位", icon: <Crosshair className="h-3.5 w-3.5" /> },
+            ]
+          ).map((it) => (
+            <button
+              key={it.v}
+              type="button"
+              onClick={() => onTabChange(it.v)}
+              className={cn(
+                "flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12.5px] leading-none transition-colors",
+                tab === it.v
+                  ? "shadow-card bg-white font-semibold text-neutral-900"
+                  : "font-medium text-neutral-500 hover:text-neutral-800",
+              )}
+            >
+              {it.icon}
+              {it.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab === "ocr" ? (
+        <OcrPanel onImageLoaded={setB64} pickToken={pickToken} />
+      ) : (
+        <FindPanel inheritedImage={b64} />
+      )}
     </div>
   );
 }
@@ -106,9 +138,10 @@ export function Playground() {
 interface OcrPanelProps {
   /** 把载入的图同步出去，切到找图页时可直接复用 */
   onImageLoaded: (b64: string) => void;
+  pickToken: number;
 }
 
-function OcrPanel({ onImageLoaded }: OcrPanelProps) {
+function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
   const [src, setSrc] = useState<string | null>(null);
   const [name, setName] = useState<string>("");
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -117,7 +150,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   const [detResult, setDetResult] = useState<DetectResult | null>(null);
   /** 检测+识别串联（框内识字）的结果 */
   const [pipeResult, setPipeResult] = useState<PipelineResult | null>(null);
-  /** 检测模式下：开始识别时是否顺带在框内认字 */
+  /** 检测模式下：识别时是否顺带在框内认字 */
   const [ocrInBoxes, setOcrInBoxes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,56 +170,28 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
   /** 逐字结果：按需加载，切到「逐字」tab 时才请求 */
   const [detail, setDetail] = useState<DanziResult | null>(null);
   const [charBusy, setCharBusy] = useState(false);
+  /** 「更多设置」浮层 */
+  const [moreOpen, setMoreOpen] = useState(false);
+  /** 换图后自动识别 */
+  const [autoRun, setAutoRun] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(AUTO_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+
   const b64Ref = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  /** 所有入口（选文件 / 拖入 / 粘贴）最终都走这里，状态更新只写一遍。 */
-  const applyImage = useCallback(
-    async (b64: string, url: string, dim: { width: number; height: number }, label: string) => {
-      b64Ref.current = b64;
-      setSrc(url);
-      setSize(dim);
-      setName(label);
-      setResult(null);
-      setDetResult(null);
-      setPipeResult(null);
-      setDetail(null);
-      setTab("text");
-      setError(null);
-      onImageLoaded(b64);
-    },
-    [onImageLoaded],
-  );
-
-  const loadFile = useCallback(
-    async (file: File) => {
-      try {
-        const b64 = await fileToBase64(file);
-        const url = `data:${file.type || "image/png"};base64,${b64}`;
-        const dim = await imageSize(url);
-        await applyImage(b64, url, dim, file.name);
-      } catch (e) {
-        setError(`加载图片失败: ${e}`);
-      }
-    },
-    [applyImage],
-  );
-
-  const onDrop = useCallback(
-    (imgs: DroppedImage[]) => {
-      const first = imgs[0];
-      if (!first) return;
-      void applyImage(
-        first.b64,
-        first.url,
-        { width: first.width, height: first.height },
-        first.name,
-      );
-    },
-    [applyImage],
-  );
-
-  const { dragging } = useImageDrop(onDrop);
+  const moreRef = useRef<HTMLDivElement>(null);
+  /**
+   * 识别请求序号。
+   *
+   * 自动识别意味着「拖第二张图」可能发生在第一次还没算完的时候。
+   * 只认最后一次的返回，早先的结果直接丢 —— 否则会出现
+   * 「图是新的、框是旧图的」这种最难解释的现象。
+   */
+  const runSeq = useRef(0);
 
   /**
    * 可选引擎列表。
@@ -210,6 +215,115 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     };
   }, []);
 
+  /** 当前选中的引擎条目；空字符串 = PP-OCR 默认 */
+  const engineItem = engines.find((e) => e.name === engine);
+  /** 检测引擎（yolo）没有行框/文字能力，界面切换成「找物体」形态 */
+  const isDetector = engineItem?.capabilities.detect === true && !engineItem.capabilities.line_boxes;
+
+  /**
+   * 真正跑一次推理。
+   *
+   * 抽成独立函数是为了让「载入图片」能直接调用它 —— 小白不该需要
+   * 「先放图，再点开始识别」这两步，放进去就应该有反应。
+   */
+  const runRecognize = useCallback(
+    async (override?: string) => {
+      const b64 = override ?? b64Ref.current;
+      if (!b64) {
+        setError("请先载入图片");
+        return;
+      }
+      const seq = ++runSeq.current;
+      setBusy(true);
+      setError(null);
+      try {
+        if (isDetector && ocrInBoxes) {
+          const r = await pipeline(b64, engine);
+          if (seq !== runSeq.current) return;
+          setPipeResult(r);
+          setResult(null);
+          setDetResult(null);
+        } else if (isDetector) {
+          const r = await detectImage(b64, engine);
+          if (seq !== runSeq.current) return;
+          setDetResult(r);
+          setResult(null);
+          setPipeResult(null);
+        } else {
+          const r = await recognize(b64, useCls, engine);
+          if (seq !== runSeq.current) return;
+          setResult(r);
+          setDetResult(null);
+          setPipeResult(null);
+        }
+        setDetail(null); // 档位/参数可能变了，旧的逐字结果作废
+        setTab("text");
+      } catch (e) {
+        if (seq === runSeq.current) setError(`识别失败：${e}`);
+      } finally {
+        if (seq === runSeq.current) setBusy(false);
+      }
+    },
+    [isDetector, ocrInBoxes, engine, useCls],
+  );
+
+  /** 所有入口（选文件 / 拖入 / 粘贴）最终都走这里，状态更新只写一遍。 */
+  const applyImage = useCallback(
+    async (b64: string, url: string, dim: { width: number; height: number }, label: string) => {
+      b64Ref.current = b64;
+      setSrc(url);
+      setSize(dim);
+      setName(label);
+      setResult(null);
+      setDetResult(null);
+      setPipeResult(null);
+      setDetail(null);
+      setTab("text");
+      setError(null);
+      onImageLoaded(b64);
+      if (autoRun) void runRecognize(b64);
+    },
+    [onImageLoaded, autoRun, runRecognize],
+  );
+
+  const loadFile = useCallback(
+    async (file: File) => {
+      try {
+        const b64 = await fileToBase64(file);
+        const url = `data:${file.type || "image/png"};base64,${b64}`;
+        const dim = await imageSize(url);
+        await applyImage(b64, url, dim, file.name);
+      } catch (e) {
+        setError(`加载图片失败：${e}`);
+      }
+    },
+    [applyImage],
+  );
+
+  const onDrop = useCallback(
+    (imgs: DroppedImage[]) => {
+      const first = imgs[0];
+      if (!first) return;
+      void applyImage(
+        first.b64,
+        first.url,
+        { width: first.width, height: first.height },
+        first.name,
+      );
+    },
+    [applyImage],
+  );
+
+  const { dragging } = useImageDrop(onDrop);
+
+  // 首页那个大按钮：跳过来就把选图框弹出来，不用用户再找一次入口
+  const lastPick = useRef(0);
+  useEffect(() => {
+    if (pickToken === lastPick.current) return;
+    lastPick.current = pickToken;
+    inputRef.current?.click();
+  }, [pickToken]);
+
   // Ctrl+V 粘贴
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -223,40 +337,15 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     return () => window.removeEventListener("paste", onPaste);
   }, [loadFile]);
 
-  /** 当前选中的引擎条目；空字符串 = PP-OCR 默认 */
-  const engineItem = engines.find((e) => e.name === engine);
-  /** 检测引擎（yolo）没有行框/文字能力，界面切换成「目标检测」形态 */
-  const isDetector = engineItem?.capabilities.detect === true && !engineItem.capabilities.line_boxes;
-
-  const onRecognize = async () => {
-    if (!b64Ref.current) {
-      setError("请先载入图片");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      if (isDetector && ocrInBoxes) {
-        setPipeResult(await pipeline(b64Ref.current, engine));
-        setResult(null);
-        setDetResult(null);
-      } else if (isDetector) {
-        setDetResult(await detectImage(b64Ref.current, engine));
-        setResult(null);
-        setPipeResult(null);
-      } else {
-        setResult(await recognize(b64Ref.current, useCls, engine));
-        setDetResult(null);
-        setPipeResult(null);
-      }
-      setDetail(null); // 档位/参数可能变了，旧的逐字结果作废
-      setTab("text");
-    } catch (e) {
-      setError(`识别失败: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
+  // 点浮层外面收起来
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!moreRef.current?.contains(e.target as Node)) setMoreOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [moreOpen]);
 
   /** 懒加载逐字结果：只有真的切到「逐字」tab 才多跑一次推理。 */
   const loadChars = async () => {
@@ -266,7 +355,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
     try {
       setDetail(await recognizeChars(b64Ref.current, useCls, engine));
     } catch (e) {
-      setError(`逐字定位失败: ${e}`);
+      setError(`逐字定位失败：${e}`);
     } finally {
       setCharBusy(false);
     }
@@ -316,23 +405,25 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
         }))
       : (result?.lines ?? []);
 
+  const hasResult = !!(result || detResult || pipeResult);
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
       {/* 拖拽遮罩 */}
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-blue-50/80 backdrop-blur-[1px]">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[14px] bg-blue-50/85 backdrop-blur-[1px]">
           <div className="flex flex-col items-center gap-2 text-blue-700">
-            <Upload className="h-7 w-7" />
-            <span className="text-[13px] font-medium">松手即可载入这张图</span>
+            <ImagePlus className="h-8 w-8" />
+            <span className="text-[14px] font-bold">松手就能识别</span>
           </div>
         </div>
       )}
 
-      {/* 工具栏 */}
+      {/* 工具栏：只留「换图」和「更多」，其余概念都收起来 */}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={() => inputRef.current?.click()}>
           <FileImage className="h-3.5 w-3.5" />
-          {src ? "换一张" : "打开图片"}
+          {src ? "换一张图" : "打开图片"}
         </Button>
         <input
           ref={inputRef}
@@ -346,12 +437,14 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
           }}
         />
 
-        <Button size="sm" onClick={() => void onRecognize()} disabled={busy || !src}>
-          <ScanText className="h-3.5 w-3.5" />
-          {busy ? "识别中…" : "开始识别"}
-        </Button>
+        {busy && (
+          <span className="flex items-center gap-1.5 text-[12.5px] text-neutral-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            正在识别…
+          </span>
+        )}
 
-        {/* 引擎选择：只在确实有第二个可用引擎时出现，避免给小白多一个要理解的概念 */}
+        {/* 有第二个可用引擎时才出现下拉，否则小白只会多一个看不懂的选择 */}
         {engines.length > 0 && (
           <div className="flex items-center gap-1">
             <Select
@@ -370,13 +463,14 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                 setDetResult(null);
                 setPipeResult(null);
                 setDetail(null);
+                if (b64Ref.current) void runRecognize();
               }}
             >
-              <SelectTrigger className="h-8 w-[210px] text-[12.5px]">
+              <SelectTrigger className="h-8 w-[176px] text-[12.5px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="default">PP-OCR（默认）</SelectItem>
+                <SelectItem value="default">识别文字（默认）</SelectItem>
                 {engines.map((e) => (
                   <SelectItem key={e.name} value={e.name}>
                     {engineLabel(e)}
@@ -385,58 +479,12 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
               </SelectContent>
             </Select>
             <Hint>
-              不同引擎擅长的东西不一样：PP-OCR 适合成段文字（截图、扫描件），
-              DDDDOCR 训练在验证码上，短英文数字更快；目标检测会框出物体类别，
-              选哪个模型在设置页里管。切换后要重新点「开始识别」。
+              不同模型擅长的东西不一样：默认那套适合成段文字（截图、扫描件），
+              DDDDOCR 训练在验证码上，短英文数字更快；「找物体」会框出物体类别，
+              用哪个模型在设置页里管。换完会自动重新识别一次。
             </Hint>
           </div>
         )}
-
-        <div className="mx-1 h-5 w-px bg-neutral-200" />
-
-        <div className="flex items-center gap-1.5">
-          <Switch id="show-boxes" checked={showBoxes} onCheckedChange={setShowBoxes} />
-          <Label
-            htmlFor="show-boxes"
-            className="flex cursor-pointer items-center gap-1 text-[12.5px] font-normal leading-none text-neutral-600"
-          >
-            {showBoxes ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-            显示检测框
-          </Label>
-        </div>
-
-        <div className="flex items-center gap-1">
-          {isDetector ? (
-            <>
-              <Switch id="ocr-in-boxes" checked={ocrInBoxes} onCheckedChange={setOcrInBoxes} />
-              <Label
-                htmlFor="ocr-in-boxes"
-                className="cursor-pointer text-[12.5px] font-normal leading-none text-neutral-600"
-              >
-                框内识字
-              </Label>
-              <Hint>
-                开启后每个检测框内会再跑一次 PP-OCR 识别文字（检测 + 识别串联）。
-                适合搭配自训检测模型找「按钮/标题/表格」等区域；用通用 COCO 模型时
-                检出的多是人和车，框里未必有字。
-              </Hint>
-            </>
-          ) : (
-            <>
-              <Switch id="use-cls" checked={useCls} onCheckedChange={setUseCls} />
-              <Label
-                htmlFor="use-cls"
-                className="cursor-pointer text-[12.5px] font-normal leading-none text-neutral-600"
-              >
-                方向分类
-              </Label>
-              <Hint>
-                开启后会把倒置 180° 的文字自动翻正再识别。截图、扫描件里常出现倒着的字，
-                建议保持开启；纯正方向图片关掉能略快一点。
-              </Hint>
-            </>
-          )}
-        </div>
 
         <div className="ml-auto flex items-center gap-2">
           {result && (
@@ -446,19 +494,93 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
           )}
           {detResult && (
             <Badge variant="secondary">
-              {detResult.count} 目标 · {detResult.elapsed_ms} ms
+              {detResult.count} 个 · {detResult.elapsed_ms} ms
             </Badge>
           )}
           {pipeResult && (
             <Badge variant="secondary">
-              {pipeResult.regions.length} 区域 · {pipeResult.count} 行 ·{" "}
-              {pipeResult.elapsed_ms} ms
+              {pipeResult.regions.length} 区域 · {pipeResult.count} 行 · {pipeResult.elapsed_ms} ms
             </Badge>
           )}
           <span className="hidden items-center gap-1 text-[11.5px] text-neutral-400 sm:flex">
             <Keyboard className="h-3 w-3" />
-            Ctrl+V 粘贴
+            Ctrl+V
           </span>
+
+          {/* 更多设置：显示框、方向分类这些不是每天都动的东西 */}
+          <div className="relative" ref={moreRef}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMoreOpen((o) => !o)}
+              aria-expanded={moreOpen}
+            >
+              <Settings2 className="h-3.5 w-3.5" />
+              更多
+            </Button>
+
+            {moreOpen && (
+              <div className="absolute right-0 top-full z-30 mt-1.5 w-[268px] rounded-[12px] border border-neutral-200 bg-white p-3 shadow-[0_12px_32px_rgba(16,24,40,0.14)]">
+                <ToggleRow
+                  id="show-boxes"
+                  checked={showBoxes}
+                  onCheckedChange={setShowBoxes}
+                  label="在图上画框"
+                  hint="结果框会直接叠在图片上"
+                  icon={showBoxes ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                />
+
+                {isDetector ? (
+                  <ToggleRow
+                    id="ocr-in-boxes"
+                    checked={ocrInBoxes}
+                    onCheckedChange={setOcrInBoxes}
+                    label="框里也认字"
+                    hint="每个框内再识别一次文字，慢一些"
+                  />
+                ) : (
+                  <ToggleRow
+                    id="use-cls"
+                    checked={useCls}
+                    onCheckedChange={setUseCls}
+                    label="自动翻正倒字"
+                    hint="倒着 180° 的字会先翻正再认"
+                  />
+                )}
+
+                <ToggleRow
+                  id="auto-run"
+                  checked={autoRun}
+                  onCheckedChange={(v) => {
+                    setAutoRun(v);
+                    try {
+                      localStorage.setItem(AUTO_KEY, v ? "1" : "0");
+                    } catch {
+                      /* 忽略 */
+                    }
+                  }}
+                  label="换图后自动识别"
+                  hint="关掉就每次自己点「重新识别」"
+                />
+
+                <div className="my-2 h-px bg-neutral-100" />
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    void runRecognize();
+                  }}
+                  disabled={!src || busy}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  重新识别一次
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -498,33 +620,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                 chars={tab === "chars" ? detail?.lines.flatMap((l) => l.chars) : undefined}
               />
             ) : (
-              <EmptyState
-                icon={<Hand className="h-5 w-5" />}
-                title="先把一张图放进来"
-                description="三种方式随你挑，放进来之后点上面的「开始识别」。"
-                steps={[
-                  {
-                    icon: <Upload className="h-3.5 w-3.5" />,
-                    text: "拖一张图片到这个区域",
-                    detail: "从文件夹直接拖进来就行",
-                  },
-                  {
-                    icon: <Clipboard className="h-3.5 w-3.5" />,
-                    text: "或者按 Ctrl+V 粘贴截图",
-                    detail: "微信/QQ 截图、Win+Shift+S 都可以",
-                  },
-                  {
-                    icon: <FileImage className="h-3.5 w-3.5" />,
-                    text: "也可以点左上角「打开图片」",
-                  },
-                ]}
-                action={
-                  <Button variant="outline" size="sm" onClick={() => inputRef.current?.click()}>
-                    <FileImage className="h-3.5 w-3.5" />
-                    选择文件
-                  </Button>
-                }
-              />
+              <DropZone onPick={() => inputRef.current?.click()} />
             )}
           </CardContent>
         </Card>
@@ -546,7 +642,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                 variant="ghost"
                 size="sm"
                 onClick={() => void copyJson()}
-                disabled={!result && !detResult && !pipeResult}
+                disabled={!hasResult}
               >
                 {copied ? (
                   <Copy className="h-3.5 w-3.5 text-emerald-600" />
@@ -621,9 +717,9 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                           {d.class_name}
                         </div>
                         <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
-                          置信 {d.score.toFixed(3)} · 位置 (
-                          {d.box[0][0].toFixed(0)}, {d.box[0][1].toFixed(0)}) - (
-                          {d.box[2][0].toFixed(0)}, {d.box[2][1].toFixed(0)})
+                          置信 {d.score.toFixed(3)} · 位置 ({d.box[0][0].toFixed(0)},{" "}
+                          {d.box[0][1].toFixed(0)}) - ({d.box[2][0].toFixed(0)},{" "}
+                          {d.box[2][1].toFixed(0)})
                         </div>
                       </div>
                     </li>
@@ -669,7 +765,10 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                     <ul className="divide-y divide-neutral-200/60">
                       {lines.map((l, i) => (
                         <li key={i} className="flex items-start gap-2.5 px-3 py-2">
-                          <span className="mt-0.5 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded bg-blue-600 text-[10px] font-semibold text-white" style={{ width: 18, height: 18 }}>
+                          <span
+                            className="mt-0.5 flex shrink-0 items-center justify-center rounded bg-blue-600 text-[10px] font-semibold text-white"
+                            style={{ width: 18, height: 18 }}
+                          >
                             {i + 1}
                           </span>
                           <div className="min-w-0 flex-1">
@@ -707,8 +806,8 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                     {!charBusy && detail && (
                       <div className="flex flex-col gap-3">
                         <p className="text-[11.5px] leading-5 text-neutral-500">
-                          共 {detail.char_count} 字。图中青色细框就是一个字的范围
-                          —— 它是按识别模型的帧对齐推算出来的，字距不均时会有几像素偏差。
+                          共 {detail.char_count} 字。图中青色细框就是一个字的范围 ——
+                          它是按识别模型的帧对齐推算出来的，字距不均时会有几像素偏差。
                         </p>
                         {detail.lines.map((l, li) => (
                           <div key={li}>
@@ -747,12 +846,17 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
                   </ScrollArea>
                 </TabsContent>
               </Tabs>
+            ) : busy ? (
+              <div className="flex h-full min-h-[260px] flex-col items-center justify-center gap-2 rounded-xl bg-neutral-50/50 text-neutral-400">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span className="text-[12.5px]">正在识别，稍等一下…</span>
+              </div>
             ) : (
               <EmptyState
                 className="bg-neutral-50/40"
                 icon={<Sparkles className="h-5 w-5" />}
-                title="还没有识别结果"
-                description="载入图片后点「开始识别」，这里会出现三种视图：整段文本、逐行明细、原始 JSON。"
+                title="结果会出现在这里"
+                description="左边放一张图，识别完成后这里会显示整段文字、逐行明细和原始 JSON。"
               />
             )}
           </CardContent>
@@ -760,20 +864,87 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
       </div>
 
       {/* 底部提示：为什么框和字对不上之类的小白困惑 */}
-      {(detResult || pipeResult) && (detResult?.detections.length ?? 0) + (pipeResult?.regions.length ?? 0) > 0 && showBoxes && (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
-          <GripHorizontal className="h-3 w-3" />
-          {pipeResult
-            ? "框上的文字是「类别 · 框内识别出的第一行」，左侧列表有完整文字。"
-            : "框上的文字是「类别 + 置信度」，左侧列表的编号就是类别 id。"}
-        </div>
-      )}
+      {(detResult || pipeResult) &&
+        (detResult?.detections.length ?? 0) + (pipeResult?.regions.length ?? 0) > 0 &&
+        showBoxes && (
+          <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+            {pipeResult
+              ? "框上的文字是「类别 · 框内识别出的第一行」，右侧列表有完整文字。"
+              : "框上的文字是「类别 + 置信度」，右侧列表的编号就是类别 id。"}
+          </div>
+        )}
       {!detResult && !pipeResult && result && result.lines.length > 0 && showBoxes && (
         <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
-          <GripHorizontal className="h-3 w-3" />
           图上的蓝框就是每一行的位置，编号与「逐行」列表一一对应。
         </div>
       )}
+    </div>
+  );
+}
+
+/** 浮层里的一行开关：左边标题 + 一行解释，右边 Switch。 */
+function ToggleRow({
+  id,
+  checked,
+  onCheckedChange,
+  label,
+  hint,
+  icon,
+}: {
+  id: string;
+  checked: boolean;
+  onCheckedChange: (v: boolean) => void;
+  label: string;
+  hint: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-2.5 py-1.5">
+      <div className="min-w-0 flex-1">
+        <Label
+          htmlFor={id}
+          className="flex cursor-pointer items-center gap-1.5 text-[12.5px] leading-none text-neutral-800"
+        >
+          {icon && <span className="text-neutral-400">{icon}</span>}
+          {label}
+        </Label>
+        <p className="mt-1 text-[11px] leading-4 text-neutral-400">{hint}</p>
+      </div>
+      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} className="mt-0.5" />
+    </div>
+  );
+}
+
+/**
+ * 没图时的引导区。
+ *
+ * 小白最短路径是「把手里的图丢进来」，所以这里不是一句"暂无数据"，
+ * 而是一个**看起来就能扔东西进去**的虚线大框，下面把另外两条路也写清楚。
+ */
+function DropZone({ onPick }: { onPick: () => void }) {
+  return (
+    <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[14px] border-2 border-dashed border-neutral-200 bg-neutral-50/50 px-6 py-8 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-[16px] bg-white text-blue-500 shadow-card">
+        <ImagePlus className="h-6 w-6" strokeWidth={1.8} />
+      </div>
+      <p className="mt-4 text-[15px] font-bold text-neutral-800">把图片拖到这里</p>
+      <p className="mt-1 text-[12.5px] text-neutral-500">放进来就自动识别，不用再点别的</p>
+
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11.5px] text-neutral-600 ring-1 ring-neutral-200/80">
+          <Clipboard className="h-3.5 w-3.5 text-neutral-400" />
+          按 Ctrl+V 粘贴截图
+        </span>
+        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11.5px] text-neutral-600 ring-1 ring-neutral-200/80">
+          <Keyboard className="h-3.5 w-3.5 text-neutral-400" />
+          Win+Shift+S 截图后直接粘
+        </span>
+      </div>
+
+      <Button variant="outline" size="sm" className="mt-4" onClick={onPick}>
+        <FileImage className="h-3.5 w-3.5" />
+        或者从文件夹里选
+      </Button>
     </div>
   );
 }

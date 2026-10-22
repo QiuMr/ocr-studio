@@ -20,14 +20,19 @@ interface Props {
  */
 export function PageHeader({ title, description, icon, actions, className }: Props) {
   return (
-    <div className={cn("mb-5 flex items-center justify-between gap-4", className)}>
+    <div className={cn("mb-5 flex flex-wrap items-end justify-between gap-4", className)}>
       <div className="min-w-0">
-        <h1 className="flex items-center gap-2 text-[17px] font-semibold leading-tight tracking-tight text-neutral-900">
-          {icon && <span className="flex h-[18px] w-[18px] items-center justify-center text-blue-600">{icon}</span>}
+        {/* 26px/700：和服务台、接口页同一档标题，切换页面时标题不会「变小」 */}
+        <h1 className="flex items-center gap-2 text-[26px] font-bold leading-none tracking-tight text-neutral-900">
+          {icon && (
+            <span className="flex h-[22px] w-[22px] items-center justify-center text-blue-600">
+              {icon}
+            </span>
+          )}
           {title}
         </h1>
         {description && (
-          <p className="mt-1 text-[12.5px] leading-5 text-neutral-500">{description}</p>
+          <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">{description}</p>
         )}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

@@ -87,8 +87,12 @@ def main() -> int:
     time.sleep(wait / 1000.0)
 
     if hwnd:
+        # 用 DWM 真实边界，否则会截进 DWM 阴影外的桌面内容（见 shot_window.py 说明）
         rect = wt.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)
+        ) != 0:
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
     else:
         rect = wt.RECT()
         rect.left, rect.top, rect.right, rect.bottom = 0, 0, 1920, 1080

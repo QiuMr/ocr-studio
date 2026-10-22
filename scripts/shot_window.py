@@ -57,9 +57,19 @@ def main() -> int:
         user32.ShowWindow(hwnd, SW_RESTORE)
     user32.SetForegroundWindow(hwnd)
 
+    # 取「真实可见边界」。
+    #
+    # 直接用 GetWindowRect 会**多出 DWM 的阴影边距**（本机实测左右各多约 15px），
+    # 截图上表现为窗框外凭空多出一条桌面内容 —— 容易误判成界面画错了。
+    # DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) 拿到的才是肉眼看到的窗口。
+    dwmapi = ctypes.windll.dwmapi
     rect = wt.RECT()
-    # GetWindowRect 用 ctypes 直接调用（注意 DPI 虚拟化已由 SetProcessDPIAware 关闭）
-    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    hr = dwmapi.DwmGetWindowAttribute(
+        hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)  # 9 = DWMWA_EXTENDED_FRAME_BOUNDS
+    )
+    if hr != 0:
+        print("[WARN] DWM 取边界失败，回退 GetWindowRect（可能含阴影）")
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
     w = rect.right - rect.left
     h = rect.bottom - rect.top
     print(f"[INFO] 窗口矩形: ({rect.left},{rect.top}) {w}x{h}")
