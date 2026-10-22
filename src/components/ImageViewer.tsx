@@ -19,6 +19,12 @@ interface Props {
   chars?: CharResult[];
   /** 没有图时显示什么。默认给一句提示，页面可以传更完整的引导 */
   empty?: React.ReactNode;
+  /** 打开「拖拽框选」：在图上按下拖动画出一个矩形，松手回调图内坐标 */
+  selectable?: boolean;
+  /** 已选区域 `[x, y, w, h]`（图内坐标）。传 null 表示没有选中 */
+  selection?: [number, number, number, number] | null;
+  /** 框选完成回调；拖出的框太小（<4px）视为「取消选择」，回调 null */
+  onSelect?: (region: [number, number, number, number] | null) => void;
 }
 
 /**
@@ -39,15 +45,34 @@ export function ImageViewer({
   hitsOffset,
   chars,
   empty,
+  selectable = false,
+  selection = null,
+  onSelect,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   /** 1 = 适应容器；其它值为实际 CSS 像素宽度倍数 */
   const [zoom, setZoom] = useState(1);
+  /** 正在拖拽中的选区（图内坐标）。松手后清空，结果通过 onSelect 交出去。 */
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   useEffect(() => {
     setZoom(1);
+    setDrag(null);
   }, [src]);
+
+  /** 客户端坐标 → 图内像素坐标。canvas 的 CSS 尺寸与内部像素尺寸不同，必须按比例换算。 */
+  const toImage = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const c = canvasRef.current;
+    if (!c) return { x: 0, y: 0 };
+    const r = c.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / Math.max(1, r.width)) * width;
+    const y = ((e.clientY - r.top) / Math.max(1, r.height)) * height;
+    return {
+      x: Math.max(0, Math.min(width, x)),
+      y: Math.max(0, Math.min(height, y)),
+    };
+  };
 
   // 重绘：图换、框变、开关变都要重画
   useEffect(() => {
@@ -87,9 +112,20 @@ export function ImageViewer({
       (chars ?? []).forEach((c) => {
         drawChar(ctx, c.box);
       });
+
+      // 框选矩形：拖拽中用实时框，松手后用父组件给的 selection
+      const sel = drag
+        ? ([
+            Math.min(drag.x0, drag.x1),
+            Math.min(drag.y0, drag.y1),
+            Math.abs(drag.x1 - drag.x0),
+            Math.abs(drag.y1 - drag.y0),
+          ] as [number, number, number, number])
+        : selection;
+      if (sel) drawSelection(ctx, sel);
     };
     img.src = src;
-  }, [src, width, height, lines, showBoxes, hits, hitsOffset, chars]);
+  }, [src, width, height, lines, showBoxes, hits, hitsOffset, chars, drag, selection]);
 
   if (!src) {
     return (
@@ -117,7 +153,41 @@ export function ImageViewer({
           setZoom((z) => Math.min(4, Math.max(0.25, z - e.deltaY * 0.001)));
         }}
         onDoubleClick={() => setZoom(1)}
-        className={cn(fit ? "max-h-full max-w-full object-contain" : "shrink-0 cursor-zoom-out")}
+        onPointerDown={(e) => {
+          if (!selectable) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          const p = toImage(e);
+          setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+        }}
+        onPointerMove={(e) => {
+          if (!selectable || !drag) return;
+          const p = toImage(e);
+          setDrag((d) => (d ? { ...d, x1: p.x, y1: p.y } : d));
+        }}
+        onPointerUp={(e) => {
+          if (!selectable || !drag) return;
+          const p = toImage(e);
+          const x0 = Math.min(drag.x0, p.x);
+          const y0 = Math.min(drag.y0, p.y);
+          const x1 = Math.max(drag.x0, p.x);
+          const y1 = Math.max(drag.y0, p.y);
+          setDrag(null);
+          // 拖得太小当误触，视为取消选择（回 null），免得留下 1px 的选区
+          if (x1 - x0 < 4 || y1 - y0 < 4) {
+            onSelect?.(null);
+            return;
+          }
+          onSelect?.([
+            Math.round(x0),
+            Math.round(y0),
+            Math.round(x1 - x0),
+            Math.round(y1 - y0),
+          ]);
+        }}
+        className={cn(
+          fit ? "max-h-full max-w-full object-contain" : "shrink-0",
+          selectable ? "cursor-crosshair" : fit ? "" : "cursor-zoom-out",
+        )}
         style={
           fit
             ? { aspectRatio: `${width} / ${height}` }
@@ -202,6 +272,23 @@ function drawHit(
   ctx.fillStyle = "#FFFFFF";
   ctx.textBaseline = "top";
   ctx.fillText(label, bx + padX, by + padX);
+  ctx.restore();
+}
+
+/** 画框选区域：深色蒙版 + 虚线框，让「要识别的范围」一眼可辨。 */
+function drawSelection(ctx: CanvasRenderingContext2D, sel: [number, number, number, number]) {
+  const [x, y, w, h] = sel;
+  ctx.save();
+  // 区域外压暗：不压暗的话选区边界在花花绿绿的图上根本看不出来
+  ctx.fillStyle = "rgba(15, 23, 42, 0.34)";
+  ctx.beginPath();
+  ctx.rect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.rect(x, y, w, h);
+  ctx.fill("evenodd");
+  ctx.strokeStyle = "#0EA5E9";
+  ctx.lineWidth = Math.max(1.5, ctx.canvas.width / 700);
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x, y, w, h);
   ctx.restore();
 }
 

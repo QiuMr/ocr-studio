@@ -1,11 +1,13 @@
 ﻿//! HTTP 路由与处理器。路由表 1:1 对应 `docs/PLAN.md` 第 6 节。
 //!
 //! 全部端点均已实现：
-//! - 识别类：`/ocr/shibie`、`/ocr/zhaozi`、`/ocr/duohangjson`
+//! - 识别类：`/ocr/shibie`、`/ocr/zhaozi`、`/ocr/duohangjson`、`/ocr/danzijson`
+//! - 区域识别：`/ocr/quyuocr`（只认指定矩形里的字，坐标自动平移回原图）
 //! - 找图类（模板）：`/ocr/tuzhaotu1|2`（传图）、`/ocr/jubingzhaotu1|2`（截窗口）、
 //!   `/ocr/pingmuzhaotu1|2`（截屏幕）
 //! - 找图类（语义）：`/ocr/yuyizhaotu`（用检测模型直接找目标，不需要模板图）
-//! - 状态：`/ocr/health`
+//! - 看图：`/vision/detect`、`/vision/pipeline`
+//! - 状态：`/ocr/health`、`/engine/list`
 //!
 //! 找图三组的后缀语义：`1` = 精准（NCC ≥ 0.92），`2` = 容错（NCC ≥ 0.72）。
 
@@ -25,13 +27,14 @@ use image::{DynamicImage, RgbImage};
 use super::dto::{
     decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
     DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData, FindHitDto, FindOptions,
-    HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto, ShibieData, ZhaoziData,
-    CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED, CODE_NOT_FOUND, EngineItemDto, EngineListData,
+    HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto, RegionOcrData, ShibieData,
+    ZhaoziData, CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED, CODE_NOT_FOUND, EngineItemDto,
+    EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
 use crate::engine::TextLine;
-use crate::matcher::{self, MatchOptions};
+use crate::matcher::{self, MatchOptions, TemplateMask};
 use crate::ocr::Device;
 
 /// 请求体上限 32MB：截图级 PNG  compressed 一般几百 KB，留足余量。
@@ -106,6 +109,7 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_ZHAOZI, post(zhaozi))
         .route(P_DUOHANG, post(duohangjson))
         .route(P_DANZI, post(danzijson))
+        .route(P_QUYU, post(quyuocr))
         .route(P_TU1, post(tuzhaotu1))
         .route(P_TU2, post(tuzhaotu2))
         .route(P_JU1, post(jubingzhaotu1))
@@ -137,6 +141,8 @@ const P_SHIBIE: &str = "/ocr/shibie";
 const P_ZHAOZI: &str = "/ocr/zhaozi";
 const P_DUOHANG: &str = "/ocr/duohangjson";
 const P_DANZI: &str = "/ocr/danzijson";
+/// 区域 OCR：只认指定矩形里的字（大图里只关心一小块时用它，别整图识别再自己过滤）
+const P_QUYU: &str = "/ocr/quyuocr";
 const P_TU1: &str = "/ocr/tuzhaotu1";
 const P_TU2: &str = "/ocr/tuzhaotu2";
 const P_JU1: &str = "/ocr/jubingzhaotu1";
@@ -152,8 +158,8 @@ const P_PIPELINE: &str = "/vision/pipeline";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
-    P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1, P_PINGMU2, P_YUYI,
-    P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE,
+    P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_QUYU, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1,
+    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE,
 ];
 
 // ---------------------------------------------------------------- 兜底与 CORS
@@ -359,6 +365,7 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
             .get("class_filter")
             .and_then(|s| parse_id_list(s)),
         detect_engine: fields.get("detect_engine").cloned(),
+        region: fields.get("region").and_then(|s| parse_region_str(s)),
     };
     Ok((img, opts))
 }
@@ -460,6 +467,93 @@ async fn zhaozi(State(state): State<Arc<AppState>>, req: Request) -> Response {
         elapsed_ms: t0.elapsed().as_millis(),
     }))
     .into_response()
+}
+
+/// POST /ocr/quyuocr —— 区域 OCR：只认指定矩形里的字。
+///
+/// 为什么单独开一个端点而不是让调用方自己裁剪：调用方裁完再传，多一次
+/// 编码/解码，还得自己把框坐标平移回去（多显示器/负原点时容易算错）。
+/// 这里由后端裁剪、识别、再把坐标平移回原图，调用方拿到的框直接就是原图坐标。
+///
+/// 出参与 `/ocr/shibie` 基本一致，只多一个 `region`（实际生效的区域）。
+async fn quyuocr(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+
+    let Some([rx, ry, rw, rh]) = opts.region else {
+        return ApiError::BadRequest(
+            "缺少 region（[x, y, w, h]，原图像素坐标）".to_string(),
+        )
+        .into_response();
+    };
+    if rw <= 0 || rh <= 0 {
+        return ApiError::BadRequest(format!("region 宽高必须为正，收到 {rw}x{rh}")).into_response();
+    }
+
+    // 钳到图内：负坐标/超界不让它报错，直接收敛到有效范围（调用方常按屏幕坐标传）
+    let Some([x0, y0, cw, ch]) = clamp_region(rx, ry, rw, rh, w, h) else {
+        return ApiError::BadRequest(format!(
+            "region [{rx},{ry},{rw},{rh}] 与图片（{w}x{h}）没有有效交集"
+        ))
+        .into_response();
+    };
+
+    let crop = img.crop_imm(x0 as u32, y0 as u32, cw as u32, ch as u32);
+    let mut lines = match state.recognize_lines(&opts, crop).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    // 坐标平移回原图：检测框是轴对齐裁剪，直接加偏移即可
+    for l in &mut lines {
+        for p in &mut l.points {
+            p.0 += x0 as f64;
+            p.1 += y0 as f64;
+        }
+    }
+
+    let text = lines
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let box_list: Vec<Box4> = lines.iter().map(|b| to_dto(b).r#box).collect();
+    let scores: Vec<f64> = lines.iter().map(|b| b.score).collect();
+    let line_dtos: Vec<LineDto> = lines.iter().map(to_dto).collect();
+
+    Json(ApiResp::ok(RegionOcrData {
+        region: [x0, y0, cw as i32, ch as i32],
+        text,
+        boxes: box_list,
+        scores,
+        lines: line_dtos,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    }))
+    .into_response()
+}
+
+/// 把请求的 `region` 钳到图片范围内。
+///
+/// 返回 `[x, y, w, h]`（已收敛的左上角与尺寸）；与图片没有有效交集（任一边 < 2px）
+/// 返回 `None`。负坐标直接收敛到 0，超出部分截掉——调用方按屏幕绝对坐标传是常见
+/// 情况，为此报错会让人以为接口坏了。
+pub(crate) fn clamp_region(rx: i32, ry: i32, rw: i32, rh: i32, w: u32, h: u32) -> Option<[i32; 4]> {
+    if rw <= 0 || rh <= 0 {
+        return None;
+    }
+    let x0 = rx.max(0).min(w as i32);
+    let y0 = ry.max(0).min(h as i32);
+    let x1 = rx.saturating_add(rw).max(0).min(w as i32);
+    let y1 = ry.saturating_add(rh).max(0).min(h as i32);
+    if x1 - x0 < 2 || y1 - y0 < 2 {
+        return None;
+    }
+    Some([x0, y0, x1 - x0, y1 - y0])
 }
 
 /// POST /ocr/duohangjson —— 多行 JSON，`[{text, box, score}, ...]`。
@@ -787,6 +881,12 @@ async fn find_image(
     };
     let (tw, th) = tpl.dimensions();
 
+    // 掩码可选；给了就只比掩码覆盖的像素（尺寸一致性由 matcher 校验）
+    let mask = match load_mask(&parsed.opts, parsed.mask_bytes.take()) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
     let (hay, off_x, off_y) = match acquire_haystack(source, &parsed.opts, parsed.image_bytes.as_deref())
     {
         Ok(v) => v,
@@ -798,9 +898,11 @@ async fn find_image(
         min_score: parsed.opts.min_score.unwrap_or(mode.default_min_score()),
         max_results: parsed.opts.max_results.unwrap_or(1),
     };
-    let matched = tokio::task::spawn_blocking(move || matcher::find_template(&hay, &tpl, &mopts))
-        .await
-        .unwrap_or_else(|e| Err(format!("匹配任务异常终止: {e}")));
+    let matched = tokio::task::spawn_blocking(move || {
+        matcher::find_template_masked(&hay, &tpl, mask.as_ref(), &mopts)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("匹配任务异常终止: {e}")));
 
     let hits = match matched {
         Ok(v) => v,
@@ -899,6 +1001,7 @@ async fn yuyizhaotu(State(state): State<Arc<AppState>>, req: Request) -> Respons
         iou: None,
         class_filter: opts.class_filter.clone(),
         detect_engine: None,
+        region: None,
     };
 
     let dets = match state
@@ -1041,6 +1144,8 @@ struct ParsedFind {
     image_bytes: Option<Vec<u8>>,
     /// multipart 里直接传的模板图字节
     template_bytes: Option<Vec<u8>>,
+    /// multipart 里直接传的模板掩码字节
+    mask_bytes: Option<Vec<u8>>,
 }
 
 async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
@@ -1058,6 +1163,7 @@ async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
         let mut opts = FindOptions::default();
         let mut image_bytes = None;
         let mut template_bytes = None;
+        let mut mask_bytes = None;
 
         while let Some(field) = mp
             .next_field()
@@ -1080,12 +1186,21 @@ async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
                         .map_err(|e| ApiError::BadRequest(format!("读取 template 失败: {e}")))?;
                     template_bytes = Some(data.to_vec());
                 }
+                "mask" => {
+                    let data = field
+                        .bytes()
+                        .await
+                        .map_err(|e| ApiError::BadRequest(format!("读取 mask 失败: {e}")))?;
+                    mask_bytes = Some(data.to_vec());
+                }
                 _ => {
                     let txt = field.text().await.map_err(|e| {
                         ApiError::BadRequest(format!("读取字段 {name} 失败: {e}"))
                     })?;
                     match name.as_str() {
                         "template_file" => opts.template_file = Some(txt),
+                        "mask_file" => opts.mask_file = Some(txt),
+                        "mask_threshold" => opts.mask_threshold = txt.trim().parse().ok(),
                         "title" => opts.title = Some(txt),
                         "hwnd" => opts.hwnd = txt.trim().parse().ok(),
                         "min_score" => opts.min_score = txt.trim().parse().ok(),
@@ -1105,6 +1220,7 @@ async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
             opts,
             image_bytes,
             template_bytes,
+            mask_bytes,
         })
     } else {
         let bytes = to_bytes(req.into_body(), MAX_BODY)
@@ -1116,6 +1232,7 @@ async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
             opts,
             image_bytes: None,
             template_bytes: None,
+            mask_bytes: None,
         })
     }
 }
@@ -1149,6 +1266,37 @@ pub(crate) fn load_template(opts: &FindOptions, raw: Option<Vec<u8>>) -> Result<
         ));
     };
     Ok(img.to_rgb8())
+}
+
+/// 解析模板掩码：multipart 文件 > base64 字段 > 本地路径。都没给返回 `None`
+/// （= 全部像素参与匹配，等价于没有掩码）。
+///
+/// 掩码按灰度处理，像素 **≥ threshold**（默认 128）视为参与匹配 —— 与
+/// [`TemplateMask::from_gray`] 的约定一致：用户把关心的区域涂白。
+/// 掩码尺寸与模板是否一致由 [`crate::matcher::find_template_masked`] 校验，
+/// 这里不做自动缩放（缩放会悄悄改变「哪些像素算数」的语义）。
+pub(crate) fn load_mask(
+    opts: &FindOptions,
+    raw: Option<Vec<u8>>,
+) -> Result<Option<TemplateMask>, ApiError> {
+    let img = if let Some(bytes) = raw {
+        Some(decode_image(&bytes).map_err(ApiError::BadRequest)?)
+    } else if let Some(b64) = opts.mask.as_deref().filter(|s| !s.trim().is_empty()) {
+        let bytes = decode_base64_image(b64).map_err(ApiError::BadRequest)?;
+        Some(decode_image(&bytes).map_err(ApiError::BadRequest)?)
+    } else if let Some(path) = opts.mask_file.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(decode_template_file(path).map_err(ApiError::BadRequest)?)
+    } else {
+        None
+    };
+    match img {
+        None => Ok(None),
+        Some(img) => {
+            let gray = img.to_luma8();
+            let thr = opts.mask_threshold.unwrap_or(128);
+            Ok(Some(TemplateMask::from_gray(&gray, thr)))
+        }
+    }
 }
 
 /// 从本地路径读模板图。只允许图片扩展名，且限制 16MB。
@@ -1370,7 +1518,7 @@ mod tests {
     /// 那样 404 提示会指错地方。
     #[test]
     fn paths_table_covers_all_endpoints() {
-        assert_eq!(PATHS.len(), 15, "端点数量变了就要同步 PATHS");
+        assert_eq!(PATHS.len(), 16, "端点数量变了就要同步 PATHS");
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
         }
@@ -1463,6 +1611,38 @@ mod tests {
         let d = to_find_data_from_dets(&dets, (0, 0), FindSource::Image, None, 0, Instant::now());
         // 0 → 夹到 1
         assert_eq!(d.matched, 1);
+    }
+
+    /// 区域钳位：正常值原样返回。
+    #[test]
+    fn clamp_region_keeps_valid_rect() {
+        assert_eq!(clamp_region(10, 20, 100, 50, 640, 480), Some([10, 20, 100, 50]));
+    }
+
+    /// 负坐标 / 超界收敛到图内，不报错——调用方常按屏幕绝对坐标传。
+    #[test]
+    fn clamp_region_clips_out_of_bounds() {
+        // 左上角出界 → 收敛到 0
+        assert_eq!(clamp_region(-30, -40, 100, 100, 640, 480), Some([0, 0, 70, 60]));
+        // 右下角出界 → 截到图边
+        assert_eq!(clamp_region(600, 460, 100, 100, 640, 480), Some([600, 460, 40, 20]));
+    }
+
+    /// 完全在图外、或退化尺寸 → None（路由层回 400）。
+    #[test]
+    fn clamp_region_rejects_empty() {
+        assert_eq!(clamp_region(700, 10, 50, 50, 640, 480), None, "完全在右侧图外");
+        assert_eq!(clamp_region(10, 10, 0, 50, 640, 480), None, "宽为 0");
+        assert_eq!(clamp_region(10, 10, -5, 50, 640, 480), None, "负宽");
+        // 只剩 1px 宽也算无效：识别没有意义
+        assert_eq!(clamp_region(639, 10, 50, 50, 640, 480), None, "有效宽度仅 1px");
+    }
+
+    /// 溢出不能 panic（`rx + rw` 用 i32 加法会溢出）。
+    #[test]
+    fn clamp_region_survives_overflow() {
+        assert_eq!(clamp_region(i32::MAX, 0, i32::MAX, 10, 640, 480), None);
+        assert_eq!(clamp_region(0, 0, i32::MAX, i32::MAX, 640, 480), Some([0, 0, 640, 480]));
     }
 
     #[test]

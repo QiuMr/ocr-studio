@@ -66,6 +66,7 @@ pub async fn ocr_recognize(
         iou: None,
         class_filter: None,
         detect_engine: None,
+        region: None,
     };
     let boxes = state
         .recognize_lines(&opts, img)
@@ -100,6 +101,102 @@ pub async fn ocr_recognize(
         height: h,
         elapsed_ms: t0.elapsed().as_millis(),
     })
+}
+
+// ---------------------------------------------------------------- 区域 OCR
+
+/// 区域 OCR 结果（与 HTTP `/ocr/quyuocr` 结构一致）。
+#[derive(Debug, Serialize)]
+pub struct RegionOcrOut {
+    /// 实际生效的区域 `[x, y, w, h]`（请求值钳到图内后的结果）
+    pub region: [i32; 4],
+    /// 区域内全部文本按行用 `\n` 拼接
+    pub text: String,
+    /// 命中行的框，坐标已在**原图**坐标系
+    pub lines: Vec<LineDto>,
+    /// 原图宽（不是区域宽）
+    pub width: u32,
+    /// 原图高（不是区域高）
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// 区域 OCR：只认指定矩形里的字，返回的框坐标自动平移回原图。
+///
+/// 与 HTTP `/ocr/quyuocr` 等价。调用方自己裁剪再识别也能做到，但要多一次
+/// 编码/解码，还得自己平移坐标（多显示器、负原点时容易算错）。
+#[tauri::command]
+pub async fn ocr_quyuocr(
+    state: State<'_, Arc<AppState>>,
+    image: String,
+    region: [i32; 4],
+    use_cls: Option<bool>,
+    engine: Option<String>,
+) -> Result<RegionOcrOut, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?;
+    let (w, h) = (img.width(), img.height());
+
+    let [rx, ry, rw, rh] = region;
+    let Some([x0, y0, cw, ch]) = routes::clamp_region(rx, ry, rw, rh, w, h) else {
+        return Err(format!(
+            "region [{rx},{ry},{rw},{rh}] 与图片（{w}x{h}）没有有效交集"
+        ));
+    };
+
+    let opts = OcrOptions {
+        image,
+        level: None,
+        device: None,
+        use_cls,
+        engine,
+        keyword: None,
+        conf: None,
+        iou: None,
+        class_filter: None,
+        detect_engine: None,
+        region: None,
+    };
+    let crop = img.crop_imm(x0 as u32, y0 as u32, cw as u32, ch as u32);
+    let mut boxes = state
+        .recognize_lines(&opts, crop)
+        .await
+        .map_err(|e| e.message())?;
+    // 坐标平移回原图（轴对齐裁剪，直接加偏移）
+    for b in &mut boxes {
+        for p in &mut b.points {
+            p.0 += x0 as f64;
+            p.1 += y0 as f64;
+        }
+    }
+
+    let text = boxes
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines = boxes.iter().map(|b| to_line_dto(b)).collect();
+
+    Ok(RegionOcrOut {
+        region: [x0, y0, cw, ch],
+        text,
+        lines,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
+}
+
+/// `TextLine` → `LineDto`。commands.rs 里有多处同样的映射，统一到这里。
+fn to_line_dto(b: &crate::engine::TextLine) -> LineDto {
+    LineDto {
+        text: b.text.clone(),
+        r#box: box4(&b.points),
+        score: b.score,
+        det_score: b.det_score,
+        rotated: b.rotated,
+    }
 }
 
 // ---------------------------------------------------------------- 目标检测
@@ -164,6 +261,7 @@ pub async fn vision_detect(
         iou,
         class_filter,
         detect_engine: None,
+        region: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -245,6 +343,7 @@ pub async fn vision_pipeline(
         iou,
         class_filter,
         detect_engine,
+        region: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -376,6 +475,7 @@ pub async fn ocr_danzijson(
         iou: None,
         class_filter: None,
         detect_engine: None,
+        region: None,
     };
     let details = state
         .recognize_details(&opts, img)
@@ -870,6 +970,15 @@ pub struct FindArgs {
     pub template: Option<String>,
     #[serde(default)]
     pub template_file: Option<String>,
+    /// 模板掩码 base64（可省略）。**白（≥ 阈值）= 参与匹配**
+    #[serde(default)]
+    pub mask: Option<String>,
+    /// 掩码文件绝对路径（与 `mask` 二选一）
+    #[serde(default)]
+    pub mask_file: Option<String>,
+    /// 掩码二值化阈值，缺省 128
+    #[serde(default)]
+    pub mask_threshold: Option<u8>,
     #[serde(default)]
     pub hwnd: Option<i64>,
     #[serde(default)]
@@ -888,6 +997,9 @@ impl FindArgs {
             image: self.image,
             template: self.template,
             template_file: self.template_file,
+            mask: self.mask,
+            mask_file: self.mask_file,
+            mask_threshold: self.mask_threshold,
             hwnd: self.hwnd,
             title: self.title,
             region: self.region,
@@ -1007,6 +1119,7 @@ pub async fn find_image(args: FindArgs) -> Result<FindOut, String> {
     // 模板必须先校验（错误提示优先级最高，和 HTTP 层保持一致）
     let tpl = routes::load_template(&opts, None).map_err(|e| e.message())?;
     let (tw, th) = tpl.dimensions();
+    let mask = routes::load_mask(&opts, None).map_err(|e| e.message())?;
     let (hay, ox, oy) =
         routes::acquire_haystack(source, &opts, None).map_err(|e| e.message())?;
 
@@ -1017,7 +1130,7 @@ pub async fn find_image(args: FindArgs) -> Result<FindOut, String> {
     // 只有屏幕/窗口来源需要回传截图（图片来源调用方本来就有原图）
     let need_preview = source != FindSource::Image;
     let (hits, preview) = tokio::task::spawn_blocking(move || {
-        let hits = matcher::find_template(&hay, &tpl, &mopts)?;
+        let hits = matcher::find_template_masked(&hay, &tpl, mask.as_ref(), &mopts)?;
         let preview = if need_preview {
             Some(rgb_to_png_b64(&hay)?)
         } else {
@@ -1114,6 +1227,7 @@ pub async fn find_semantic(
         iou: None,
         class_filter: Some(class_filter.clone()),
         detect_engine: None,
+        region: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: conf,

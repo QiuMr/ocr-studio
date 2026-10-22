@@ -10,12 +10,14 @@ import {
   FileImage,
   Hand,
   Image as ImageIcon,
+  Layers,
   Monitor,
   RefreshCw,
   ScanSearch,
   Settings2,
   Target,
   Upload,
+  X,
 } from "lucide-react";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -117,6 +119,8 @@ export function FindPanel({ inheritedImage }: Props) {
   const [mode, setMode] = useState<FindMode>("exact");
   const [hay, setHay] = useState<Haystack | null>(null);
   const [tpl, setTpl] = useState<Template | null>(null);
+  /** 模板掩码（可选）：白 = 参与匹配。尺寸必须与模板一致。 */
+  const [mask, setMask] = useState<Template | null>(null);
   const [result, setResult] = useState<(FindResult & { preview?: string }) | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +139,7 @@ export function FindPanel({ inheritedImage }: Props) {
 
   const hayInputRef = useRef<HTMLInputElement>(null);
   const tplInputRef = useRef<HTMLInputElement>(null);
+  const maskInputRef = useRef<HTMLInputElement>(null);
 
   // 刷新窗口列表
   const refreshWindows = useCallback(async () => {
@@ -184,6 +189,15 @@ export function FindPanel({ inheritedImage }: Props) {
   const applyTemplate = useCallback(async (b64: string, url: string, name: string) => {
     const dim = await imageSize(url);
     setTpl({ url, b64, width: dim.width, height: dim.height, name });
+    // 换模板时掩码尺寸必然对不上，直接清掉，避免留下一个用不了的掩码
+    setMask(null);
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const applyMask = useCallback(async (b64: string, url: string, name: string) => {
+    const dim = await imageSize(url);
+    setMask({ url, b64, width: dim.width, height: dim.height, name });
     setResult(null);
     setError(null);
   }, []);
@@ -209,11 +223,12 @@ export function FindPanel({ inheritedImage }: Props) {
   const { dragging } = useImageDrop(onDrop);
 
   /** 载入上传的图片（浏览器里选文件用）。 */
-  const loadFileTo = async (file: File, target: "hay" | "tpl") => {
+  const loadFileTo = async (file: File, target: "hay" | "tpl" | "mask") => {
     try {
       const b64 = await fileToBase64(file);
       const url = `data:${file.type || "image/png"};base64,${b64}`;
       if (target === "hay") await applyHaystack(b64, url);
+      else if (target === "mask") await applyMask(b64, url, file.name);
       else await applyTemplate(b64, url, file.name);
     } catch (e) {
       setError(`加载图片失败: ${e}`);
@@ -264,6 +279,12 @@ export function FindPanel({ inheritedImage }: Props) {
       setError("还没选窗口。先在上面选一个要搜的窗口。");
       return;
     }
+    if (kind === "template" && mask && tpl && (mask.width !== tpl.width || mask.height !== tpl.height)) {
+      setError(
+        `掩码尺寸 ${mask.width}×${mask.height} 与模板 ${tpl.width}×${tpl.height} 不一致。掩码必须逐像素对应模板，请换一张同尺寸的掩码。`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -285,6 +306,7 @@ export function FindPanel({ inheritedImage }: Props) {
               mode,
               image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
               template: tpl!.b64,
+              mask: mask?.b64,
               hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
               max_results: maxResults,
               min_score: Number.isFinite(parsed) ? parsed : undefined,
@@ -321,6 +343,9 @@ export function FindPanel({ inheritedImage }: Props) {
 
   const hits: FindHit[] = result?.matches ?? [];
   const currentWindow = windows.find((w) => w.hwnd === hwnd) ?? null;
+  /** 掩码与模板尺寸对不上时不能匹配（后端会直接报错，前端先提示） */
+  const maskMismatch =
+    mask != null && tpl != null && (mask.width !== tpl.width || mask.height !== tpl.height);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
@@ -406,6 +431,67 @@ export function FindPanel({ inheritedImage }: Props) {
                     {tpl.width}×{tpl.height}
                   </span>
                 </span>
+              )}
+              {tpl && (
+                <>
+                  <Button
+                    size="sm"
+                    variant={mask ? "secondary" : "outline"}
+                    onClick={() => maskInputRef.current?.click()}
+                    title="可选：只让掩码里涂白的区域参与匹配，忽略模板中会变化的部分（如按钮文字）"
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                    {mask ? "换掩码" : "加掩码"}
+                  </Button>
+                  <input
+                    ref={maskInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void loadFileTo(f, "mask");
+                      e.target.value = "";
+                    }}
+                  />
+                  {mask && (
+                    <span
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-md py-0.5 pl-1 pr-1.5",
+                        maskMismatch
+                          ? "bg-red-50 ring-1 ring-red-200"
+                          : "bg-blue-50 ring-1 ring-blue-200",
+                      )}
+                      title={
+                        maskMismatch
+                          ? `掩码尺寸 ${mask.width}×${mask.height} 与模板 ${tpl.width}×${tpl.height} 不一致`
+                          : mask.name
+                      }
+                    >
+                      <img
+                        src={mask.url}
+                        alt="掩码"
+                        className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
+                      />
+                      <span
+                        className={cn(
+                          "font-mono text-[10.5px]",
+                          maskMismatch ? "text-red-600" : "text-blue-600",
+                        )}
+                      >
+                        {mask.width}×{mask.height}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setMask(null)}
+                        title="移除掩码"
+                        className="flex h-4 w-4 items-center justify-center rounded text-neutral-400 hover:bg-white hover:text-neutral-700"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  )}
+                </>
               )}
             </div>
           </div>

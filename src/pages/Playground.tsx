@@ -44,6 +44,7 @@ import {
   pipeline,
   recognize,
   recognizeChars,
+  regionOcr,
 } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
 import { cn } from "../lib/utils";
@@ -55,6 +56,7 @@ import type {
   LineResult,
   PipelineResult,
   RecognizeResult,
+  RegionOcrResult,
 } from "../types";
 
 /** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
@@ -152,6 +154,10 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
   const [detResult, setDetResult] = useState<DetectResult | null>(null);
   /** 检测+识别串联（框内识字）的结果 */
   const [pipeResult, setPipeResult] = useState<PipelineResult | null>(null);
+  /** 区域 OCR：只认图上框选的那一块 */
+  const [regionMode, setRegionMode] = useState(false);
+  const [selection, setSelection] = useState<[number, number, number, number] | null>(null);
+  const [regionResult, setRegionResult] = useState<RegionOcrResult | null>(null);
   /** 检测模式下：识别时是否顺带在框内认字 */
   const [ocrInBoxes, setOcrInBoxes] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -259,6 +265,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
           setPipeResult(null);
         }
         setDetail(null); // 档位/参数可能变了，旧的逐字结果作废
+        setRegionResult(null);
         setTab("text");
       } catch (e) {
         if (seq === runSeq.current) setError(`识别失败：${e}`);
@@ -267,6 +274,47 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
       }
     },
     [isDetector, ocrInBoxes, engine, useCls],
+  );
+
+  /**
+   * 区域 OCR：只识别框选出来的那一块。
+   *
+   * 与整图识别的取舍：大图上只关心一小块时（比如游戏里的某个数值栏），
+   * 整图识别再自己过滤既慢又会混进区域外的噪声文字。
+   */
+  const runRegion = useCallback(
+    async (region: [number, number, number, number]) => {
+      const b64 = b64Ref.current;
+      if (!b64) return;
+      const seq = ++runSeq.current;
+      setBusy(true);
+      setError(null);
+      try {
+        const r = await regionOcr(b64, region, useCls, engine);
+        if (seq !== runSeq.current) return;
+        setRegionResult(r);
+        setResult(null);
+        setDetResult(null);
+        setPipeResult(null);
+        setDetail(null);
+        setTab("text");
+      } catch (e) {
+        if (seq === runSeq.current) setError(`区域识别失败：${e}`);
+      } finally {
+        if (seq === runSeq.current) setBusy(false);
+      }
+    },
+    [useCls, engine],
+  );
+
+  /** 框选回调：有选区就立刻识别，拖得太小（null）只清结果不报错。 */
+  const onSelectRegion = useCallback(
+    (r: [number, number, number, number] | null) => {
+      setSelection(r);
+      setRegionResult(null);
+      if (r) void runRegion(r);
+    },
+    [runRegion],
   );
 
   /** 所有入口（选文件 / 拖入 / 粘贴）最终都走这里，状态更新只写一遍。 */
@@ -279,13 +327,16 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
       setResult(null);
       setDetResult(null);
       setPipeResult(null);
+      setRegionResult(null);
+      setSelection(null);
       setDetail(null);
       setTab("text");
       setError(null);
       onImageLoaded(b64);
-      if (autoRun) void runRecognize(b64);
+      // 框选模式下不自动整图识别——用户要的是「先在图上拖一个框」
+      if (autoRun && !regionMode) void runRecognize(b64);
     },
-    [onImageLoaded, autoRun, runRecognize],
+    [onImageLoaded, autoRun, runRecognize, regionMode],
   );
 
   const loadFile = useCallback(
@@ -387,8 +438,11 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
     window.setTimeout(() => setCopied(false), 1400);
   };
 
-  // 图上画什么框：pipeline 模式画区域框（文字=框内识别出的内容），检测模式画类别框
-  const lines: LineResult[] = pipeResult
+  // 图上画什么框：区域识别用区域内的行框，pipeline 模式画区域框
+  // （文字=框内识别出的内容），检测模式画类别框
+  const lines: LineResult[] = regionResult
+    ? regionResult.lines
+    : pipeResult
     ? pipeResult.regions.map((r) => ({
         text: r.text ? `${r.class_name} · ${r.text.split("\n")[0]}` : r.class_name,
         box: r.box,
@@ -407,7 +461,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         }))
       : (result?.lines ?? []);
 
-  const hasResult = !!(result || detResult || pipeResult);
+  const hasResult = !!(result || detResult || pipeResult || regionResult);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
@@ -504,6 +558,12 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
               {pipeResult.regions.length} 区域 · {pipeResult.count} 行 · {pipeResult.elapsed_ms} ms
             </Badge>
           )}
+          {regionResult && (
+            <Badge variant="secondary">
+              区域 {regionResult.region[2]}×{regionResult.region[3]} · {regionResult.lines.length} 行 ·{" "}
+              {regionResult.elapsed_ms} ms
+            </Badge>
+          )}
           <span className="hidden items-center gap-1 text-[11.5px] text-neutral-400 sm:flex">
             <Keyboard className="h-3 w-3" />
             Ctrl+V
@@ -531,6 +591,21 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                   hint="结果框会直接叠在图片上"
                   icon={showBoxes ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                 />
+
+                {!isDetector && (
+                  <ToggleRow
+                    id="region-mode"
+                    checked={regionMode}
+                    onCheckedChange={(v) => {
+                      setRegionMode(v);
+                      setSelection(null);
+                      setRegionResult(null);
+                    }}
+                    label="只识别一块区域"
+                    hint="打开后在图上拖一个框，只认框里的字"
+                    icon={<Crosshair className="h-3.5 w-3.5" />}
+                  />
+                )}
 
                 {isDetector ? (
                   <ToggleRow
@@ -613,14 +688,27 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
             {src ? (
-              <ImageViewer
-                src={src}
-                width={size.width}
-                height={size.height}
-                lines={lines}
-                showBoxes={showBoxes}
-                chars={tab === "chars" ? detail?.lines.flatMap((l) => l.chars) : undefined}
-              />
+              <>
+                <ImageViewer
+                  src={src}
+                  width={size.width}
+                  height={size.height}
+                  lines={lines}
+                  showBoxes={showBoxes}
+                  chars={tab === "chars" ? detail?.lines.flatMap((l) => l.chars) : undefined}
+                  selectable={regionMode}
+                  selection={selection}
+                  onSelect={onSelectRegion}
+                />
+                {regionMode && (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-sky-600">
+                    <Crosshair className="h-3.5 w-3.5" />
+                    {selection
+                      ? `已选 ${selection[2]}×${selection[3]} @(${selection[0]}, ${selection[1]})，重新拖可换区域`
+                      : "在图上按住拖一个框，松手就开始只识别框里的字"}
+                  </p>
+                )}
+              </>
             ) : (
               <DropZone onPick={() => inputRef.current?.click()} />
             )}
@@ -632,13 +720,15 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             <div className="flex h-8 items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
                 <ScanText className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-                {pipeResult
-                  ? "检测 + 识别结果"
-                  : detResult
-                    ? "检测结果"
-                    : result
-                      ? "识别结果"
-                      : "识别结果会显示在这里"}
+                {regionResult
+                  ? "区域识别结果"
+                  : pipeResult
+                    ? "检测 + 识别结果"
+                    : detResult
+                      ? "检测结果"
+                      : result
+                        ? "识别结果"
+                        : "识别结果会显示在这里"}
               </CardTitle>
               <Button
                 variant="ghost"
@@ -656,7 +746,38 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
-            {pipeResult ? (
+            {regionResult ? (
+              <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
+                <div className="p-3">
+                  <pre className="selectable whitespace-pre-wrap font-sans text-[13px] leading-6 text-neutral-800">
+                    {regionResult.text || "（框里没识别到文字）"}
+                  </pre>
+                  {regionResult.lines.length > 0 && (
+                    <ul className="mt-3 divide-y divide-neutral-200/60 border-t border-neutral-200/70">
+                      {regionResult.lines.map((l, i) => (
+                        <li key={i} className="flex items-start gap-2.5 py-2">
+                          <span
+                            className="mt-0.5 flex shrink-0 items-center justify-center rounded bg-blue-600 text-[10px] font-semibold text-white"
+                            style={{ width: 18, height: 18 }}
+                          >
+                            {i + 1}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="selectable truncate text-[12.5px] text-neutral-900">
+                              {l.text}
+                            </div>
+                            <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                              置信 {l.score.toFixed(3)} · 位置 ({l.box[0][0].toFixed(0)},{" "}
+                              {l.box[0][1].toFixed(0)})
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </ScrollArea>
+            ) : pipeResult ? (
               <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
                 <ul className="divide-y divide-neutral-200/60">
                   {pipeResult.regions.map((r, i) => (

@@ -87,6 +87,10 @@ pub struct OcrOptions {
     /// `/vision/pipeline` 的检测引擎。缺省 `yolo`
     #[serde(default)]
     pub detect_engine: Option<String>,
+    /// 只识别这块区域 `[x, y, w, h]`（原图像素坐标）。**仅 `/ocr/quyuocr` 会读**，
+    /// 其它识别接口收到这个字段会忽略。
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
 }
 
 /// 四点框（原图坐标，顺序 左上/右上/右下/左下）。
@@ -115,6 +119,28 @@ pub struct ShibieData {
     pub scores: Vec<f64>,
     pub lines: Vec<LineDto>,
     pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// `/ocr/quyuocr` 出参：区域 OCR。
+///
+/// 与 `ShibieData` 的区别只有两点：多一个 `region`（实际生效的区域，已钳到图内），
+/// 且 `width`/`height` 是**原图**尺寸——`boxes` 里的坐标已经平移回原图坐标系，
+/// 调用方不用再做任何换算。
+#[derive(Debug, Serialize)]
+pub struct RegionOcrData {
+    /// 实际生效的区域 `[x, y, w, h]`（请求值被钳到图内后的结果）
+    pub region: [i32; 4],
+    /// 区域内全部文本按行用 `\n` 拼接
+    pub text: String,
+    /// 命中行的框，坐标已在原图坐标系
+    pub boxes: Vec<Box4>,
+    pub scores: Vec<f64>,
+    pub lines: Vec<LineDto>,
+    /// 原图宽（不是区域宽）
+    pub width: u32,
+    /// 原图高（不是区域高）
     pub height: u32,
     pub elapsed_ms: u128,
 }
@@ -197,6 +223,15 @@ pub struct FindOptions {
     /// 模板文件绝对路径（与 `template` 二选一，支持 png/jpg/bmp）
     #[serde(default)]
     pub template_file: Option<String>,
+    /// 模板掩码 base64（可省略）。**白（≥ 阈值）= 参与匹配**，尺寸必须与模板逐像素一致
+    #[serde(default)]
+    pub mask: Option<String>,
+    /// 掩码文件绝对路径（与 `mask` 二选一）
+    #[serde(default)]
+    pub mask_file: Option<String>,
+    /// 掩码二值化阈值，缺省 128（像素 ≥ 阈值视为参与匹配）
+    #[serde(default)]
+    pub mask_threshold: Option<u8>,
     /// 窗口句柄（`jubingzhaotu*`）；缺省时回退 `title`
     #[serde(default)]
     pub hwnd: Option<i64>,

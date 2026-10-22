@@ -279,6 +279,15 @@ fn png_b64(img: &image::RgbImage) -> String {
     base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
 }
 
+/// 灰度图（掩码）编成 PNG 再 base64。
+fn luma_png_b64(img: &image::GrayImage) -> String {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma8(img.clone())
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .expect("PNG 编码失败");
+    base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
+}
+
 const SCENE_BTN: (u32, u32, u32, u32) = (150, 120, 64, 48);
 
 #[test]
@@ -311,6 +320,100 @@ fn tuzhaotu_finds_template_in_uploaded_image() {
         );
         assert!(body.contains("\"source\":\"image\""));
     }
+}
+
+/// 掩码的核心价值：模板里混着「会变的部分」时，整块比像素会失配，
+/// 把变化区域用掩码遮掉就又能命中。这里走 HTTP JSON 全链路验证。
+#[test]
+fn tuzhaotu_masked_ignores_changing_region() {
+    let srv = start_server_without_engine();
+    let (tw, th) = (SCENE_BTN.2, SCENE_BTN.3);
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, tw, th);
+    let mut tpl =
+        image::imageops::crop_imm(&scene, SCENE_BTN.0, SCENE_BTN.1, tw, th).to_image();
+
+    // 模拟「模板中心一块内容变了」（按钮文字换了）：把中间 20×12 涂成纯白
+    const CX: u32 = 22;
+    const CY: u32 = 18;
+    const CW: u32 = 20;
+    const CH: u32 = 12;
+    for dy in 0..CH {
+        for dx in 0..CW {
+            tpl.put_pixel(CX + dx, CY + dy, image::Rgb([255u8, 255, 255]));
+        }
+    }
+
+    // ① 不遮罩 → 因变化块失配
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template\":\"{}\"}}",
+        png_b64(&scene),
+        png_b64(&tpl)
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("mask-off -> {status} {body}");
+    assert_eq!(status, 200);
+    assert_eq!(json_bool(&body, "found"), Some(false), "未遮罩应失配: {body}");
+
+    // ② 遮住变化块 → 命中
+    let mut mask = image::GrayImage::new(tw, th);
+    for y in 0..th {
+        for x in 0..tw {
+            let changing = x >= CX && x < CX + CW && y >= CY && y < CY + CH;
+            mask.put_pixel(x, y, image::Luma([if changing { 0u8 } else { 255 }]));
+        }
+    }
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template\":\"{}\",\"mask\":\"{}\"}}",
+        png_b64(&scene),
+        png_b64(&tpl),
+        luma_png_b64(&mask)
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("mask-on  -> {status} {body}");
+    assert_eq!(status, 200);
+    assert_eq!(json_bool(&body, "found"), Some(true), "遮罩后应命中: {body}");
+    assert_eq!(json_num(&body, "x"), Some(SCENE_BTN.0 as f64));
+    assert_eq!(json_num(&body, "y"), Some(SCENE_BTN.1 as f64));
+    assert!(json_num(&body, "score").unwrap_or(0.0) > 0.99);
+}
+
+/// 掩码尺寸与模板不一致必须报 400（而不是自动缩放）。
+#[test]
+fn tuzhaotu_rejects_mask_size_mismatch() {
+    let srv = start_server_without_engine();
+    let (tw, th) = (SCENE_BTN.2, SCENE_BTN.3);
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, tw, th);
+    let tpl = image::imageops::crop_imm(&scene, SCENE_BTN.0, SCENE_BTN.1, tw, th).to_image();
+    // 故意给一个尺寸不对的掩码
+    let mask = image::GrayImage::from_pixel(16, 16, image::Luma([255u8]));
+    let payload = format!(
+        "{{\"image\":\"{}\",\"template\":\"{}\",\"mask\":\"{}\"}}",
+        png_b64(&scene),
+        png_b64(&tpl),
+        luma_png_b64(&mask)
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("mask-bad -> {status} {body}");
+    assert_eq!(status, 400, "掩码尺寸不一致应 400: {body}");
+    assert!(body.contains("不一致"), "错误信息应说明尺寸不一致: {body}");
 }
 
 #[test]
@@ -380,6 +483,76 @@ fn tuzhaotu_multipart_upload_works() {
     println!("multipart find -> {status} {resp}");
     assert_eq!(status, 200, "{resp}");
     assert_eq!(json_bool(&resp, "found"), Some(true));
+    assert_eq!(json_num(&resp, "x"), Some(SCENE_BTN.0 as f64));
+}
+
+/// multipart 形态下掩码走独立的文件字段（`mask`），验证它被正确读取。
+#[test]
+fn tuzhaotu_multipart_mask_field_works() {
+    let srv = start_server_without_engine();
+    let (tw, th) = (SCENE_BTN.2, SCENE_BTN.3);
+    let scene = synth_scene(400, 300, SCENE_BTN.0, SCENE_BTN.1, tw, th);
+    let mut tpl = image::imageops::crop_imm(&scene, SCENE_BTN.0, SCENE_BTN.1, tw, th).to_image();
+    // 中心变化块（与 JSON 用例一致）
+    const CX: u32 = 22;
+    const CY: u32 = 18;
+    const CW: u32 = 20;
+    const CH: u32 = 12;
+    for dy in 0..CH {
+        for dx in 0..CW {
+            tpl.put_pixel(CX + dx, CY + dy, image::Rgb([255u8, 255, 255]));
+        }
+    }
+    let mut mask = image::GrayImage::new(tw, th);
+    for y in 0..th {
+        for x in 0..tw {
+            let changing = x >= CX && x < CX + CW && y >= CY && y < CY + CH;
+            mask.put_pixel(x, y, image::Luma([if changing { 0u8 } else { 255 }]));
+        }
+    }
+
+    let boundary = "----FindMaskBoundary7KQ";
+    let mut body = Vec::new();
+    let rgb_fields: [(&str, &image::RgbImage); 2] = [("image", &scene), ("template", &tpl)];
+    for (name, data) in rgb_fields {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8((*data).clone())
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{name}.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&buf.into_inner());
+        body.extend_from_slice(b"\r\n");
+    }
+    {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(mask)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"mask\"; filename=\"mask.png\"\r\nContent-Type: image/png\r\n\r\n",
+        );
+        body.extend_from_slice(&buf.into_inner());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let (status, resp) = http(
+        srv.addr,
+        "POST",
+        "/ocr/tuzhaotu1",
+        &format!("multipart/form-data; boundary={boundary}"),
+        &body,
+    );
+    println!("multipart mask -> {status} {resp}");
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(json_bool(&resp, "found"), Some(true), "掩码文件字段应生效: {resp}");
     assert_eq!(json_num(&resp, "x"), Some(SCENE_BTN.0 as f64));
 }
 
@@ -647,6 +820,84 @@ fn health_returns_engine_status() {
     assert!(body.contains("\"model\":\"small\""));
     assert!(body.contains("\"dict_size\":18708"), "字典大小应为 18708");
     assert_eq!(json_num(&body, "dict_size"), Some(18708.0));
+}
+
+#[test]
+fn quyuocr_validates_region_before_engine() {
+    // 轻量：region 校验发生在调引擎之前，所以没有模型也能验。
+    let srv = start_server_without_engine();
+    let img = synth_scene(120, 90, 20, 20, 40, 30);
+    let b64 = png_b64(&img);
+
+    // 缺 region → 400
+    let payload = format!("{{\"image\":\"{b64}\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/quyuocr",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("quyuocr(no region) -> {status} {body}");
+    assert_eq!(status, 400, "缺 region 应 400: {body}");
+    assert!(body.contains("region"), "错误应提到 region: {body}");
+
+    // 宽高非正 → 400
+    let payload = format!("{{\"image\":\"{b64}\",\"region\":[0,0,0,10]}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/quyuocr",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("quyuocr(zero w) -> {status} {body}");
+    assert_eq!(status, 400, "宽为 0 应 400: {body}");
+
+    // 与图片没有有效交集（全在界外）→ 400
+    let payload = format!("{{\"image\":\"{b64}\",\"region\":[500,500,40,40]}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/quyuocr",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("quyuocr(out of bounds) -> {status} {body}");
+    assert_eq!(status, 400, "越界应 400: {body}");
+}
+
+#[test]
+#[ignore = "重量级集成测试：需要模型与 DLL"]
+fn quyuocr_region_matches_full_image_when_full() {
+    // 用整张图当区域：结果应与 /ocr/shibie 一致（坐标偏移为 0，可逐行比对）。
+    let srv = start_server();
+    let png = std::fs::read(workspace_root().join("assets").join("test_zh.png")).expect("读图");
+    let (w, h) = image::load_from_memory(&png)
+        .expect("解码")
+        .to_rgb8()
+        .dimensions();
+
+    let payload = format!(
+        "{{\"image\":\"{}\",\"use_cls\":false,\"region\":[0,0,{w},{h}]}}",
+        test_image_b64()
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/quyuocr",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("quyuocr(full) -> {status}\n{body}");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"code\":0"), "code 应为 0: {body}");
+    let lines = body.matches("\"det_score\"").count();
+    assert_eq!(lines, 7, "整图区域应识别出 7 行，实际 {lines}");
+    assert!(body.contains("订单编号SO-2026-1021-8848"));
+    // 出参里应带上原图尺寸与生效区域
+    assert_eq!(json_num(&body, "width"), Some(w as f64));
+    assert_eq!(json_num(&body, "height"), Some(h as f64));
 }
 
 #[test]

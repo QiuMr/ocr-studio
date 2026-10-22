@@ -22,6 +22,7 @@ import type {
   ModelLevel,
   PipelineResult,
   RecognizeResult,
+  RegionOcrResult,
   SemanticFindArgs,
   WindowInfo,
 } from "../types";
@@ -179,6 +180,39 @@ export async function recognizeChars(
     throw new Error(json.msg || `HTTP ${res.status}`);
   }
   return json.data as DanziResult;
+}
+
+/**
+ * 区域 OCR：只识别 `region`（原图像素坐标 `[x,y,w,h]`）里的文字。
+ *
+ * 返回的 `lines[].box` 已经平移回**原图**坐标系，调用方不用再做换算。
+ * 大图里只关心一小块时用它，比整图识别再自己过滤快得多，也不会把区域外的
+ * 噪声文字混进来。
+ */
+export async function regionOcr(
+  image: string,
+  region: [number, number, number, number],
+  useCls: boolean,
+  engine?: string,
+): Promise<RegionOcrResult> {
+  if (isTauri()) {
+    return invoke<RegionOcrResult>("ocr_quyuocr", {
+      image,
+      region,
+      use_cls: useCls,
+      engine: engine || null,
+    });
+  }
+  const res = await fetch(`${HTTP_BASE}/ocr/quyuocr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, region, use_cls: useCls, ...(engine ? { engine } : {}) }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as RegionOcrResult;
 }
 
 /**

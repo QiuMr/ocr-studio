@@ -56,6 +56,23 @@ export interface DanziResult {
   elapsed_ms: number;
 }
 
+// ---------------------------------------------------------------- 区域 OCR
+
+/** `/ocr/quyuocr`：只认指定矩形里的字，`lines` 的坐标已在原图坐标系 */
+export interface RegionOcrResult {
+  /** 实际生效的区域 `[x, y, w, h]`（请求值被钳到图内后的结果） */
+  region: [number, number, number, number];
+  /** 区域内全部文本按行用 `\n` 拼接 */
+  text: string;
+  /** 命中行的框，坐标已在原图坐标系 */
+  lines: LineResult[];
+  /** 原图宽（不是区域宽） */
+  width: number;
+  /** 原图高（不是区域高） */
+  height: number;
+  elapsed_ms: number;
+}
+
 export interface Health {
   status: "ok" | "no_model";
   /** 当前引擎标识，如 `ppocr:small` / `ddddocr:common` */
@@ -183,6 +200,12 @@ export interface FindArgs {
   image?: string;
   template?: string;
   template_file?: string;
+  /** 模板掩码 base64（可省略）。**白（≥ 阈值）= 参与匹配**，尺寸须与模板一致 */
+  mask?: string;
+  /** 掩码文件绝对路径（与 `mask` 二选一） */
+  mask_file?: string;
+  /** 掩码二值化阈值，缺省 128 */
+  mask_threshold?: number;
   hwnd?: number;
   title?: string;
   region?: [number, number, number, number];

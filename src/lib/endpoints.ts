@@ -78,16 +78,34 @@ export const ENDPOINTS: Endpoint[] = [
     params: [{ name: "image", required: true, desc: "base64 字符串" }],
     returns: "lines[{text, box, chars[{ch, box, score, index}]}]、char_count",
   },
+  {
+    method: "POST",
+    path: "/ocr/quyuocr",
+    title: "区域识别：只认指定矩形里的字",
+    note: "大图里只关心一小块时用它。返回的框坐标已经平移回原图，不用自己换算；region 超出图片范围会自动截到图内。",
+    params: [
+      { name: "image", required: true, desc: "base64 字符串" },
+      { name: "region", required: true, desc: "要识别的区域 [x, y, w, h]，原图像素坐标" },
+      { name: "engine", desc: "换引擎，不传用默认 PP-OCR" },
+      { name: "use_cls", desc: "是否自动翻正倒置文字，默认 true" },
+    ],
+    returns: "region（实际生效的区域）、text、lines、width、height（原图尺寸）",
+  },
 
   // ------------------------------------------------------------------ 找图
   {
     method: "POST",
     path: "/ocr/tuzhaotu1",
     title: "在上传的大图里找小图（精准）",
-    note: "精准档要求近乎逐像素一致（相似度 ≥ 0.92）。找不到就往 tuzhaotu2 退。",
+    note: "精准档要求近乎逐像素一致（相似度 ≥ 0.92）。找不到就往 tuzhaotu2 退。想忽略模板里会变的部分（如按钮上的文字），传 mask 把稳定区域涂白。",
     params: [
       { name: "image", required: true, desc: "大图 base64" },
       { name: "template", required: true, desc: "小图 base64" },
+      {
+        name: "mask",
+        desc: "可选。模板掩码 base64，**白（≥128）= 参与匹配**，只比这块、忽略模板中会变的部分；尺寸须与模板一致（也可用 mask_file 传路径）",
+      },
+      { name: "mask_threshold", desc: "掩码二值化阈值，默认 128" },
       { name: "min_score", desc: "相似度下限，默认 0.92" },
       { name: "max_results", desc: "最多返回几个位置，默认 1" },
     ],
@@ -101,6 +119,7 @@ export const ENDPOINTS: Endpoint[] = [
     params: [
       { name: "image", required: true, desc: "大图 base64" },
       { name: "template", required: true, desc: "小图 base64" },
+      { name: "mask", desc: "可选。模板掩码（同 tuzhaotu1）" },
     ],
     returns: "同上",
   },
@@ -111,6 +130,7 @@ export const ENDPOINTS: Endpoint[] = [
     note: "不用自己截图：服务内部截屏后直接匹配，返回的是**屏幕绝对坐标**。",
     params: [
       { name: "template", required: true, desc: "小图 base64，或 template_file 传路径" },
+      { name: "mask", desc: "可选。模板掩码（同 tuzhaotu1）" },
       { name: "region", desc: "只找某块区域，格式 x,y,w,h" },
     ],
     returns: "同上，坐标已加上区域原点",
@@ -120,7 +140,10 @@ export const ENDPOINTS: Endpoint[] = [
     path: "/ocr/pingmuzhaotu2",
     title: "截整个屏幕找图（容错）",
     note: "游戏画面有滤镜、亮度变化时用这一档。",
-    params: [{ name: "template", required: true, desc: "小图 base64 或 template_file" }],
+    params: [
+      { name: "template", required: true, desc: "小图 base64 或 template_file" },
+      { name: "mask", desc: "可选。模板掩码（同 tuzhaotu1）" },
+    ],
     returns: "同上",
   },
   {
@@ -130,6 +153,7 @@ export const ENDPOINTS: Endpoint[] = [
     note: "用 hwnd 或窗口标题指定；返回的坐标是该窗口内的相对坐标（配 origin_x/origin_y 可换算）。",
     params: [
       { name: "template", required: true, desc: "小图 base64 或 template_file" },
+      { name: "mask", desc: "可选。模板掩码（同 tuzhaotu1）" },
       { name: "hwnd", desc: "窗口句柄，优先于 title" },
       { name: "title", desc: "窗口标题，先精确匹配再子串匹配" },
     ],
@@ -140,7 +164,10 @@ export const ENDPOINTS: Endpoint[] = [
     path: "/ocr/jubingzhaotu2",
     title: "截指定窗口找图（容错）",
     note: "窗口被遮挡也没关系：截的是窗口内容，不是屏幕画面。",
-    params: [{ name: "template", required: true, desc: "小图 base64 或 template_file" }],
+    params: [
+      { name: "template", required: true, desc: "小图 base64 或 template_file" },
+      { name: "mask", desc: "可选。模板掩码（同 tuzhaotu1）" },
+    ],
     returns: "同上",
   },
   {

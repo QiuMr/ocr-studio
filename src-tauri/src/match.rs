@@ -49,6 +49,89 @@ pub struct MatchOptions {
     pub max_results: usize,
 }
 
+/// 模板掩码：只让掩码覆盖的像素参与 NCC。
+///
+/// 解决什么问题：模板里常常混着**会变的部分**——按钮上的文字、动态的背景、
+/// 队友头像的位置。整块比像素时这些一变就失配。画个掩码把「稳定的部分」圈出来，
+/// 只比那一块，命中率立刻上来。
+///
+/// 与「裁剪模板」的区别：裁剪会改变模板尺寸，也就改变了命中框的大小与中心点；
+/// 掩码保持尺寸不变，只是不参与计算。前端画框、脚本算点击点都不用改。
+#[derive(Debug, Clone)]
+pub struct TemplateMask {
+    w: usize,
+    h: usize,
+    /// 长度 = w×h，非 0 表示该像素参与匹配
+    data: Vec<u8>,
+}
+
+impl TemplateMask {
+    /// 从裸数据构造。长度必须等于 `w*h`。
+    pub fn new(w: usize, h: usize, data: Vec<u8>) -> Result<Self, String> {
+        if w == 0 || h == 0 {
+            return Err("掩码尺寸为 0".to_string());
+        }
+        if data.len() != w * h {
+            return Err(format!(
+                "掩码数据长度 {} 与尺寸 {w}x{h} 不匹配",
+                data.len()
+            ));
+        }
+        Ok(Self { w, h, data })
+    }
+
+    /// 从灰度图构造：像素 **≥ threshold** 视为参与匹配（默认 128）。
+    ///
+    /// 约定「白 = 要比」而不是「黑 = 要比」：用户画掩码时习惯把关心的区域涂白，
+    /// 白色更符合直觉；而且二值化后白=255 天然落在阈值之上。
+    pub fn from_gray(img: &image::GrayImage, threshold: u8) -> Self {
+        let (w, h) = img.dimensions();
+        let data: Vec<u8> = img
+            .as_raw()
+            .iter()
+            .map(|&v| u8::from(v >= threshold))
+            .collect();
+        Self {
+            w: w as usize,
+            h: h as usize,
+            data,
+        }
+    }
+
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.w, self.h)
+    }
+
+    /// 参与匹配的像素数。
+    pub fn count(&self) -> usize {
+        self.data.iter().filter(|&&v| v > 0).count()
+    }
+
+    /// 金字塔降采样：任一源像素被掩码 → 目标像素被掩码（宁多勿少）。
+    ///
+    /// 为什么取「或」而不是「与」：粗筛层只要保证**真解还在候选集里**，
+    /// 多带进来几个无关像素只会略微拉低分数，而漏掉真解是直接漏检。
+    fn downscale(&self) -> Self {
+        let w = (self.w / 2).max(1);
+        let h = (self.h / 2).max(1);
+        let mut data = vec![0u8; w * h];
+        for y in 0..h {
+            let y0 = (y * 2).min(self.h - 1);
+            let y1 = (y0 + 1).min(self.h - 1);
+            for x in 0..w {
+                let x0 = (x * 2).min(self.w - 1);
+                let x1 = (x0 + 1).min(self.w - 1);
+                let any = self.data[y0 * self.w + x0] > 0
+                    || self.data[y0 * self.w + x1] > 0
+                    || self.data[y1 * self.w + x0] > 0
+                    || self.data[y1 * self.w + x1] > 0;
+                data[y * w + x] = u8::from(any);
+            }
+        }
+        Self { w, h, data }
+    }
+}
+
 impl Default for MatchOptions {
     fn default() -> Self {
         Self {
@@ -87,6 +170,20 @@ pub fn find_template(
     needle: &RgbImage,
     opts: &MatchOptions,
 ) -> Result<Vec<MatchHit>, String> {
+    find_template_masked(haystack, needle, None, opts)
+}
+
+/// 带掩码的模板匹配。`mask` 为 `None` 时与 [`find_template`] 完全等价。
+///
+/// 掩码尺寸必须与模板一致——不一致时直接报错而不是自动缩放：掩码是「哪些像素
+/// 算数」的逐像素约定，缩放会悄悄改变语义（插值出来的中间值到底算不算参与？），
+/// 与其猜一个规则，不如让调用方给对尺寸。
+pub fn find_template_masked(
+    haystack: &RgbImage,
+    needle: &RgbImage,
+    mask: Option<&TemplateMask>,
+    opts: &MatchOptions,
+) -> Result<Vec<MatchHit>, String> {
     let (hw, hh) = haystack.dimensions();
     let (nw, nh) = needle.dimensions();
 
@@ -97,6 +194,20 @@ pub fn find_template(
         return Err(format!(
             "模板 {nw}x{nh} 大于搜索图 {hw}x{hh}"
         ));
+    }
+    if let Some(m) = mask {
+        if (m.w, m.h) != (nw as usize, nh as usize) {
+            return Err(format!(
+                "掩码尺寸 {}x{} 与模板 {nw}x{nh} 不一致（掩码必须逐像素对应模板）",
+                m.w, m.h
+            ));
+        }
+        if m.count() < 4 {
+            return Err(format!(
+                "掩码只覆盖了 {} 个像素，太少无法匹配（至少 4 个）",
+                m.count()
+            ));
+        }
     }
 
     let max_results = opts.max_results.clamp(1, 64);
@@ -118,15 +229,21 @@ pub fn find_template(
         let next = ts[i - 1].downscale();
         ts.push(next);
     }
+    // 掩码也跟着降采样，保证每层与模板同尺寸
+    let mut ms: Vec<Option<TemplateMask>> = Vec::with_capacity(levels + 1);
+    ms.push(mask.cloned());
+    for i in 1..=levels {
+        ms.push(ms[i - 1].as_ref().map(|m| m.downscale()));
+    }
     let mut pyr: Vec<Level> = Vec::with_capacity(levels + 1);
-    for (g, t) in gs.into_iter().zip(ts) {
+    for ((g, t), m) in gs.into_iter().zip(ts).zip(ms) {
         if t.w > g.w || t.h > g.h {
             return Err("模板在降采样层超出搜索图（不应发生，疑似尺寸计算错误）".to_string());
         }
-        pyr.push(Level::new(g, t));
+        pyr.push(Level::new(g, t, m));
     }
 
-    // ---- 最粗层 SQDIFF 全扫 ----
+    // ---- 最粗层 NCC 全扫 ----
     let top = &pyr[levels];
     let mut cands = top.coarse_scan(COARSE_KEEP);
 
@@ -321,6 +438,18 @@ impl Integral {
     }
 }
 
+/// 掩码在某一层展开后的统计量：参与匹配的像素列表 + 模板侧的均值/方差原料。
+struct MaskLevel {
+    /// 掩码像素在模板内的 `(ty, tx)` 偏移
+    offs: Vec<(usize, usize)>,
+    /// 参与匹配的像素数
+    n: f64,
+    /// `Σ T·M`
+    t_sum: f64,
+    /// `Σ T²·M`
+    t_sq: f64,
+}
+
 /// 一层金字塔：搜索图 + 它的积分图 + 模板 + 模板的统计量。
 struct Level {
     g: Gray,
@@ -328,10 +457,12 @@ struct Level {
     t: Gray,
     t_sum: f64,
     t_var: f64,
+    /// 掩码（与 `t` 同尺寸）。`None` = 全部像素参与，走积分图的快路径
+    mask: Option<MaskLevel>,
 }
 
 impl Level {
-    fn new(g: Gray, t: Gray) -> Self {
+    fn new(g: Gray, t: Gray, mask: Option<TemplateMask>) -> Self {
         let integ = Integral::new(&g);
         let mut t_sum = 0u64;
         let mut t_sq = 0u64;
@@ -344,12 +475,43 @@ impl Level {
         let t_sum_f = t_sum as f64;
         // 方差用「平方和 - 和的平方/n」一次性算完，不留 t_sq 字段
         let t_var = t_sq as f64 - t_sum_f * t_sum_f / n;
+
+        let mask = mask.and_then(|m| {
+            // 掩码覆盖全部像素时没必要走慢路径，直接当没有掩码
+            if m.count() >= t.w * t.h {
+                return None;
+            }
+            let mut offs: Vec<(usize, usize)> = Vec::with_capacity(t.w * t.h);
+            for ty in 0..t.h {
+                let row = ty * t.w;
+                for tx in 0..t.w {
+                    if m.data[row + tx] > 0 {
+                        offs.push((ty, tx));
+                    }
+                }
+            }
+            let mut mt_sum = 0f64;
+            let mut mt_sq = 0f64;
+            for &(ty, tx) in &offs {
+                let v = t.data[ty * t.w + tx] as f64;
+                mt_sum += v;
+                mt_sq += v * v;
+            }
+            Some(MaskLevel {
+                n: offs.len() as f64,
+                offs,
+                t_sum: mt_sum,
+                t_sq: mt_sq,
+            })
+        });
+
         Self {
             g,
             integ,
             t,
             t_sum: t_sum_f,
             t_var,
+            mask,
         }
     }
 
@@ -384,11 +546,60 @@ impl Level {
         acc
     }
 
-    /// 零均值 NCC，值域 `-1..=1`。
+    /// 零均值 NCC，值域 `-1..=1`。有掩码时只统计掩码内的像素。
+    #[inline]
+    fn ncc_at(&self, x: usize, y: usize) -> f64 {
+        match &self.mask {
+            None => self.ncc_plain(x, y),
+            Some(m) => self.ncc_masked(x, y, m),
+        }
+    }
+
+    /// 掩码版 NCC：只对掩码内的像素求 `ΣI / ΣI² / ΣT·I`。
+    ///
+    /// 为什么不能用积分图：积分图只能 O(1) 取**矩形**窗口的和，而掩码是任意形状。
+    /// 所以这里退回逐像素累加（一次循环里同时算三个量）。好在金字塔把真正需要
+    /// 全扫的只有最粗一层（1080p 约 8000 个位置），代价可以接受。
+    #[inline]
+    fn ncc_masked(&self, x: usize, y: usize, m: &MaskLevel) -> f64 {
+        if m.n < 2.0 {
+            return 0.0;
+        }
+        let tw = self.t.w;
+        let gw = self.g.w;
+        let base = y * gw + x;
+        let mut i_sum = 0f64;
+        let mut i_sq = 0f64;
+        let mut dot = 0f64;
+        for &(ty, tx) in &m.offs {
+            let iv = self.g.data[base + ty * gw + tx] as f64;
+            let tv = self.t.data[ty * tw + tx] as f64;
+            i_sum += iv;
+            i_sq += iv * iv;
+            dot += iv * tv;
+        }
+        // 掩码内模板是纯色 → NCC 无定义，宁可漏不可假阳
+        let t_var = m.t_sq - m.t_sum * m.t_sum / m.n;
+        if t_var < 1e-6 {
+            return 0.0;
+        }
+        let i_var = i_sq - i_sum * i_sum / m.n;
+        if i_var < 1e-6 {
+            return 0.0;
+        }
+        let num = dot - m.t_sum * i_sum / m.n;
+        let denom = (t_var * i_var).sqrt();
+        if denom < 1e-9 {
+            return 0.0;
+        }
+        (num / denom).clamp(-1.0, 1.0)
+    }
+
+    /// 无掩码的 NCC 快路径：`ΣI` / `ΣI²` 走积分图 O(1)，只有 `ΣT·I` 需要逐像素。
     ///
     /// 模板方差为 0（纯色）时 NCC 无定义，返回 0.0 —— 宁可漏，不可假阳。
     #[inline]
-    fn ncc_at(&self, x: usize, y: usize) -> f64 {
+    fn ncc_plain(&self, x: usize, y: usize) -> f64 {
         if self.t_var < 1e-6 {
             return 0.0;
         }
@@ -545,6 +756,99 @@ mod tests {
         assert!(d > 40.0, "NMS 后两点应相距较远，实际 {d}");
     }
 
+    /// 掩码的核心价值：模板里混着「会变的部分」（按钮上的文字、动态背景）时，
+    /// 整块比像素会失配，把变化区域遮掉就又能命中。
+    #[test]
+    fn mask_ignores_changing_pixels() {
+        let mut scene = make_scene(400, 300);
+        paste_button(&mut scene, 200, 150, 64, 48);
+        let tpl = image::imageops::crop_imm(&scene, 200, 150, 64, 48).to_image();
+
+        // 模拟「模板中心一块内容变了」（比如按钮文字换了）：把中间 20×12 涂成纯白。
+        let mut changed = tpl.clone();
+        for dy in 0..12 {
+            for dx in 0..20 {
+                changed.put_pixel(22 + dx, 18 + dy, Rgb([255u8, 255, 255]));
+            }
+        }
+
+        // 不遮罩：变化的块让整块失配，应当命中不了。
+        let without = find_template(&scene, &changed, &MatchOptions { min_score: 0.9, max_results: 4 })
+            .expect("匹配应成功");
+        assert!(without.is_empty(), "未遮罩时应因动态块失配，实际命中 {} 个", without.len());
+
+        // 遮住变化块：只比稳定的边框，应当命中且分数接近 1。
+        let mut md = vec![1u8; 64 * 48];
+        for dy in 0..12 {
+            for dx in 0..20 {
+                md[(18 + dy) * 64 + (22 + dx)] = 0;
+            }
+        }
+        let mask = TemplateMask::new(64, 48, md).expect("掩码应合法");
+        let hits = find_template_masked(
+            &scene,
+            &changed,
+            Some(&mask),
+            &MatchOptions { min_score: 0.9, max_results: 4 },
+        )
+        .expect("匹配应成功");
+        assert!(!hits.is_empty(), "遮罩后应当命中");
+        assert_eq!((hits[0].x, hits[0].y), (200, 150), "遮罩命中位置应正确");
+        assert!(hits[0].score > 0.99, "稳定区域完全一致，NCC 应≈1，实际 {}", hits[0].score);
+    }
+
+    /// 掩码尺寸与模板不一致必须直接报错，而不是自动缩放（缩放会悄悄改变语义）。
+    #[test]
+    fn mask_size_mismatch_is_error() {
+        let scene = make_scene(200, 200);
+        let tpl = image::imageops::crop_imm(&scene, 10, 10, 32, 32).to_image();
+        let mask = TemplateMask::new(16, 16, vec![1u8; 16 * 16]).expect("掩码应合法");
+        let err = find_template_masked(&scene, &tpl, Some(&mask), &MatchOptions::default())
+            .expect_err("尺寸不一致应报错");
+        assert!(err.contains("不一致"), "错误信息应说明尺寸不一致，实际：{err}");
+    }
+
+    /// 掩码只圈了不到 4 个像素 → 统计量无意义，直接报错。
+    #[test]
+    fn mask_too_sparse_is_error() {
+        let scene = make_scene(200, 200);
+        let tpl = image::imageops::crop_imm(&scene, 10, 10, 32, 32).to_image();
+        let mut md = vec![0u8; 32 * 32];
+        md[0] = 1;
+        md[1] = 1;
+        let mask = TemplateMask::new(32, 32, md).expect("掩码应合法");
+        let err = find_template_masked(&scene, &tpl, Some(&mask), &MatchOptions::default())
+            .expect_err("掩码像素过少应报错");
+        assert!(err.contains("太少"), "错误信息应说明像素过少，实际：{err}");
+    }
+
+    /// 掩码覆盖全部像素时应当与无掩码走同一条快路径、结果一致。
+    #[test]
+    fn full_mask_equals_no_mask() {
+        let mut scene = make_scene(360, 260);
+        paste_button(&mut scene, 120, 80, 48, 36);
+        let tpl = image::imageops::crop_imm(&scene, 120, 80, 48, 36).to_image();
+        let opts = MatchOptions { min_score: 0.9, max_results: 4 };
+        let plain = find_template(&scene, &tpl, &opts).expect("匹配应成功");
+        let mask = TemplateMask::new(48, 36, vec![1u8; 48 * 36]).expect("掩码应合法");
+        let masked = find_template_masked(&scene, &tpl, Some(&mask), &opts).expect("匹配应成功");
+        assert_eq!(plain, masked, "全覆盖掩码应与无掩码结果完全一致");
+    }
+
+    /// 掩码降采样必须取「或」（宁多勿少），否则粗筛层可能漏掉真解。
+    #[test]
+    fn mask_downscale_keeps_any_set_pixel() {
+        // 4×4，只有右下角一个像素被标记。
+        let mut md = vec![0u8; 16];
+        md[3 * 4 + 3] = 1;
+        let m = TemplateMask::new(4, 4, md).expect("掩码应合法");
+        let d = m.downscale();
+        assert_eq!(d.dimensions(), (2, 2));
+        // 该像素落在 (1,1) 的 2×2 块里，取「或」后 (1,1) 必须被标记。
+        assert_eq!(d.data[1 * 2 + 1], 1, "取「或」后应保留被标记像素");
+        assert_eq!(d.count(), 1, "只有那一块被标记");
+    }
+
     #[test]
     fn rejects_oversized_template() {
         let scene = make_scene(50, 50);
@@ -596,7 +900,7 @@ mod tests {
                 b = b.downscale();
             }
             // bench 里 clone 是有意保留的：真实实现已改为 move，这里的数比线上偏高
-            pyr.push(Level::new(a.clone(), b.clone()));
+            pyr.push(Level::new(a.clone(), b.clone(), None));
         }
         let t2 = Instant::now();
 

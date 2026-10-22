@@ -397,6 +397,7 @@ pub fn run() {
             ui_ready,
             commands::ocr_recognize,
             commands::ocr_danzijson,
+            commands::ocr_quyuocr,
             commands::vision_detect,
             commands::vision_pipeline,
             commands::get_health,
