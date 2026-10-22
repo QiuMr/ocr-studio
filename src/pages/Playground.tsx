@@ -58,7 +58,8 @@ import type {
 /** 引擎在下拉里的显示名。名字本身就要告诉用户「什么时候该选它」。 */
 function engineLabel(e: EngineItem): string {
   if (e.family === "ddddocr") return `DDDDOCR（${e.variant ?? "common"}·验证码快）`;
-  if (e.family === "yolo") return `YOLO ${e.variant ?? ""}（目标检测）`;
+  // 目标检测不按版本分家，模型结构由后端自动识别，这里不显示版本号
+  if (e.family === "yolo") return "目标检测（YOLO）";
   return e.name;
 }
 
@@ -377,7 +378,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
           <Switch id="show-boxes" checked={showBoxes} onCheckedChange={setShowBoxes} />
           <Label
             htmlFor="show-boxes"
-            className="flex cursor-pointer items-center gap-1 text-[12.5px] font-normal text-neutral-600"
+            className="flex cursor-pointer items-center gap-1 text-[12.5px] font-normal leading-none text-neutral-600"
           >
             {showBoxes ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
             显示检测框
@@ -390,7 +391,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
               <Switch id="ocr-in-boxes" checked={ocrInBoxes} onCheckedChange={setOcrInBoxes} />
               <Label
                 htmlFor="ocr-in-boxes"
-                className="cursor-pointer text-[12.5px] font-normal text-neutral-600"
+                className="cursor-pointer text-[12.5px] font-normal leading-none text-neutral-600"
               >
                 框内识字
               </Label>
@@ -405,7 +406,7 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
               <Switch id="use-cls" checked={useCls} onCheckedChange={setUseCls} />
               <Label
                 htmlFor="use-cls"
-                className="cursor-pointer text-[12.5px] font-normal text-neutral-600"
+                className="cursor-pointer text-[12.5px] font-normal leading-none text-neutral-600"
               >
                 方向分类
               </Label>
@@ -451,16 +452,20 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[1.55fr_1fr]">
         <Card className="flex min-h-[360px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
-              <FileImage className="h-3.5 w-3.5 text-blue-600" />
-              {src ? "原图" : "待识别的图片"}
-              {size.width > 0 && (
-                <span className="font-normal text-neutral-400">
-                  {name && <span className="mr-1.5 text-neutral-500">{name}</span>}
-                  {size.width} × {size.height}
-                </span>
-              )}
-            </CardTitle>
+            {/* h-8：与右侧卡片头（含「复制 JSON」按钮）保持同一行高，
+                否则左标题会比右标题高 7px —— 一眼就能看出的错位 */}
+            <div className="flex h-8 items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+                <FileImage className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                {src ? "原图" : "待识别的图片"}
+                {size.width > 0 && (
+                  <span className="font-normal text-neutral-400">
+                    {name && <span className="mr-1.5 text-neutral-500">{name}</span>}
+                    {size.width} × {size.height}
+                  </span>
+                )}
+              </CardTitle>
+            </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
             {src ? (
@@ -506,9 +511,9 @@ function OcrPanel({ onImageLoaded }: OcrPanelProps) {
 
         <Card className="flex min-h-[360px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
-                <ScanText className="h-3.5 w-3.5 text-blue-600" />
+            <div className="flex h-8 items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+                <ScanText className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 {pipeResult
                   ? "检测 + 识别结果"
                   : detResult

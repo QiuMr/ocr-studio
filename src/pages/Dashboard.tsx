@@ -229,10 +229,13 @@ export function Dashboard({ onNavigate }: Props) {
         {/* 模型与设备 */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <RefreshCw className="h-3.5 w-3.5 text-blue-600" />
-              模型与设备
-            </CardTitle>
+            {/* h-8：卡片头第一行统一高度，标题才不会因为右侧有没有按钮而上下错位 */}
+            <div className="flex h-8 items-center">
+              <CardTitle className="flex items-center gap-2">
+                <RefreshCw className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                模型与设备
+              </CardTitle>
+            </div>
             <CardDescription>
               换档位或换设备都会重新加载模型，需要几秒钟，期间识别请求会等待。
             </CardDescription>
@@ -297,20 +300,19 @@ export function Dashboard({ onNavigate }: Props) {
         {/* 本地 HTTP 服务 */}
         <Card>
           <CardHeader>
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Server className="h-3.5 w-3.5 text-blue-600" />
-                  本地 HTTP 服务
-                </CardTitle>
-                <CardDescription>
-                  外部脚本（易语言、按键精灵、Python）通过下面这个地址调识别能力。
-                </CardDescription>
-              </div>
+            {/* 徽章与标题同处一条 h-8 的行：原来用 items-start，徽章会比标题低 7px */}
+            <div className="flex h-8 items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2">
+                <Server className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                本地 HTTP 服务
+              </CardTitle>
               <Badge variant={running ? "success" : "secondary"} className="shrink-0 whitespace-nowrap">
                 {running ? "运行中" : "已停止"}
               </Badge>
             </div>
+            <CardDescription>
+              外部脚本（易语言、按键精灵、Python）通过下面这个地址调识别能力。
+            </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <div className="flex items-center gap-2 rounded-lg bg-neutral-50 px-3 py-2">
@@ -352,9 +354,9 @@ export function Dashboard({ onNavigate }: Props) {
       {/* 模型目录 */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex h-8 items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2">
-              <Library className="h-3.5 w-3.5 text-blue-600" />
+              <Library className="h-3.5 w-3.5 shrink-0 text-blue-600" />
               模型目录
             </CardTitle>
             <Button

@@ -139,7 +139,7 @@ export async function recognizeChars(
 }
 
 /**
- * 通用目标检测（`yolo:v8` 等检测引擎）。
+ * 通用目标检测（`yolo` 检测引擎）。
  *
  * 只有 `capabilities.detect === true` 的引擎能走这条；OCR 引擎会收到
  * code 1002（不支持该能力）。

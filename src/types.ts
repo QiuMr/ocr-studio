@@ -205,7 +205,7 @@ export interface EngineCapabilities {
 
 /** 与 Rust 侧 `EngineItemDto` 一一对应 */
 export interface EngineItem {
-  /** 规范化名字，如 `ppocr:small`、`yolo:v8` */
+  /** 规范化名字，如 `ppocr:small`、`yolo` */
   name: string;
   family: "ppocr" | "ddddocr" | "yolo" | string;
   variant?: string | null;

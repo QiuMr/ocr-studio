@@ -114,13 +114,13 @@ export default function App() {
                 <TooltipTrigger asChild>
                   <div
                     className={cn(
-                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] text-neutral-400",
+                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] leading-none text-neutral-400",
                       collapsed && "justify-center px-0",
                     )}
                   >
                     <span className="relative flex h-2 w-2 shrink-0">
-                      <span className="absolute inline-flex h-full w-full rounded-full bg-blue-500 opacity-40" />
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-600" />
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-neutral-400 opacity-40" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-neutral-500" />
                     </span>
                     {!collapsed && <span className="truncate">OCR Studio v0.1</span>}
                   </div>
@@ -169,21 +169,20 @@ function NavItem({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "group relative flex h-9 items-center rounded-lg text-[13px] font-medium",
+        // leading-none：13px 文字默认行高 1.5（19.5px），配 18px 图标会看起来偏下
+        "group flex h-9 items-center rounded-lg text-[13px] leading-none",
         collapsed ? "w-9 justify-center" : "w-full gap-2.5 px-2.5",
         active
-          ? "bg-blue-50 text-blue-700"
-          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 active:bg-neutral-200",
+          ? "bg-neutral-100 font-medium text-neutral-900"
+          : "font-normal text-neutral-500 hover:bg-neutral-100/70 hover:text-neutral-900 active:bg-neutral-200/70",
       )}
     >
-      {/* 选中指示条 */}
       <span
         className={cn(
-          "absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-blue-600 transition-opacity",
-          active ? "opacity-100" : "opacity-0",
+          "flex h-[18px] w-[18px] shrink-0 items-center justify-center",
+          active ? "text-neutral-900" : "text-neutral-400 group-hover:text-neutral-700",
         )}
-      />
-      <span className={cn(active ? "text-blue-600" : "text-neutral-500 group-hover:text-neutral-700")}>
+      >
         {icon}
       </span>
       {!collapsed && <span className="truncate">{label}</span>}

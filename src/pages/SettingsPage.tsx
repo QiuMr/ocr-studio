@@ -141,10 +141,13 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Server className="h-3.5 w-3.5 text-blue-600" />
-            推理与服务
-          </CardTitle>
+          {/* h-8：卡片头第一行统一高度，标题不会因为右侧有没有控件而错位 */}
+          <div className="flex h-8 items-center">
+            <CardTitle className="flex items-center gap-2">
+              <Server className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              推理与服务
+            </CardTitle>
+          </div>
           <CardDescription>
             换档位或换设备会立刻重载引擎（几秒）；改端口会重启 HTTP 服务。
           </CardDescription>
@@ -240,10 +243,12 @@ export function SettingsPage() {
       {engines && engines.engines.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Boxes className="h-3.5 w-3.5 text-blue-600" />
-              识别引擎
-            </CardTitle>
+            <div className="flex h-8 items-center">
+              <CardTitle className="flex items-center gap-2">
+                <Boxes className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                识别引擎
+              </CardTitle>
+            </div>
             <CardDescription>
               这是 App 扫描模型目录得到的结果，只看文件齐不齐、没有加载模型。
               「未安装」的补上对应文件就能用，不用改任何设置。
@@ -260,20 +265,18 @@ export function SettingsPage() {
       {/* 渲染兼容：只读，解释给用户听 */}
       <Card>
         <CardHeader>
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="h-3.5 w-3.5 text-blue-600" />
-                窗口渲染
-              </CardTitle>
-              <CardDescription>
-                部分机器的显卡驱动会让 WebView 加载失败（表现为窗口一片白），App 会自动切到兼容模式。
-              </CardDescription>
-            </div>
+          <div className="flex h-8 items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Shield className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              窗口渲染
+            </CardTitle>
             <Badge variant={cfg.webview_compat ? "warning" : "success"}>
               {cfg.webview_compat ? "兼容模式" : "硬件加速"}
             </Badge>
           </div>
+          <CardDescription>
+            部分机器的显卡驱动会让 WebView 加载失败（表现为窗口一片白），App 会自动切到兼容模式。
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex items-start gap-2 rounded-lg bg-neutral-50/80 px-3 py-2.5 text-[12px] leading-5 text-neutral-600">
@@ -289,10 +292,12 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Info className="h-3.5 w-3.5 text-blue-600" />
-            关于
-          </CardTitle>
+          <div className="flex h-8 items-center">
+            <CardTitle className="flex items-center gap-2">
+              <Info className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              关于
+            </CardTitle>
+          </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-2.5 text-[12px] text-neutral-600">
           <Row label="模型根目录">

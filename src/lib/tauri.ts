@@ -21,7 +21,11 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   return tauriInvoke<T>(cmd, args);
 }
 
-/** 自定义标题栏的窗口控制。非 Tauri 环境下静默忽略。 */
+/** 自定义标题栏的窗口控制。非 Tauri 环境下静默忽略。
+ *
+ * 需要 `capabilities/default.json` 里的 `core:window:allow-*` 权限；
+ * 少了权限不会抛到界面上，只会静默失败——这也是之前「点关闭没反应」的根因。
+ */
 export async function windowControl(action: "minimize" | "toggleMaximize" | "close") {
   if (!isTauri()) return;
   try {
@@ -33,6 +37,47 @@ export async function windowControl(action: "minimize" | "toggleMaximize" | "clo
   } catch (e) {
     console.error("窗口控制失败", e);
   }
+}
+
+/** 当前是否最大化（用于切换标题栏按钮图标）。 */
+export async function isWindowMaximized(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    return await getCurrentWindow().isMaximized();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 订阅窗口尺寸变化并回报最大化状态。
+ *
+ * 不用 `onResized` + 自己比较尺寸：最大化/还原、贴边分屏都会改变尺寸，
+ * 直接问 `isMaximized()` 才不会猜错。
+ */
+export function listenWindowMaximize(handler: (maximized: boolean) => void): () => void {
+  if (!isTauri()) return () => {};
+  let unlisten: (() => void) | undefined;
+  let disposed = false;
+  void (async () => {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      handler(await win.isMaximized());
+      const un = await win.onResized(async () => {
+        handler(await win.isMaximized());
+      });
+      if (disposed) un();
+      else unlisten = un;
+    } catch (e) {
+      console.error("监听窗口状态失败", e);
+    }
+  })();
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
 }
 
 export function listenWindowResize(handler: () => void): () => void {
