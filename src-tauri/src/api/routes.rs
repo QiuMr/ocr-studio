@@ -7,6 +7,7 @@
 //!   `/ocr/pingmuzhaotu1|2`（截屏幕）
 //! - 找图类（语义）：`/ocr/yuyizhaotu`（用检测模型直接找目标，不需要模板图）
 //! - 看图：`/vision/detect`、`/vision/pipeline`
+//! - 扫码：`/vision/qrcode`（二维码 / 条码，返回内容 + 码制 + 定位点）
 //! - 状态：`/ocr/health`、`/engine/list`
 //!
 //! 找图三组的后缀语义：`1` = 精准（NCC ≥ 0.92），`2` = 容错（NCC ≥ 0.72）。
@@ -25,11 +26,11 @@ use axum::{Json, Router};
 use image::{DynamicImage, RgbImage};
 
 use super::dto::{
-    decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
-    DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData, FindHitDto, FindOptions,
-    HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto, RegionOcrData, ShibieData,
-    ZhaoziData, CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED, CODE_NOT_FOUND, EngineItemDto,
-    EngineListData,
+    decode_base64_image, decode_image, err_resp, ApiError, ApiResp, BarcodeData, BarcodeHitDto,
+    Box4, CharDto, DanziData, DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData,
+    FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto,
+    RegionOcrData, ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED,
+    CODE_NOT_FOUND, EngineItemDto, EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -121,6 +122,7 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_ENGINES, get(engine_list))
         .route(P_DETECT, post(vision_detect))
         .route(P_PIPELINE, post(vision_pipeline))
+        .route(P_QRCODE, post(vision_qrcode))
         // 兜底：先注册再套 layer，layer 才会把 fallback 一起包住
         .fallback(not_found);
 
@@ -155,11 +157,13 @@ const P_HEALTH: &str = "/ocr/health";
 const P_ENGINES: &str = "/engine/list";
 const P_DETECT: &str = "/vision/detect";
 const P_PIPELINE: &str = "/vision/pipeline";
+/// 扫码：二维码 / 条码。一个端点覆盖全部码制，用 `barcode_formats` 过滤
+const P_QRCODE: &str = "/vision/qrcode";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
     P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_QUYU, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1,
-    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE,
+    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE,
 ];
 
 // ---------------------------------------------------------------- 兜底与 CORS
@@ -366,6 +370,8 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
             .and_then(|s| parse_id_list(s)),
         detect_engine: fields.get("detect_engine").cloned(),
         region: fields.get("region").and_then(|s| parse_region_str(s)),
+        barcode_formats: fields.get("barcode_formats").and_then(|s| parse_str_list(s)),
+        try_harder: fields.get("try_harder").and_then(|s| parse_bool(s)),
     };
     Ok((img, opts))
 }
@@ -378,6 +384,29 @@ fn parse_id_list(s: &str) -> Option<Vec<usize>> {
         .collect::<Result<_, _>>()
         .ok()?;
     Some(ids)
+}
+
+/// multipart 里 `barcode_formats` 写成逗号分隔的码制名（如 `qr,code128`）。
+fn parse_str_list(s: &str) -> Option<Vec<String>> {
+    let items: Vec<String> = s
+        .split([',', '，'])
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// multipart 里的布尔字段：接受 `1/0/true/false/yes/no`。
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------- 处理器
@@ -740,6 +769,67 @@ async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Resp
 /// POST /vision/pipeline —— 检测 + 识别串联：检测引擎找区域，PP-OCR 框内认字。
 ///
 /// `detect_engine` 缺省 `yolo`；`engine` 字段若指向 yolo 也会被用作检测引擎。
+/// POST /vision/qrcode —— 二维码 / 条码识别。
+///
+/// 与 OCR 无关：**不碰引擎槽**，所以引擎没就绪时也能用（不像 `/vision/detect`
+/// 需要检测模型）。纯 CPU，走 rxing。
+///
+/// 一个端点覆盖全部码制：QR（含 Micro QR）、DataMatrix、Aztec、PDF417、MaxiCode，
+/// 以及 Code 39/93/128、EAN-8/13、UPC-A/E、ITF、Codabar 等一维码。
+/// 想只看某几类时传 `barcode_formats`，比全找更快也更少误报。
+///
+/// 「一个码都没找到」是**正常业务结果**（`count: 0`），不是错误——
+/// rxing 内部为此抛 `NotFoundException`，这里已经转成空列表。
+async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+    // rxing 入口要的是 RGB 像素缓冲，parse_recognize 给的是 DynamicImage
+    let rgb = img.to_rgb8();
+
+    let bopts = crate::barcode::BarcodeOptions {
+        formats: opts.barcode_formats.clone().unwrap_or_default(),
+        try_harder: opts.try_harder.unwrap_or(true),
+    };
+    // 纯 CPU 且可能扫全图，挪出 async 线程
+    let codes = match tokio::task::spawn_blocking(move || {
+        crate::barcode::decode_barcodes(&rgb, &bopts)
+    })
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return ApiError::BadRequest(e).into_response(),
+        Err(e) => {
+            return ApiError::Internal(format!("条码识别任务异常终止: {e}")).into_response()
+        }
+    };
+
+    let items: Vec<BarcodeHitDto> = codes
+        .iter()
+        .map(|c| BarcodeHitDto {
+            text: c.text.clone(),
+            format: c.format.clone(),
+            points: c.points.iter().map(|&(x, y)| [x, y]).collect(),
+            x: c.bounds[0],
+            y: c.bounds[1],
+            width: c.bounds[2],
+            height: c.bounds[3],
+        })
+        .collect();
+
+    Json(ApiResp::ok(BarcodeData {
+        count: items.len(),
+        codes: items,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    }))
+    .into_response()
+}
+
 /// 用 yolov8n+coco 时检出的是人/车而不是文字块——**这是预期**，pipeline 面向
 /// 自训检测模型（见 docs/ENGINES.md 6.3）。
 async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {
@@ -1002,6 +1092,8 @@ async fn yuyizhaotu(State(state): State<Arc<AppState>>, req: Request) -> Respons
         class_filter: opts.class_filter.clone(),
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
 
     let dets = match state
@@ -1518,7 +1610,7 @@ mod tests {
     /// 那样 404 提示会指错地方。
     #[test]
     fn paths_table_covers_all_endpoints() {
-        assert_eq!(PATHS.len(), 16, "端点数量变了就要同步 PATHS");
+        assert_eq!(PATHS.len(), 17, "端点数量变了就要同步 PATHS");
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
         }

@@ -7,6 +7,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
 
 pub mod api;
+/// 二维码 / 条码识别（rxing = ZXing 的纯 Rust 移植）。
+pub mod barcode;
 pub mod capture;
 pub mod commands;
 pub mod config;
@@ -400,6 +402,7 @@ pub fn run() {
             commands::ocr_quyuocr,
             commands::vision_detect,
             commands::vision_pipeline,
+            commands::vision_qrcode,
             commands::get_health,
             commands::list_engines,
             commands::detect_models,

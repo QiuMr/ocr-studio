@@ -23,6 +23,7 @@ import type {
   PipelineResult,
   RecognizeResult,
   RegionOcrResult,
+  BarcodeResult,
   SemanticFindArgs,
   WindowInfo,
 } from "../types";
@@ -213,6 +214,41 @@ export async function regionOcr(
     throw new Error(json.msg || `HTTP ${res.status}`);
   }
   return json.data as RegionOcrResult;
+}
+
+/**
+ * 扫码：找出图里所有二维码 / 条码。
+ *
+ * 与 OCR、检测引擎都无关（纯 CPU），所以引擎没就绪时也能用。
+ * `formats` 空 = 全找；`tryHarder` 缺省 true（一维码更容易漏，默认多花点时间）。
+ * 「一个都没找到」返回 `count: 0`，不是错误。
+ */
+export async function scanBarcode(
+  image: string,
+  formats?: string[],
+  tryHarder?: boolean,
+): Promise<BarcodeResult> {
+  if (isTauri()) {
+    return invoke<BarcodeResult>("vision_qrcode", {
+      image,
+      barcode_formats: formats && formats.length > 0 ? formats : null,
+      try_harder: tryHarder ?? null,
+    });
+  }
+  const res = await fetch(`${HTTP_BASE}/vision/qrcode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image,
+      ...(formats && formats.length > 0 ? { barcode_formats: formats } : {}),
+      ...(tryHarder === undefined ? {} : { try_harder: tryHarder }),
+    }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as BarcodeResult;
 }
 
 /**

@@ -67,6 +67,8 @@ pub async fn ocr_recognize(
         class_filter: None,
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let boxes = state
         .recognize_lines(&opts, img)
@@ -157,6 +159,8 @@ pub async fn ocr_quyuocr(
         class_filter: None,
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let crop = img.crop_imm(x0 as u32, y0 as u32, cw as u32, ch as u32);
     let mut boxes = state
@@ -262,6 +266,8 @@ pub async fn vision_detect(
         class_filter,
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -344,6 +350,8 @@ pub async fn vision_pipeline(
         class_filter,
         detect_engine,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -404,6 +412,75 @@ pub async fn vision_pipeline(
         ocr_engine: crate::engine::EngineSpec::ppocr(ocr_level).key(),
         count: text_count,
         regions: region_out,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
+}
+
+// ---------------------------------------------------------------- 扫码
+
+/// 一个识别到的码（与 HTTP `/vision/qrcode` 同构）。
+#[derive(Debug, Serialize)]
+pub struct BarcodeHitOut {
+    pub text: String,
+    pub format: String,
+    pub points: Vec<[f32; 2]>,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BarcodeOut {
+    pub count: usize,
+    pub codes: Vec<BarcodeHitOut>,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+/// 二维码 / 条码识别：与 HTTP 的 `/vision/qrcode` 等价。
+///
+/// 与 OCR / 检测引擎都无关，纯 CPU；所以引擎没就绪也能用。
+#[tauri::command]
+pub async fn vision_qrcode(
+    image: String,
+    barcode_formats: Option<Vec<String>>,
+    try_harder: Option<bool>,
+) -> Result<BarcodeOut, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?.to_rgb8();
+    let (w, h) = img.dimensions();
+
+    let bopts = crate::barcode::BarcodeOptions {
+        formats: barcode_formats.unwrap_or_default(),
+        try_harder: try_harder.unwrap_or(true),
+    };
+    let codes = tokio::task::spawn_blocking(move || {
+        crate::barcode::decode_barcodes(&img, &bopts)
+    })
+    .await
+    .map_err(|e| format!("条码识别任务异常终止: {e}"))??;
+
+    let items: Vec<BarcodeHitOut> = codes
+        .iter()
+        .map(|c| BarcodeHitOut {
+            text: c.text.clone(),
+            format: c.format.clone(),
+            points: c.points.iter().map(|&(x, y)| [x, y]).collect(),
+            x: c.bounds[0],
+            y: c.bounds[1],
+            width: c.bounds[2],
+            height: c.bounds[3],
+        })
+        .collect();
+
+    Ok(BarcodeOut {
+        count: items.len(),
+        codes: items,
         width: w,
         height: h,
         elapsed_ms: t0.elapsed().as_millis(),
@@ -476,6 +553,8 @@ pub async fn ocr_danzijson(
         class_filter: None,
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let details = state
         .recognize_details(&opts, img)
@@ -1228,6 +1307,8 @@ pub async fn find_semantic(
         class_filter: Some(class_filter.clone()),
         detect_engine: None,
         region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: conf,

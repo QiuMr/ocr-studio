@@ -73,6 +73,33 @@ export interface RegionOcrResult {
   elapsed_ms: number;
 }
 
+// ---------------------------------------------------------------- 扫码
+
+/** `/vision/qrcode`：一个识别到的二维码/条码 */
+export interface BarcodeHit {
+  /** 码里编的内容（原文，不做解析） */
+  text: string;
+  /** 码制名，ZXing 规范大写：`QR_CODE` / `CODE_128` / `EAN_13` … */
+  format: string;
+  /** 定位点/角点，原图坐标。QR 一般是 3 个定位图案 + 1 个校正点 */
+  points: [number, number][];
+  /** 定位点的轴对齐包围盒 `[x, y, w, h]` */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** `/vision/qrcode` 出参 */
+export interface BarcodeResult {
+  count: number;
+  codes: BarcodeHit[];
+  /** 原图尺寸 */
+  width: number;
+  height: number;
+  elapsed_ms: number;
+}
+
 export interface Health {
   status: "ok" | "no_model";
   /** 当前引擎标识，如 `ppocr:small` / `ddddocr:common` */

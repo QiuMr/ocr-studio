@@ -214,6 +214,22 @@ export const ENDPOINTS: Endpoint[] = [
     ],
     returns: "regions[{box, class_name, score, text, lines[]}]、count",
   },
+  {
+    method: "POST",
+    path: "/vision/qrcode",
+    title: "扫码：读出二维码 / 条形码里的内容",
+    note: "和 OCR、检测引擎都无关（纯 CPU），引擎没就绪也能用。一张图里有多个码会全部返回。**「一个码都没找到」是正常结果**（count 为 0），不是报错。",
+    params: [
+      { name: "image", required: true, desc: "base64 字符串" },
+      {
+        name: "barcode_formats",
+        desc: "只找这些码制，如 [\"qr\",\"code128\"]。支持分组写法 1d（全部条形码）/ 2d（全部二维码）。不传 = 全找",
+      },
+      { name: "try_harder", desc: "是否多花点时间找，默认 true（条形码容易漏，建议保持开）" },
+    ],
+    returns:
+      "count、codes[{text, format, points[[x,y]…], x, y, width, height}]、width、height、elapsed_ms；format 用 ZXing 规范名（QR_CODE / CODE_128 / EAN_13 …）",
+  },
 
   // ------------------------------------------------------------------ 状态
   {

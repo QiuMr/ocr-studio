@@ -13,6 +13,7 @@ import {
   Loader2,
   RefreshCw,
   ScanText,
+  ScanLine,
   Settings2,
   Sparkles,
   Type,
@@ -36,6 +37,7 @@ import { Callout } from "../components/ui/callout";
 import { Hint } from "../components/ui/hint";
 import { ImageViewer } from "../components/ImageViewer";
 import { FindPanel } from "../components/FindPanel";
+import { ScanPanel } from "../components/ScanPanel";
 import {
   fileToBase64,
   detectImage,
@@ -98,18 +100,21 @@ export function Playground({
           <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">
             {tab === "ocr"
               ? "丢一张图进去，看 /ocr/shibie 返回什么。放进来就自动跑，不用点按钮。"
-              : // 两种找图模式的「要找什么」不一样（小图 vs 模型），这里别写死
-                // 某一个端点路径——语义找图走的是 /ocr/yuyizhaotu。
-                "给一张大图，再给一张小图或一个检测模型，看找不找得到位置。"}
+              : tab === "scan"
+                ? "丢一张图进去，把里面的二维码、条形码内容扫出来。放进来就自动扫。"
+                : // 两种找图模式的「要找什么」不一样（小图 vs 模型），这里别写死
+                  // 某一个端点路径——语义找图走的是 /ocr/yuyizhaotu。
+                  "给一张大图，再给一张小图或一个检测模型，看找不找得到位置。"}
           </p>
         </div>
 
-        {/* 用普通按钮而不是 Tab 条：两个功能差别很大，分开显示标题更清楚 */}
+        {/* 用普通按钮而不是 Tab 条：三个功能差别很大，分开显示标题更清楚 */}
         <div className="flex items-center gap-1 rounded-[10px] bg-neutral-100 p-1">
           {(
             [
               { v: "ocr" as OcrTab, label: "文字识别", icon: <Type className="h-3.5 w-3.5" /> },
               { v: "find" as OcrTab, label: "找图定位", icon: <Crosshair className="h-3.5 w-3.5" /> },
+              { v: "scan" as OcrTab, label: "扫码", icon: <ScanLine className="h-3.5 w-3.5" /> },
             ]
           ).map((it) => (
             <button
@@ -132,6 +137,8 @@ export function Playground({
 
       {tab === "ocr" ? (
         <OcrPanel onImageLoaded={setB64} pickToken={pickToken} />
+      ) : tab === "scan" ? (
+        <ScanPanel />
       ) : (
         <FindPanel inheritedImage={b64} />
       )}

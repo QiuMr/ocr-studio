@@ -12,6 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# 测试里用 rxing 的编码器自己生成二维码/条码，再解码回来验证闭环。
+# 放在 dev-dependencies 是为了**不把写码器编进发布包**：Cargo 的 resolver v2
+# 只会在构建测试目标时合并这里的 feature，`cargo build` 不会带上 encoders。
+[dev-dependencies]
+rxing = { version = "0.9", default-features = false, features = ["encoders"] }
+
 [dependencies]
 # custom-protocol 必须开：它决定 tauri::generate_context! 是否把前端资源嵌入二进制。
 # 不开的话，即使 --release 构建，窗口也会去加载 build.devUrl（默认 http://localhost:1420），
@@ -67,6 +73,24 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
     "directml",
 ] }
 imageproc = "0.27.0"
+
+# 二维码 / 条码：rxing 是 ZXing 的纯 Rust 移植，覆盖 QR、DataMatrix、Aztec、
+# PDF417 以及 Code39/93/128、EAN、UPC、ITF、Codabar 等一维码。
+# 选它而不是 zbar/opencv：**没有原生依赖**，打包时不用额外塞 DLL，
+# 也不像 opencv 那样把包体积拉大几十 MB。
+#
+# 关掉默认 feature 是刻意的：默认集里的 `image_formats` 会给 image crate
+# 打开 avif/tiff/webp/exr 全套编解码（rav1e 等），而我们的输入本来就是
+# 自己转好的 luma8 字节，根本不需要 image 的那套 IO。只开解码所需：
+#   decoders + multi_barcode_readers —— 多码检测入口
+#   full_barcode_format_support     —— aztec/maxicode/qrcode/datamatrix/oned/pdf417
+#   encoding_rs                     —— QR 里 GB2312/Shift-JIS 等字符集转换（国内码常见）
+rxing = { version = "0.9", default-features = false, features = [
+  "decoders",
+  "multi_barcode_readers",
+  "full_barcode_format_support",
+  "encoding_rs",
+] }
 
 # Windows 原生 API：截图（GDI BitBlt / PrintWindow）、窗口枚举、DPI 感知、
 # 以及「添加检测模型」用的系统文件选择框（GetOpenFileNameW）

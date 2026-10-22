@@ -91,6 +91,41 @@ pub struct OcrOptions {
     /// 其它识别接口收到这个字段会忽略。
     #[serde(default)]
     pub region: Option<[i32; 4]>,
+    /// 只找这些码制（**仅 `/vision/qrcode` 会读**），如 `["qr","code128"]`。
+    /// 支持分组写法 `1d`（全部一维码）/ `2d`（全部二维码）。空/缺省 = 全找。
+    #[serde(default)]
+    pub barcode_formats: Option<Vec<String>>,
+    /// 条码解码器是否多花点时间找（**仅 `/vision/qrcode` 会读**），缺省 true。
+    /// 关掉更快，但一维码容易漏。
+    #[serde(default)]
+    pub try_harder: Option<bool>,
+}
+
+/// `/vision/qrcode` 出参：一个识别到的码。
+#[derive(Debug, Serialize)]
+pub struct BarcodeHitDto {
+    /// 码里编的内容（原文，不做任何解析）
+    pub text: String,
+    /// 码制名，如 `QR_CODE` / `CODE_128`
+    pub format: String,
+    /// 定位点/角点，原图坐标。QR 一般给 3 个定位图案 + 1 个校正点
+    pub points: Vec<[f32; 2]>,
+    /// 定位点的轴对齐包围盒 `[x, y, w, h]`
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// `/vision/qrcode` 出参。
+#[derive(Debug, Serialize)]
+pub struct BarcodeData {
+    /// 找到几个码
+    pub count: usize,
+    pub codes: Vec<BarcodeHitDto>,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
 }
 
 /// 四点框（原图坐标，顺序 左上/右上/右下/左下）。

@@ -417,6 +417,88 @@ fn tuzhaotu_rejects_mask_size_mismatch() {
 }
 
 #[test]
+fn vision_qrcode_decodes_generated_qr() {
+    use rxing::Writer;
+    // 这个端点不碰引擎槽，所以「没有引擎」的服务也能验。
+    let srv = start_server_without_engine();
+    let mat = rxing::MultiFormatWriter
+        .encode(
+            "https://example.com/vision-qr",
+            &rxing::BarcodeFormat::QR_CODE,
+            260,
+            260,
+        )
+        .expect("编码失败");
+    let (mw, mh) = (mat.getWidth(), mat.getHeight());
+    let mut img = image::RgbImage::new(mw, mh);
+    for y in 0..mh {
+        for x in 0..mw {
+            let v = if mat.get(x, y) { 0u8 } else { 255u8 };
+            img.put_pixel(x, y, image::Rgb([v, v, v]));
+        }
+    }
+
+    let payload = format!("{{\"image\":\"{}\"}}", png_b64(&img));
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/qrcode",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("qrcode -> {status} {body}");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"code\":0"), "{body}");
+    assert_eq!(json_num(&body, "count"), Some(1.0), "应识别出 1 个码: {body}");
+    assert!(body.contains("https://example.com/vision-qr"), "文本应一致: {body}");
+    assert!(body.contains("QR_CODE"), "码制应回显: {body}");
+    // 注意：`json_num` 取的是**第一个**同名 key，而 codes[] 里也有 width/height
+    // （那是命中框的尺寸）。外层的原图尺寸要整串匹配才不会撞上。
+    assert!(
+        body.contains(&format!("\"width\":{mw},\"height\":{mh}")),
+        "外层应回传原图尺寸 {mw}x{mh}: {body}"
+    );
+}
+
+#[test]
+fn vision_qrcode_blank_image_is_not_an_error() {
+    let srv = start_server_without_engine();
+    let img = image::RgbImage::from_pixel(240, 240, image::Rgb([210u8, 210, 210]));
+    let payload = format!("{{\"image\":\"{}\"}}", png_b64(&img));
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/qrcode",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("qrcode(blank) -> {status} {body}");
+    // 「图里没有码」是正常业务结果，HTTP 仍 200，只把 count 置 0
+    assert_eq!(status, 200, "没有码不该报错: {body}");
+    assert_eq!(json_num(&body, "count"), Some(0.0), "{body}");
+}
+
+#[test]
+fn vision_qrcode_rejects_unknown_format_name() {
+    let srv = start_server_without_engine();
+    let img = synth_scene(120, 120, 20, 20, 40, 40);
+    let payload = format!(
+        "{{\"image\":\"{}\",\"barcode_formats\":[\"qrcod3\"]}}",
+        png_b64(&img)
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/qrcode",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("qrcode(bad format) -> {status} {body}");
+    assert_eq!(status, 400, "拼错的码制名应 400: {body}");
+    assert!(body.contains("不认识的码制"), "{body}");
+}
+
+#[test]
 fn tuzhaotu_reports_not_found_gracefully() {
     let srv = start_server_without_engine();
     let scene = synth_scene(320, 240, 10, 10, 40, 40);
