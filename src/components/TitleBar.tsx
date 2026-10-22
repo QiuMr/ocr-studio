@@ -71,7 +71,13 @@ export function TitleBar({ collapsed, onToggleSidebar }: Props) {
             <Square className="h-3 w-3" strokeWidth={2} />
           )}
         </WinButton>
-        <WinButton label="关闭" danger onClick={() => windowControl("close")}>
+        {/* 关闭 = 收到托盘。这是个常驻 API 服务，标题上就要说清楚，
+            否则用户以为「关掉服务就停了」，会一直开着窗口。 */}
+        <WinButton
+          label="关闭窗口（服务继续在后台运行，从托盘退出）"
+          danger
+          onClick={() => windowControl("close")}
+        >
           <X className="h-4 w-4" strokeWidth={2} />
         </WinButton>
       </div>

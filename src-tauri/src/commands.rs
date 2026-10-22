@@ -767,14 +767,9 @@ pub fn server_status(state: State<'_, Arc<AppState>>) -> bool {
     state.is_running()
 }
 
-/// 启动 HTTP 服务（已在运行时直接返回端口）。
-#[tauri::command]
-pub async fn server_start(state: State<'_, Arc<AppState>>) -> Result<u16, String> {
-    if state.is_running() {
-        return Ok(state.port());
-    }
-    let port = state.port();
-    let st = Arc::clone(&*state);
+/// 在后台启动 HTTP 服务。托盘菜单和 Tauri 命令共用这段逻辑。
+pub fn start_server_background(state: &Arc<AppState>) {
+    let st = Arc::clone(state);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -789,6 +784,16 @@ pub async fn server_start(state: State<'_, Arc<AppState>>) -> Result<u16, String
             }
         });
     });
+}
+
+/// 启动 HTTP 服务（已在运行时直接返回端口）。
+#[tauri::command]
+pub async fn server_start(state: State<'_, Arc<AppState>>) -> Result<u16, String> {
+    if state.is_running() {
+        return Ok(state.port());
+    }
+    let port = state.port();
+    start_server_background(&state);
 
     // 等监听真正就绪（serve 里绑定成功后才登记 shutdown）
     for _ in 0..100 {

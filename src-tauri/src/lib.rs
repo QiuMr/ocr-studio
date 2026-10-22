@@ -2,7 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Manager, WindowEvent};
 
 pub mod api;
 pub mod capture;
@@ -120,6 +122,128 @@ fn init_logging(data_dir: &std::path::Path) {
     let _ = tracing_log::LogTracer::init();
 }
 
+/// 系统托盘：常驻入口。
+///
+/// 这是「API 工具」定位的直接体现——关掉窗口服务还得活着，用户必须有个地方
+/// 能看状态、能停服务、能真正退出。菜单第一行是只读状态（不可点），
+/// 由后台线程每 2 秒刷新一次，省得用户为了看一眼状态去开窗口。
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let status = MenuItem::with_id(app, "status", "服务状态读取中…", false, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "打开界面", true, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "停止服务", false, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 OCR Studio", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[&status, &sep1, &open, &start, &stop, &sep2, &quit],
+    )?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .menu(&menu)
+        .tooltip("OCR Studio · API 服务");
+    // 不给图标时 Windows 上托盘图标是不可见的（tray-icon 不会自动回退到应用图标），
+    // 必须显式把打包进 exe 的默认窗口图标给它。
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    let tray = builder
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            "start" => {
+                if let Some(state) = app.try_state::<Arc<api::AppState>>() {
+                    if !state.is_running() {
+                        tracing::info!("托盘：启动服务");
+                        commands::start_server_background(&state);
+                    }
+                }
+            }
+            "stop" => {
+                if let Some(state) = app.try_state::<Arc<api::AppState>>() {
+                    tracing::info!("托盘：停止服务");
+                    api::stop(&state);
+                }
+            }
+            "quit" => {
+                tracing::info!("托盘：退出应用");
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击弹出菜单（默认行为），双击直接开界面
+            if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+
+    spawn_tray_ticker(app.clone(), tray, menu);
+    Ok(())
+}
+
+/// 每 2 秒把服务状态刷到托盘菜单首行与 tooltip。
+///
+/// 为什么要轮询而不是事件驱动：服务的启停入口有三个（界面按钮、托盘菜单、
+/// 端口变更触发的自动重启），逐个挂回调容易漏。状态是内存里的一个原子读，
+/// 2 秒一次的成本可以忽略。
+fn spawn_tray_ticker(
+    app: tauri::AppHandle,
+    tray: tauri::tray::TrayIcon,
+    menu: Menu<tauri::Wry>,
+) {
+    std::thread::spawn(move || {
+        let mut last: Option<(bool, u16)> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let (running, port) = match app.try_state::<Arc<api::AppState>>() {
+                Some(state) => (state.is_running(), state.port()),
+                None => (false, 0),
+            };
+            if last == Some((running, port)) {
+                continue;
+            }
+            last = Some((running, port));
+
+            let text = if running {
+                format!("● 运行中 · 127.0.0.1:{port}")
+            } else {
+                "○ 已停止".to_string()
+            };
+            let tip = if running {
+                format!("OCR Studio · 服务运行中 127.0.0.1:{port}")
+            } else {
+                "OCR Studio · 服务已停止".to_string()
+            };
+            // 菜单项文字/可用态在 Windows 上要走主线程更新
+            let menu = menu.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(item) = menu.get("status").and_then(|i| i.as_menuitem().cloned()) {
+                    let _ = item.set_text(text);
+                }
+                if let Some(item) = menu.get("start").and_then(|i| i.as_menuitem().cloned()) {
+                    let _ = item.set_enabled(!running);
+                }
+                if let Some(item) = menu.get("stop").and_then(|i| i.as_menuitem().cloned()) {
+                    let _ = item.set_enabled(running);
+                }
+            });
+            let _ = tray.set_tooltip(Some(tip));
+        }
+    });
+}
+
 fn build_main_window(app: &tauri::AppHandle, extra_args: Option<&str>) -> tauri::Result<()> {
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
@@ -142,6 +266,18 @@ fn build_main_window(app: &tauri::AppHandle, extra_args: Option<&str>) -> tauri:
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例插件**必须是第一个**注册的插件（官方要求），否则初始化顺序会出错。
+        // 场景：用户双击两次图标，或从托盘已隐藏时又点了一次 exe。
+        // 没有它，第二个进程会因为 8848 已被占用而服务起不来，
+        // 界面上显示「服务已停止」——用户会以为程序坏了（实测踩过）。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tracing::info!("检测到第二个实例，转交控制权给已运行的窗口");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 注意用 app_data_dir 而不是 data_dir：
@@ -187,6 +323,7 @@ pub fn run() {
                     persist_compat(&data_dir);
                 }
             }
+            setup_tray(app.handle())?;
             match &created {
                 Ok(()) => tracing::info!("主窗口创建成功"),
                 Err(e) => {
@@ -253,6 +390,13 @@ pub fn run() {
             commands::get_logs,
             commands::read_image_file,
         ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                tracing::info!("主窗口已隐藏，服务继续在托盘运行");
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

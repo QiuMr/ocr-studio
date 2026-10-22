@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Crosshair,
+  Info,
   Loader2,
   Power,
   Square,
@@ -296,6 +297,16 @@ print(r["data"]["text"])`,
           {error}
         </div>
       )}
+
+      {/* 关窗口 ≠ 停服务。这是最容易误解的一点，直接写在状态卡下面。
+          托盘图标在任务栏右下角（可能被折叠进「隐藏的图标」里）。 */}
+      <p className="mt-3 flex items-start gap-2 text-[12px] font-medium leading-relaxed text-neutral-500">
+        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-400" strokeWidth={2} />
+        <span>
+          关掉窗口不会停服务：它会缩到任务栏右下角的托盘图标里继续跑。
+          要真正退出，右键托盘图标选「退出 OCR Studio」。
+        </span>
+      </p>
 
       {/* ------------------------------------------------------ 能力概览 */}
       <div className="mt-8 flex items-end justify-between gap-3">

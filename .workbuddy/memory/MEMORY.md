@@ -121,6 +121,29 @@
 - 小字号中文与 14px 图标混排时一律加 `leading-none`，否则文字盒 1.5 行高会让文字比图标偏下。
 - PageHeader 用 `items-center`（不是 items-start），右上按钮才与「标题+描述」块视觉居中。
 
+## 托盘常驻 + 单实例（2026-10-22，**产品语义，别改回去**）
+- **关窗口 = 隐藏，不是退出**：`WindowEvent::CloseRequested` → `prevent_close()` + `hide()`。
+  交付物是 API 服务，界面只是控制面板，服务必须能在后台活着。
+- 托盘菜单：首行只读状态（`● 运行中 · 127.0.0.1:端口` / `○ 已停止`，ticker 每 2s 刷新、
+  **变了才更新**）+ 打开界面 / 启动服务 / 停止服务 / 退出。**只有「退出」是真正退出。**
+- **托盘必须显式给图标**：`TrayIconBuilder` 在 tauri-2.12.4 里**不会**回退到
+  `default_window_icon()`，不设也能 build 成功、只是图标不可见。写
+  `.icon(app.default_window_icon().cloned())`。
+- **`Menu::get` 参数是 `"id"` 不是 `&"id"`**（`get<'a, I>(&'a I)` + `MenuId: PartialEq<&'a I>`）；
+  返回 `MenuItemKind`，要 `.as_menuitem().cloned()` 才有 `set_text`/`set_enabled`；
+  这些更新必须 `app.run_on_main_thread(...)`。
+- **`tauri-plugin-single-instance` 必须是第一个注册的插件**。没有它，第二次双击会另起
+  进程抢 8848，失败后界面显示「服务已停止」，用户会以为程序坏了。
+- **进程名是 `OCR Studio`（带空格）**，不是 `ocr-studio`。杀进程/数实例都按后者写会一个
+  都匹配不到（本轮因此「以为杀了其实没杀」）。
+- 托盘图标可见性**没做过截图验证**（Win11 折叠进溢出面板，合成 `mouse_event` 点不开，
+  试三次都落到输入法图标上）。行为用 `scripts/verify_tray.py` 验，图标请人工看任务栏。
+
+## 后台任务退出码（2026-10-22）
+- `cargo test ... | Select-Object -Last N` 之类的**管道会让退出码失真**：任务报 failed，
+  实际 `test result: ok. 82 passed`。判基线看 `test result:` 行或单独取 `$LASTEXITCODE`。
+
+
 ## 目标检测模型（2026-10-22 晚，已落地）
 - **模型是用户自己的**：`models/detect/yolo/` 下每个 `*.onnx` 都是可选项（`model.onnx` 是默认），
   另外 config 的 `detect_models: Vec<String>` 记外部绝对路径（**只记路径不复制文件**）。

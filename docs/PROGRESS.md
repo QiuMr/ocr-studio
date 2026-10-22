@@ -590,6 +590,87 @@ pyclipper 得到 33×31。对噪声框，这 1px 的裁剪差就让置信度抖�
 
 ---
 
+## 7.6 M5：托盘常驻 + 单实例 + 分发包说明（2026-10-22 下午）
+
+### 为什么先做托盘
+
+定位是「本地 API 服务」，那它就必须能**在后台一直活着**。没有托盘的话只有两个选择：
+窗口开着占地方，或者关掉服务就死。所以关窗口的语义必须是「收到托盘」而不是「退出」。
+
+### 行为定义
+
+| 动作 | 结果 |
+|---|---|
+| 点窗口右上角关闭 | 窗口隐藏，**服务继续跑**（`CloseRequested` → `prevent_close` + `hide`） |
+| 托盘菜单首行 | 只读状态：`● 运行中 · 127.0.0.1:8848` / `○ 已停止`，每 2 秒刷新且**变了才更新** |
+| 托盘 打开界面 | 显示 + 取消最小化 + 聚焦 |
+| 托盘 启动/停止服务 | 直接调 `commands::start_server_background` / `api::stop`，启动项与停止项按状态互斥置灰 |
+| 托盘 退出 OCR Studio | `app.exit(0)`，这是**唯一**真正的退出方式 |
+| 双击 exe 第二次 | 单实例插件拦截，不新开进程，把已有窗口拉出来 |
+
+代码位置：`src-tauri/src/lib.rs` 的 `setup_tray` / `spawn_tray_ticker`。
+启动逻辑从 `commands::server_start` 抽成 `pub fn start_server_background(&Arc<AppState>)`，
+让托盘与 Tauri 命令共用一份（原来只能在 `State<'_, _>` 上调用，托盘拿不到）。
+
+### 这轮踩的坑
+
+1. **托盘不给 icon 在 Windows 上不可见**。`TrayIconBuilder::build_inner`（tauri-2.12.4）
+   **不会**回退到 `default_window_icon()`，必须显式
+   `.icon(app.default_window_icon().cloned())`。不设也能 build 成功，只是没有图标。
+2. **`Menu::get` 的参数不是 `&str`**：签名 `get<'a, I>(&'a I)` 且约束
+   `MenuId: PartialEq<&'a I>`，所以写 `menu.get("stop")`（`I = str`）；
+   写成 `menu.get(&"stop")` 会变成 `&&str`，编译直接失败。
+3. **菜单项文字/可用态更新要走主线程**：在 ticker 线程里直接 `set_text` 不可靠，
+   用 `app.run_on_main_thread(...)` 包一层。`TrayIcon` / `Menu` 本身可 Clone + Send。
+4. **`Menu::get` 返回 `MenuItemKind`**，要 `.as_menuitem().cloned()` 才能 `set_text` / `set_enabled`。
+5. **进程名是 `OCR Studio`（带空格），不是 `ocr-studio`**。按 exe 文件名小写去找进程
+   一个都匹配不到，导致「以为杀掉了旧实例、其实没杀」，第二次启动因端口占用而
+   `HTTP 服务异常退出: 绑定 127.0.0.1:8848 失败`，界面显示「服务已停止」。
+   **这正是「单实例」需求的来源**，不是脚本问题。
+6. **管道会让后台任务的退出码失真**：`cargo test ... | Select-Object -Last 25`
+   报 failed 但实际 82/82 通过。判基线要看 `test result:` 那一行或单独取 `$LASTEXITCODE`，
+   别只信任务状态 —— 本轮因此误判「测试失败」，白查一轮。
+
+### 没做成的验证（如实记录）
+
+**托盘图标的可见性没能用截图确认。** Windows 11 会把新图标折叠进溢出面板，
+而合成鼠标事件（`mouse_event`）点不开那个面板：按 `Shell_TrayWnd`→`TrayNotifyWnd`
+真实矩形算出的坐标点下去，落到了输入法图标上，三次尝试都截到的是面板下面的窗口。
+已放弃这条，改为**程序化验证行为**（见下），图标是否可见请人工看一眼任务栏右下角。
+临时探测脚本已删除，只留 `scripts/verify_tray.py`。
+
+### 验收（打包版实测，`release/OCR-Studio/`）
+
+`scripts/verify_tray.py --exe "…\OCR Studio.exe" --port 8848` 输出：
+
+```
+[OK] 窗口可见 hwnd=…
+[OK] 关前服务正常 code=0 status=ok
+[OK] 窗口已隐藏                 ← WM_CLOSE 后 IsWindowVisible = false
+[OK] 关窗口后服务仍在应答        ← /ocr/health 仍返回 code=0
+[OK] 重复启动：进程数 1 -> 1（应不增加）
+[OK] 重复启动后服务仍正常
+exit=0
+```
+
+另外：`cargo test --lib` 82 通过；release 构建 5m20s；`check_embedded_assets.py`
+确认新 `index-BWCERk58.js` 等 6 个资源都在 exe 里（不是旧界面）。
+
+### 分发包说明重写（`scripts/pack_exe.ps1` 里的 `使用说明.txt`）
+
+旧版还写着「进入『仪表盘』看推理设备」——仪表盘早合并进设置页了，属于**过时文档骗用户**；
+而且完全没提这是 API 服务、一条接口都没列。新版结构：
+
+产品定位 → 三步上手 → 5 项导航 → **14 个接口一览** → curl/Python 示例 →
+错误码表（0/400/501/503/1002/1003）→ 托盘常驻与单实例 → 目录说明 →
+显卡加速排查 → 端口 → 检测模型放法 → 常见现象对照 → 卸载 → 系统要求。
+
+校验：135 行、22 处空行、CRLF、UTF-8 带 BOM（`EF BB BF`），记事本不会乱码。
+
+产物：`release/OCR-Studio-0.1.0-win64.zip`（106.1 MB，含 exe + 3 个 DLL + models + 说明）。
+
+---
+
 ## 8. 关键文件索引
 
 ```

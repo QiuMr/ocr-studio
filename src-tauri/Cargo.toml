@@ -17,7 +17,10 @@ tauri-build = { version = "2", features = [] }
 # 不开的话，即使 --release 构建，窗口也会去加载 build.devUrl（默认 http://localhost:1420），
 # 用户双击 exe 只能看到「localhost 拒绝连接」或纯白窗口。
 # 官方 `pnpm tauri build` 会自动带上这个 feature，裸 `cargo build` 不会。
-tauri = { version = "2", features = ["custom-protocol"] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+# 单实例：这个程序常驻托盘、独占 8848 端口，被双击第二次时不能让新进程去抢端口。
+# 新进程会把参数转交给已存在的实例并立刻退出，回调里把旧窗口拉出来。
+tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

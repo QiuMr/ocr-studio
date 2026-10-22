@@ -36,6 +36,7 @@ models/**/*.txt
 
 # 诊断脚本产出的临时截图 / 无头浏览器 profile
 scripts/_*.png
+scripts/shot-*.png
 scripts/_edgeprofile/
 
 # 免安装分发包产物（scripts/pack_exe.ps1 生成，47MB+，不进仓库）
