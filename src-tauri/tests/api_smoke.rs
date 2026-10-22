@@ -14,6 +14,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use ocr_studio_lib::api::{build_router, AppState};
 use ocr_studio_lib::config::AppConfig;
+use ocr_studio_lib::engine::catalog;
 use ocr_studio_lib::ocr::{ensure_ort_dylib_path, Device, ModelLevel};
 
 fn workspace_root() -> PathBuf {
@@ -28,19 +29,11 @@ struct TestServer {
     _thread: std::thread::JoinHandle<()>,
 }
 
-/// 起一个 ephemeral 端口上的真实服务，引擎用 small + DirectML + 关 cls（与 Python 基线一致）。
-fn start_server() -> TestServer {
-    let root = workspace_root();
-    assert!(
-        ensure_ort_dylib_path(&root),
-        "找不到 src-tauri/runtime/onnxruntime.dll，请先运行 scripts/copy_runtime.ps1"
-    );
-
-    let state = AppState::new(root.join("models"), AppConfig::default());
-    state
-        .load_engine_blocking(Some(ModelLevel::Small), Some(Device::Directml), Some(false))
-        .expect("引擎加载失败");
-
+/// 把 state 跑起来：绑 ephemeral 端口 → 起 axum → 等到能连上。
+///
+/// 三种「要不要加载引擎」的组合共用这一段（下面三个 `start_server_*`），
+/// 免得绑定/等待就绪的逻辑各写一遍、哪天改了只改一处。
+fn spawn_server(state: AppState) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口失败");
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -51,9 +44,8 @@ fn start_server() -> TestServer {
             .enable_all()
             .build()
             .expect("runtime");
-        let std_listener = listener;
         let tokio_listener = rt.block_on(async {
-            tokio::net::TcpListener::from_std(std_listener).expect("from_std")
+            tokio::net::TcpListener::from_std(listener).expect("from_std")
         });
         rt.block_on(async move {
             axum::serve(tokio_listener, build_router().with_state(state))
@@ -76,43 +68,37 @@ fn start_server() -> TestServer {
     }
 }
 
+/// 起一个真实服务，引擎用 small + DirectML + 关 cls（与 Python 基线一致）。
+fn start_server() -> TestServer {
+    let root = workspace_root();
+    assert!(
+        ensure_ort_dylib_path(&root),
+        "找不到 src-tauri/runtime/onnxruntime.dll，请先运行 scripts/copy_runtime.ps1"
+    );
+
+    let state = AppState::new(root.join("models"), AppConfig::default());
+    state
+        .load_engine_blocking(Some(ModelLevel::Small), Some(Device::Directml), Some(false))
+        .expect("引擎加载失败");
+    spawn_server(state)
+}
+
 /// 起一个**不加载 OCR 引擎**的服务。找图类接口是纯 CPU 计算，不需要模型，
 /// 这样跑找图测试既快也不依赖 onnxruntime.dll 与模型文件。
 fn start_server_without_engine() -> TestServer {
     let root = workspace_root();
-    let state = AppState::new(root.join("models"), AppConfig::default());
+    spawn_server(AppState::new(root.join("models"), AppConfig::default()))
+}
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口失败");
-    let addr = listener.local_addr().unwrap();
-    listener.set_nonblocking(true).unwrap();
-
-    let state = std::sync::Arc::new(state);
-    let thread = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let tokio_listener = rt.block_on(async {
-            tokio::net::TcpListener::from_std(listener).expect("from_std")
-        });
-        rt.block_on(async move {
-            axum::serve(tokio_listener, build_router().with_state(state))
-                .await
-                .expect("serve");
-        });
-    });
-
-    for _ in 0..100 {
-        if TcpStream::connect(addr).is_ok() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    TestServer {
-        addr,
-        _thread: thread,
-    }
+/// 起一个**只准备了 onnxruntime.dll** 的服务（不加载 PP-OCR）：
+/// 语义找图只需要检测模型，加载 det+rec 几百毫秒纯属浪费。
+fn start_server_for_detect() -> TestServer {
+    let root = workspace_root();
+    assert!(
+        ensure_ort_dylib_path(&root),
+        "找不到 src-tauri/runtime/onnxruntime.dll，请先运行 scripts/copy_runtime.ps1"
+    );
+    spawn_server(AppState::new(root.join("models"), AppConfig::default()))
 }
 
 /// 发一次请求，返回 (状态码, 响应体字符串)。
@@ -464,6 +450,119 @@ fn find_requires_template() {
     assert!(body.contains("模板"), "{body}");
 }
 
+// ---------------------------------------------------------------- 语义找图
+
+/// 路由存在 + 参数校验。这三条都在碰引擎**之前**返回，所以不需要模型和 DLL。
+#[test]
+fn yuyizhaotu_route_exists_and_validates_params() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(120, 90, 20, 20, 30, 24);
+    let img = png_b64(&scene);
+
+    // 缺搜索图 → 400（**不是 404**，证明路由已注册）
+    let (status, body) = http(srv.addr, "POST", "/ocr/yuyizhaotu", "application/json", b"{}");
+    println!("yuyizhaotu(no image) -> {status} {body}");
+    assert_eq!(status, 400, "缺 image 应 400 而不是 404: {body}");
+    assert!(body.contains("搜索图"), "应提示缺搜索图: {body}");
+
+    // source 写错 → 400，且把可选值列出来
+    let payload = format!("{{\"image\":\"{img}\",\"source\":\"desktop\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/yuyizhaotu",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("yuyizhaotu(bad source) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("source") && body.contains("image"), "{body}");
+
+    // conf 越界 → 400（3 不是概率）
+    let payload = format!("{{\"image\":\"{img}\",\"conf\":3}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/yuyizhaotu",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("yuyizhaotu(bad conf) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("conf"), "{body}");
+}
+
+/// 语义找图真跑一遍：需要 `models/detect/yolo/` 下有**认得 assets/bus.png** 的模型。
+///
+/// 目录为空时自动跳过（出厂状态就是这个，和 `yoloe_smoke` 一个口径）。
+/// 跑：`cargo test --test api_smoke -- --ignored --nocapture`
+#[test]
+#[ignore = "重量级：需要 models/detect/yolo/ 下有认得 assets/bus.png 的检测模型 + onnxruntime.dll"]
+fn yuyizhaotu_finds_target_with_user_model() {
+    let root = workspace_root();
+    let models = catalog::list_yolo_models(&root.join("models"), &[]);
+    if models.is_empty() {
+        eprintln!("models/detect/yolo/ 里没有模型，跳过（出厂状态就是这个）");
+        return;
+    }
+    let srv = start_server_for_detect();
+
+    let b64 = base64::engine::general_purpose::STANDARD
+        .encode(std::fs::read(root.join("assets").join("bus.png")).expect("读 bus.png 失败"));
+
+    // 用文件名当模型 id，避开「哪个是默认模型」这个与测试无关的问题
+    let engine = format!("yolo:{}", models[0].id);
+    let payload = format!("{{\"image\":\"{b64}\",\"engine\":\"{engine}\",\"conf\":0.25,\"max_results\":5}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/ocr/yuyizhaotu",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("yuyizhaotu -> {status}\n{}", &body[..body.len().min(800)]);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"code\":0"), "{body}");
+
+    // 出参必须与模板找图**同构**：这些字段一个都不能少，否则脚本换路径就崩
+    for key in [
+        "\"found\":",
+        "\"x\":",
+        "\"y\":",
+        "\"score\":",
+        "\"center_x\":",
+        "\"center_y\":",
+        "\"width\":",
+        "\"height\":",
+        "\"matched\":",
+        "\"matches\":",
+        "\"origin_x\":",
+        "\"origin_y\":",
+        "\"elapsed_ms\":",
+    ] {
+        assert!(body.contains(key), "语义找图出参缺少 {key}: {body}");
+    }
+    // 语义找图独有的字段
+    assert!(body.contains("\"engine\":"), "应回显实际引擎: {body}");
+    assert!(body.contains("\"source\":\"image\""), "{body}");
+
+    assert_eq!(json_bool(&body, "found"), Some(true), "应检出目标: {body}");
+    assert!(
+        body.contains("\"class_name\":") && body.contains("\"class_id\":"),
+        "命中里应带类别: {body}"
+    );
+    // 图内坐标：source=image 时偏移恒为 0
+    assert_eq!(json_num(&body, "origin_x"), Some(0.0));
+    assert_eq!(json_num(&body, "origin_y"), Some(0.0));
+    // 首框中心必须落在 bus.png 尺寸内（1280x720 之类，给足余量）
+    let cx = json_num(&body, "center_x").expect("缺 center_x");
+    let cy = json_num(&body, "center_y").expect("缺 center_y");
+    assert!(
+        (0.0..5000.0).contains(&cx) && (0.0..5000.0).contains(&cy),
+        "中心坐标越界: ({cx}, {cy})"
+    );
+}
+
 #[test]
 #[ignore = "重量级集成测试：需要模型与 DLL"]
 fn danzijson_returns_char_boxes() {
@@ -501,11 +600,17 @@ fn engine_list_reports_capabilities() {
     assert_eq!(status, 200);
     assert!(body.contains("\"code\":0"), "code 应为 0: {body}");
 
-    // 9 = ppocr 三档 + ddddocr 两版 + yolo 四版
+    // 引擎数**按族**断言，不写死总数：检测模型是「用户自己的」，
+    // models/detect/yolo/ 里放几个就有几个，写死总数只会随用户放模型而变红。
     assert_eq!(
-        body.matches("\"name\":").count(),
-        9,
-        "应列出 9 个候选引擎: {body}"
+        body.matches("\"family\":\"ppocr\"").count(),
+        3,
+        "PP-OCR 三档: {body}"
+    );
+    assert_eq!(
+        body.matches("\"family\":\"ddddocr\"").count(),
+        2,
+        "DDDDOCR 两版: {body}"
     );
 
     // 本仓库只有 models/small 是真模型，它必须是「可用」的
@@ -520,6 +625,14 @@ fn engine_list_reports_capabilities() {
     // 只有 ppocr 支持逐字；YOLO 条目不能声称支持文本行
     assert!(body.contains("\"line_boxes\":true"));
     assert!(body.contains("\"detect\":false"));
+    // 出厂状态（detect/yolo/ 为空）下**不应该**有 yolo 条目——
+    // 程序不预置检测模型。有模型时这条自然跳过。
+    let has_user_model = !catalog::list_yolo_models(&workspace_root().join("models"), &[]).is_empty();
+    assert_eq!(
+        body.contains("\"family\":\"yolo\""),
+        has_user_model,
+        "yolo 条目应当且只应当在目录里有模型时出现: {body}"
+    );
 }
 
 #[test]

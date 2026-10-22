@@ -413,7 +413,7 @@ impl AppState {
                         let cleaned = note
                             .replace("（类名在加载时从模型元数据读取）", "")
                             .replace(
-                                &format!("（类名取自 labels.txt，共 {} 个）", caps.classes.len()),
+                                &format!("（类名来自标签文件，共 {} 个）", caps.classes.len()),
                                 "",
                             );
                         *note = format!("{cleaned} · 已加载 {} 类", caps.classes.len());

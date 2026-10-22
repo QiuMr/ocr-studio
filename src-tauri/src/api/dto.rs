@@ -178,10 +178,14 @@ pub struct DanziData {
 
 /// 找图请求参数（JSON 形态；multipart 形态用同名 form 字段）。
 ///
-/// 三种来源由端点决定，这里只做字段容器：
+/// 模板找图（`tuzhaotu*` / `jubingzhaotu*` / `pingmuzhaotu*`）三种来源由**端点路径**
+/// 决定，这里只做字段容器：
 /// - `tuzhaotu*` 用 `image`（调用方自己传搜索图）
 /// - `jubingzhaotu*` 用 `hwnd` 或 `title`（内部截窗口）
 /// - `pingmuzhaotu*` 用 `region`（内部截屏幕，缺省全屏）
+///
+/// 语义找图（`yuyizhaotu`）只有一个端点，来源由 `source` 字段给出，
+/// 阈值用 `conf` 而不是 `min_score`（前者是检测置信度、后者是模板相似度）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FindOptions {
     /// 搜索图 base64（`tuzhaotu*` 必填）
@@ -199,7 +203,7 @@ pub struct FindOptions {
     /// 窗口标题，精确匹配优先，找不到再按子串匹配
     #[serde(default)]
     pub title: Option<String>,
-    /// 搜索区域 `[x, y, w, h]`（屏幕绝对坐标），仅 `pingmuzhaotu*` 有效
+    /// 搜索区域 `[x, y, w, h]`（屏幕绝对坐标），仅截屏幕时有效
     #[serde(default)]
     pub region: Option<[i32; 4]>,
     /// 分数下限（NCC），缺省按端点预设：精准 0.92 / 容错 0.75
@@ -208,20 +212,42 @@ pub struct FindOptions {
     /// 最多返回几个命中，默认 1
     #[serde(default)]
     pub max_results: Option<usize>,
+
+    // ---- 以下字段只有语义找图（`/ocr/yuyizhaotu`）会读 ----
+    /// 去哪找：`image`（缺省）/ `screen` / `window`
+    #[serde(default)]
+    pub source: Option<String>,
+    /// 用哪个检测模型：`yolo`（缺省，= 目录里第一个）/ `yolo:<模型id>`
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// 检测置信度下限，缺省 0.25。给了 `min_score` 时按它兜底
+    #[serde(default)]
+    pub conf: Option<f32>,
+    /// 只保留这些 class_id；空/缺省 = 全部类别
+    #[serde(default)]
+    pub class_filter: Option<Vec<usize>>,
 }
 
 /// 单个命中。
+///
+/// 模板找图与语义找图**共用这一个结构**，脚本切模式不用改解析代码。
 #[derive(Debug, Clone, Serialize)]
 pub struct FindHitDto {
-    /// 左上角（屏幕绝对坐标；`tuzhaotu*` 为搜索图内坐标）
+    /// 左上角（屏幕绝对坐标；`source=image` 为搜索图内坐标）
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
     pub center_x: f64,
     pub center_y: f64,
-    /// 零均值 NCC，`-1..=1`
+    /// 模板找图是零均值 NCC（`-1..=1`）；语义找图是检测置信度（`0..=1`）
     pub score: f64,
+    /// 语义找图才有：命中的类别 id
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<usize>,
+    /// 语义找图才有：类别名（模型没写类名时回落 `class_{id}`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
 }
 
 /// 找图出参。
@@ -241,7 +267,8 @@ pub struct FindData {
     pub center_x: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub center_y: Option<f64>,
-    /// 模板尺寸（未命中时也返回，便于调用方算点击偏移）
+    /// 模板尺寸（未命中时也返回，便于调用方算点击偏移）。
+    /// 语义找图没有模板，这里给**首个命中框的尺寸**，未命中为 0。
     pub width: u32,
     pub height: u32,
     /// 命中数量
@@ -253,6 +280,9 @@ pub struct FindData {
     /// （`source=image` 时恒为 0）。
     pub origin_x: i32,
     pub origin_y: i32,
+    /// 语义找图才有：实际使用的检测引擎（`yolo` / `yolo:<id>`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
     pub elapsed_ms: u128,
 }
 

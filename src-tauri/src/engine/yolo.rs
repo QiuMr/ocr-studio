@@ -5,8 +5,10 @@
 //! v5 / v6 / v7 / v8 / v10 / v11 / v12 / v26 这类单输出 head 的导出。
 //!
 //! 探测的三件事（见 [`YoloLayout`]）：
-//! - **输出布局**：`[1, C, N]`（anchor-free，v8 系）还是 `[1, N, C]`（anchor-based，v5 系）。
+//! - **输出布局**：`[1, C, N]`（anchor-free，v8 系）还是 `[1, N, C]`（anchor-based，v5 系），
 //!   判据是哪一维更小——通道数（几十到几百）永远远小于候选数（几千到几万）；
+//!   还有第三种 **`[1, N, 6]` 的 NMS-free 端到端导出**（YOLOv10 / YOLO26 / YOLOE-26），
+//!   N 是 max_det（几百），6 = `x1,y1,x2,y2,conf,cls`，坐标已在输入图（letterbox）坐标系；
 //! - **有无 objectness**：`C == 5 + 类别数` 则有（`score = obj × cls`），
 //!   `C == 4 + 类别数` 则无（`score = cls`）。类别数优先取模型 metadata 的 `names`，
 //!   其次 labels.txt；两个都没有时用候选数对锚点网格（`8400` vs `25200`）兜底判断；
@@ -15,12 +17,15 @@
 //! **类名由模型自己带**（[`ModelMeta`]）：ultralytics 导出 ONNX 时会把
 //! `names` / `task` / `imgsz` 写进 model metadata，这里直接读——用户换自己的模型
 //! 不用再手写 labels.txt。labels.txt 只是给非 ultralytics 导出的兜底。
-//! 反过来，`task != detect` 的模型（segment / pose / obb / classify）必须**明确拒绝**：
-//! 它们的输出多出 mask 系数或关键点通道，按检测语义解码不会崩，只会给出一堆错类别的框。
+//!
+//! **分割模型（`task = segment`）也接受**：只取检测头，掩码系数通道按 `nm` 跳过。
+//! 这是 YOLOE 开放词汇模型的必经之路——官方只放 `-seg` 权重，导出后就是
+//! `[1, N, 6+nm]` 端到端 + 一个掩码原型输出。反过来，`pose` / `obb` / `classify`
+//! 必须**明确拒绝**：它们多出关键点/角度通道或根本没有框，按检测语义解码不会崩，
+//! 只会给出一堆错类别的框。
 //!
 //! 不支持的（会**明确报错**，不静默给垃圾框）：
-//! - v3 / v4 原始三尺度多输出 head（需要按 anchor 解码三个 feature map，另一套逻辑）；
-//! - 已内置 NMS 的端到端导出（如 YOLOv10 的 `[1, 300, 6]`）——候选数对不上锚点网格。
+//! - v3 / v4 原始三尺度多输出 head（需要按 anchor 解码三个 feature map，另一套逻辑）。
 //!
 //! 预处理与后处理严格对齐 ultralytics 的 predict 路径，验收方式是
 //! **与本机 ultralytics 逐框比对**（`tests/yolo_parity.rs`，IoU=1.0000 / conf 差=0）：
@@ -35,7 +40,7 @@
 //! 4. **NMS**：conf 过滤(0.25) → 按 conf 降序（并列时先出现者在前，与 torchvision
 //!    一致）→ 同类内贪心抑制（IoU 0.7）→ max_det 300 → 还原原图坐标 →
 //!    clip 到 `[0, w] × [0, h]`。NMS 在 **letterbox 坐标系**里做（ultralytics 也是），
-//!    之后才缩放回去。
+//!    之后才缩放回去。**端到端导出不再做抑制**（模型已内置），只过滤 + 截断。
 
 use std::path::{Path, PathBuf};
 
@@ -67,10 +72,14 @@ const PAD_VALUE: u8 = 114;
 /// 输出张量的排布方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputLayout {
-    /// `[1, C, N]`：v8 / v10 / v11 / v12 / v26 等 anchor-free 系
+    /// `[1, C, N]`：v8 / v11 / v12 等 anchor-free 系
     ChannelsFirst,
     /// `[1, N, C]`：v5 / v6 / v7 等 anchor-based 系
     AnchorsFirst,
+    /// `[1, N, 6]`：NMS-free 端到端导出（YOLOv10 / YOLO26 / YOLOE-26 仅检测导出），
+    /// N = max_det（几百），6 = `x1,y1,x2,y2,conf,cls`。模型**已内置 NMS**，
+    /// 我们只过滤 + 截断，不再做抑制。
+    EndToEnd,
 }
 
 impl OutputLayout {
@@ -78,6 +87,7 @@ impl OutputLayout {
         match self {
             OutputLayout::ChannelsFirst => "C×N",
             OutputLayout::AnchorsFirst => "N×C",
+            OutputLayout::EndToEnd => "N×6 端到端",
         }
     }
 }
@@ -94,13 +104,28 @@ pub struct YoloLayout {
     pub anchors: usize,
     /// 每个候选的通道数 C
     pub channels: usize,
+    /// 掩码系数通道数。0 = 纯检测模型；>0 = 分割模型（只取检测头，忽略掩码）
+    pub nm: usize,
 }
 
 impl YoloLayout {
     /// 给日志/状态页看的一句话。
     pub fn describe(&self) -> String {
+        let seg = if self.nm > 0 {
+            format!(" · 分割模型（忽略 {} 个掩码通道，只取检测头）", self.nm)
+        } else {
+            String::new()
+        };
+        if self.layout == OutputLayout::EndToEnd {
+            return format!(
+                "输出 [1,{n},{c}] / NMS-free 端到端（模型已内置 NMS）/ {s}x{s} 输入{seg}",
+                n = self.anchors,
+                c = self.channels,
+                s = self.input_size,
+            );
+        }
         format!(
-            "输出 [1,{c},{n}] / {} 布局 / {} / {}x{s} 输入",
+            "输出 [1,{c},{n}] / {} 布局 / {} / {}x{s} 输入{seg}",
             self.layout.as_str(),
             if self.has_objectness {
                 "带 objectness"
@@ -112,6 +137,24 @@ impl YoloLayout {
             n = self.anchors,
             s = self.input_size,
         )
+    }
+
+    /// 类别分占的通道数（去掉 4 个坐标、objectness、掩码系数）。
+    fn class_channels(&self) -> usize {
+        let base = match self.layout {
+            OutputLayout::ChannelsFirst => 4,
+            OutputLayout::AnchorsFirst => {
+                if self.has_objectness {
+                    5
+                } else {
+                    4
+                }
+            }
+            // 端到端固定 6 列：x1,y1,x2,y2,score,cls —— 类别是「1 个下标列」而不是 one-hot，
+            // 所以基础只算 4 个坐标 + 1 个分数，剩下的 1 列就是类别
+            OutputLayout::EndToEnd => 5,
+        };
+        self.channels.saturating_sub(base + self.nm)
     }
 
     /// anchor-free 的锚点总数（640 输入 → 80²+40²+20² = 8400）。
@@ -135,6 +178,7 @@ pub fn infer_layout(
     out_dims: &[i64],
     classes: usize,
     input_size: u32,
+    nm: usize,
 ) -> Result<YoloLayout, String> {
     if out_dims.len() != 3 {
         return Err(format!(
@@ -168,20 +212,38 @@ pub fn infer_layout(
     }
 
     let grid = YoloLayout::grid(input_size);
-    // 端到端导出（自带 NMS）的候选数远小于锚点网格，只可能是几百
+
+    // NMS-free 端到端导出：`[1, N, 6+nm]`（或转置的 `[1, 6+nm, N]`），
+    // 列 = `x1,y1,x2,y2,score,cls[,掩码系数…]`，N 是 max_det（几百）。
+    // 判据是**候选数远小于锚点网格**——raw head 的 N 恒等于网格数（8400）或其 3 倍（25200），
+    // 永远不会小于网格，所以这一支不会误吃 v5/v8 的 raw head。
+    // 覆盖 YOLOv10 / YOLO26 / YOLOE-26（分割导出，多出的列是掩码系数，解码时忽略）。
+    if anchors < grid && channels >= 6 {
+        return Ok(YoloLayout {
+            layout: OutputLayout::EndToEnd,
+            has_objectness: false,
+            input_size,
+            anchors,
+            channels,
+            nm: channels - 6,
+        });
+    }
+
+    // 剩下的候选数必须对得上锚点网格，否则是另一种我们不认识的导出
     if anchors != grid && anchors != grid * 3 && anchors < grid {
         return Err(format!(
-            "输出候选数 N={anchors} 对不上 {input_size} 输入的锚点网格（{grid} 或 {}）。\
-             这通常意味着模型已经内置了 NMS（如 YOLOv10 的 `[1,300,6]` 端到端导出）；\
-             请导出 raw head 版本（ultralytics: `yolo export ... nms=False`）",
+            "输出候选数 N={anchors} 对不上 {input_size} 输入的锚点网格（{grid} 或 {}），\
+             也不是 `[1,N,6]` 的 NMS-free 端到端导出。\
+             请用 ultralytics 导出单输出检测模型（yolo export format=onnx opset=12）",
             grid * 3
         ));
     }
 
-    // 有无 objectness：类别数已知时是硬判据，否则用锚点数兜底
-    let has_objectness = if classes > 0 && channels == 4 + classes {
+    // 有无 objectness：类别数已知时是硬判据（先扣掉掩码系数通道），否则用锚点数兜底
+    let class_plus = channels.saturating_sub(nm);
+    let has_objectness = if classes > 0 && class_plus == 4 + classes {
         false
-    } else if classes > 0 && channels == 5 + classes {
+    } else if classes > 0 && class_plus == 5 + classes {
         true
     } else if anchors == grid {
         // anchor-free 网格数 → 无 objectness
@@ -203,12 +265,13 @@ pub fn infer_layout(
             5 + classes
         } else {
             4 + classes
-        };
+        } + nm;
         if channels != expect {
             tracing::warn!(
-                "检测模型输出通道 {channels} 与「{classes} 个类别 + {}」应有的 {expect} 不一致，\
+                "检测模型输出通道 {channels} 与「{classes} 个类别 + {}{}」应有的 {expect} 不一致，\
                  类别名可能错位",
-                if has_objectness { "objectness" } else { "4 个坐标" }
+                if has_objectness { "objectness" } else { "4 个坐标" },
+                if nm > 0 { " + 掩码系数" } else { "" }
             );
         }
     }
@@ -219,6 +282,7 @@ pub fn infer_layout(
         input_size,
         anchors,
         channels,
+        nm,
     })
 }
 
@@ -244,6 +308,22 @@ fn probe_output_dims(sess: &ort::session::Session) -> Vec<i64> {
         Some(ValueType::Tensor { shape, .. }) => shape.iter().copied().collect(),
         _ => Vec::new(),
     }
+}
+
+/// 读第 `idx` 个输出的第 1 维。
+///
+/// 分割模型的第 2 个输出是掩码原型 `[1, nm, H, W]`，`nm` 就是这一维；
+/// 动态维度或读不到时返回 `None`。
+fn probe_output_dim1(sess: &ort::session::Session, idx: usize) -> Option<usize> {
+    let out = sess.outputs().get(idx)?;
+    if let ValueType::Tensor { shape, .. } = out.dtype() {
+        let dims: Vec<i64> = shape.iter().copied().collect();
+        let d = *dims.get(1)?;
+        if d > 0 {
+            return Some(d as usize);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +520,7 @@ fn parse_imgsz(raw: &str) -> Option<u32> {
 
 #[derive(Debug, Clone)]
 pub struct YoloConfig {
-    /// onnx 文件的完整路径。既可以是 `models/detect/yolo/model.onnx`，
+    /// onnx 文件的完整路径。既可以是 `models/detect/yolo/` 下的模型，
     /// 也可以是用户从任意目录加进来的模型（不复制文件）。
     pub path: PathBuf,
     /// 模型 id（`yolo:<id>` 的后半段）；`None` = 默认模型
@@ -481,21 +561,29 @@ impl YoloEngine {
 
         // 先读 metadata：类名 / task / imgsz 都在里面
         let meta = ModelMeta::read(&sess, &model_path);
-        if let Some(task) = meta.task.as_deref() {
-            if task != "detect" {
-                let why = match task {
-                    "segment" => "分割模型的输出多 32 个 mask 系数通道，按检测解会整体错位",
+        // 检测与分割都接受（分割只取检测头，忽略掩码）；姿态/旋转框/分类明确拒绝
+        let is_segment = match meta.task.as_deref() {
+            None | Some("detect") => false,
+            Some("segment") => true,
+            Some(other) => {
+                let why = match other {
                     "pose" => "姿态模型的输出多关键点通道",
                     "obb" => "旋转框模型的输出多角度通道，框也不是轴对齐的",
                     "classify" => "分类模型输出的是整图类别，根本没有检测框",
                     _ => "不是目标检测模型",
                 };
                 return Err(VisionError::NotReady(format!(
-                    "{} 的模型任务是 `{task}`：{why}。\
+                    "{} 的模型任务是 `{other}`：{why}。\
                      请用 ultralytics 的 `yolo export model=xxx.pt format=onnx`（检测权重）重新导出",
                     model_path.display()
                 )));
             }
+        };
+        if is_segment {
+            tracing::info!(
+                "{} 是分割模型：只取检测头，掩码分支会被忽略（YOLOE 开放词汇模型走的就是这条路）",
+                model_path.display()
+            );
         }
 
         let size = probe_input_size(&sess).or(meta.imgsz).unwrap_or(DEFAULT_SIZE);
@@ -529,15 +617,34 @@ impl YoloEngine {
         };
 
         let n_out = sess.outputs().len();
-        if n_out != 1 {
+        if n_out == 0 {
+            return Err(VisionError::NotReady(format!(
+                "{} 没有任何输出张量，不是可用的模型",
+                model_path.display()
+            )));
+        }
+        if n_out > 1 && !is_segment {
             return Err(VisionError::NotReady(format!(
                 "{} 有 {n_out} 个输出张量。多输出 head（v3/v4 原始导出）暂不支持，\
                  请用 ultralytics 导出单输出 ONNX",
                 model_path.display()
             )));
         }
+        // 分割模型的第 2 个输出是掩码原型 `[1, nm, H, W]`，nm 从它读；
+        // 多出的掩码系数通道在解码时会跳过，所以这里只需要知道 nm。
+        let nm = if is_segment {
+            probe_output_dim1(&sess, 1).unwrap_or(0)
+        } else {
+            0
+        };
+        if n_out > 1 {
+            tracing::info!(
+                "{} 有 {n_out} 个输出，只解码第 1 个（检测头），掩码分支（{nm} 通道）忽略",
+                model_path.display()
+            );
+        }
 
-        let layout = infer_layout(&probe_output_dims(&sess), meta.names.len(), size).map_err(
+        let layout = infer_layout(&probe_output_dims(&sess), meta.names.len(), size, nm).map_err(
             |why| VisionError::NotReady(format!("{} 不是可用的检测模型：{why}", model_path.display())),
         )?;
 
@@ -618,7 +725,13 @@ impl YoloEngine {
         let cands = decode(&p, layout)
             .ok_or_else(|| VisionError::Inference(format!("检测输出维度变了: {:?}", p.shape())))?;
 
-        let kept = nms(cands, opts);
+        let kept = if layout.layout == OutputLayout::EndToEnd {
+            // 模型已内置 NMS（NMS-free head）：只做 conf / 类别过滤与上限。
+            // 再做一次抑制反而可能删掉模型有意保留的框（端到端头本就输出非冗余框）。
+            postprocess_end2end(cands, opts)
+        } else {
+            nms(cands, opts)
+        };
 
         // letterbox 坐标 -> 原图坐标 -> clip 到图内（ultralytics 的 clip_boxes
         // 是闭区间 [0, w]/[0, h]，不是 [0, w-1]）
@@ -784,18 +897,22 @@ pub struct Candidate {
 ///
 /// - `ChannelsFirst`：`[1, C, N]`，值域已是概率，偏移 `c*N + n`；
 /// - `AnchorsFirst` + objectness：`[1, N, 5+C]`，`conf = obj * max_cls`，偏移 `n*C + ch`；
-/// - `AnchorsFirst` 无 objectness：`[1, N, 4+C]`，`conf = max_cls`。
+/// - `AnchorsFirst` 无 objectness：`[1, N, 4+C]`，`conf = max_cls`；
+/// - `EndToEnd`：`[1, N, 6+nm]`，模型已内置 NMS，行 = `x1,y1,x2,y2,score,cls[,掩码系数]`。
 ///
+/// 分割模型多出的掩码系数通道一律**跳过**（`layout.nm`），只取检测头。
 /// 返回 `None` 表示维度与探测结果不一致（交给调用方报错，而不是静默给出垃圾框）。
 pub fn decode(p: &ndarray::ArrayViewD<f32>, layout: YoloLayout) -> Option<Vec<Candidate>> {
     let s = p.shape();
     let n = layout.anchors;
     let ch = layout.channels;
-    let expect = match layout.layout {
-        OutputLayout::ChannelsFirst => [1, ch, n],
-        OutputLayout::AnchorsFirst => [1, n, ch],
+    let shape_ok = match layout.layout {
+        OutputLayout::ChannelsFirst => s == [1, ch, n],
+        OutputLayout::AnchorsFirst => s == [1, n, ch],
+        // 端到端：ultralytics 导出是 `[1, N, C]`；转置的 `[1, C, N]` 也认
+        OutputLayout::EndToEnd => s == [1, n, ch] || s == [1, ch, n],
     };
-    if s != expect {
+    if !shape_ok {
         return None;
     }
     let flat: &[f32] = p.as_slice()?; // 连续布局；ORT 输出总是连续的
@@ -803,7 +920,8 @@ pub fn decode(p: &ndarray::ArrayViewD<f32>, layout: YoloLayout) -> Option<Vec<Ca
     let mut out = Vec::with_capacity(n);
     match layout.layout {
         OutputLayout::ChannelsFirst => {
-            let c = ch - 4;
+            // 类别分通道数：扣掉 4 个坐标和掩码系数（分割模型）
+            let c = layout.class_channels();
             for i in 0..n {
                 let (best, score) = argmax(c, |k| flat[(4 + k) * n + i]);
                 let (cx, cy) = (flat[i], flat[n + i]);
@@ -820,7 +938,7 @@ pub fn decode(p: &ndarray::ArrayViewD<f32>, layout: YoloLayout) -> Option<Vec<Ca
         }
         OutputLayout::AnchorsFirst => {
             let base = if layout.has_objectness { 5 } else { 4 };
-            let c = ch - base;
+            let c = layout.class_channels();
             for i in 0..n {
                 let row = &flat[i * ch..(i + 1) * ch];
                 let (cx, cy, bw, bh) = (row[0], row[1], row[2], row[3]);
@@ -836,6 +954,43 @@ pub fn decode(p: &ndarray::ArrayViewD<f32>, layout: YoloLayout) -> Option<Vec<Ca
                     } else {
                         cls
                     },
+                });
+            }
+        }
+        OutputLayout::EndToEnd => {
+            // 模型已内置 NMS：行 = `x1,y1,x2,y2,score,cls[,掩码系数…]`，坐标已在
+            // 输入图（letterbox）坐标系里，不需要再解码偏移或算中心点。
+            // 未被占用的槽位通常是 score≈0 的填充行，靠 conf 阈值滤掉。
+            // 分割模型多出的列（掩码系数）直接跳过，只读前 6 个。
+            let rows_first = s[2] == ch;
+            for i in 0..n {
+                let (x1, y1, x2, y2, score, cls) = if rows_first {
+                    let b = i * ch;
+                    (
+                        flat[b],
+                        flat[b + 1],
+                        flat[b + 2],
+                        flat[b + 3],
+                        flat[b + 4],
+                        flat[b + 5],
+                    )
+                } else {
+                    (
+                        flat[i],
+                        flat[n + i],
+                        flat[2 * n + i],
+                        flat[3 * n + i],
+                        flat[4 * n + i],
+                        flat[5 * n + i],
+                    )
+                };
+                out.push(Candidate {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    class_id: cls.round().max(0.0) as usize,
+                    score,
                 });
             }
         }
@@ -895,6 +1050,22 @@ pub fn nms(cands: Vec<Candidate>, opts: &DetectOptions) -> Vec<Candidate> {
     result
 }
 
+/// 端到端（NMS-free）模型的后处理：**不再做抑制**，只按 conf / 类别过滤 + 降序 + 截断。
+///
+/// 与 [`nms`] 的唯一区别就是不跑抑制循环——端到端头输出的本来就是非冗余框。
+pub fn postprocess_end2end(cands: Vec<Candidate>, opts: &DetectOptions) -> Vec<Candidate> {
+    let mut kept: Vec<Candidate> = cands
+        .into_iter()
+        .filter(|c| {
+            c.score >= opts.conf_thresh
+                && (opts.class_filter.is_empty() || opts.class_filter.contains(&c.class_id))
+        })
+        .collect();
+    kept.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    kept.truncate(MAX_DET);
+    kept
+}
+
 /// 两框 IoU（xyxy）。
 fn iou(a: &Candidate, b: &Candidate) -> f32 {
     let ix1 = a.x1.max(b.x1);
@@ -935,7 +1106,7 @@ pub fn load_labels(path: &Path) -> Vec<String> {
 
 /// 便捷构造：在「目录扫描 + 配置里的外部路径」合并后的清单里找模型并加载。
 ///
-/// `model_id = None` 取默认模型（`detect/yolo/model.onnx` 优先）。
+/// `model_id = None` 取默认模型（目录扫描结果里的第一个）。
 pub fn engine_from_root(
     models_root: &Path,
     external: &[String],
@@ -1021,16 +1192,16 @@ mod tests {
     #[test]
     fn infer_layout_v8_channels_first() {
         // YOLOv8n 导出：84 = 4 + 80 类，8400 = 80²+40²+20²
-        let l = infer_layout(&[1, 84, 8400], 80, 640).unwrap();
+        let l = infer_layout(&[1, 84, 8400], 80, 640, 0).unwrap();
         assert_eq!(l.layout, OutputLayout::ChannelsFirst);
         assert!(!l.has_objectness);
-        assert_eq!((l.channels, l.anchors), (84, 8400));
+        assert_eq!((l.channels, l.anchors, l.nm), (84, 8400, 0));
     }
 
     #[test]
     fn infer_layout_v5_anchors_first_with_objectness() {
         // YOLOv5s 导出：85 = 5 + 80 类，25200 = 3 × 8400
-        let l = infer_layout(&[1, 25200, 85], 80, 640).unwrap();
+        let l = infer_layout(&[1, 25200, 85], 80, 640, 0).unwrap();
         assert_eq!(l.layout, OutputLayout::AnchorsFirst);
         assert!(l.has_objectness);
         assert_eq!((l.channels, l.anchors), (85, 25200));
@@ -1039,43 +1210,131 @@ mod tests {
     #[test]
     fn infer_layout_works_without_labels() {
         // 没有 labels.txt 时靠锚点网格判断：8400 = anchor-free，25200 = anchored
-        let free = infer_layout(&[1, 84, 8400], 0, 640).unwrap();
+        let free = infer_layout(&[1, 84, 8400], 0, 640, 0).unwrap();
         assert!(!free.has_objectness);
-        let anchored = infer_layout(&[1, 25200, 85], 0, 640).unwrap();
+        let anchored = infer_layout(&[1, 25200, 85], 0, 640, 0).unwrap();
         assert!(anchored.has_objectness);
     }
 
     #[test]
     fn infer_layout_reads_input_size_from_model() {
         // 320 输入的 v8n：40²+20²+10² = 2100
-        let l = infer_layout(&[1, 84, 2100], 80, 320).unwrap();
+        let l = infer_layout(&[1, 84, 2100], 80, 320, 0).unwrap();
         assert_eq!(l.input_size, 320);
         assert_eq!(l.anchors, 2100);
     }
 
     #[test]
-    fn infer_layout_rejects_end_to_end_nms_output() {
-        // YOLOv10 端到端导出 [1, 300, 6]：候选数远小于网格
-        let e = infer_layout(&[1, 300, 6], 80, 640).unwrap_err();
-        assert!(e.contains("NMS"), "{e}");
+    fn infer_layout_accepts_end_to_end_nms_output() {
+        // YOLOv10 / YOLO26 的 NMS-free 端到端导出 [1, 300, 6]
+        let l = infer_layout(&[1, 300, 6], 80, 640, 0).unwrap();
+        assert_eq!(l.layout, OutputLayout::EndToEnd);
+        assert_eq!((l.anchors, l.channels, l.nm), (300, 6, 0));
+        assert!(!l.has_objectness);
+        // 转置写法 [1, 6, 300] 也认
+        let t = infer_layout(&[1, 6, 300], 80, 640, 0).unwrap();
+        assert_eq!(t.layout, OutputLayout::EndToEnd);
+        // 但 v5 系「1 类 + objectness」的 raw head（6 通道、N=25200）不能被误判成端到端
+        let raw = infer_layout(&[1, 25200, 6], 1, 640, 0).unwrap();
+        assert_ne!(raw.layout, OutputLayout::EndToEnd);
+        assert!(raw.has_objectness);
+    }
+
+    #[test]
+    fn infer_layout_handles_segment_models() {
+        // YOLOE-26 端到端分割导出：[1, 300, 38]，38 = 6 + 32 个掩码系数
+        let e = infer_layout(&[1, 300, 38], 1, 640, 32).unwrap();
+        assert_eq!(e.layout, OutputLayout::EndToEnd);
+        assert_eq!(e.nm, 32);
+        assert_eq!(e.class_channels(), 1);
+        // 原始分割 raw head：[1, 4+80+32, 8400]，扣掉掩码后仍是「4 + 80 类」
+        let r = infer_layout(&[1, 116, 8400], 80, 640, 32).unwrap();
+        assert_eq!(r.layout, OutputLayout::ChannelsFirst);
+        assert!(!r.has_objectness);
+        assert_eq!(r.nm, 32);
+        assert_eq!(r.class_channels(), 80);
     }
 
     #[test]
     fn infer_layout_rejects_multi_output_head() {
-        let e = infer_layout(&[], 80, 640).unwrap_err();
+        let e = infer_layout(&[], 80, 640, 0).unwrap_err();
         assert!(e.contains("v3"), "{e}");
         // 四维（带额外 batch 维）同样拦掉
-        let e2 = infer_layout(&[1, 1, 84, 8400], 80, 640).unwrap_err();
+        let e2 = infer_layout(&[1, 1, 84, 8400], 80, 640, 0).unwrap_err();
         assert!(e2.contains("三段式"), "{e2}");
     }
 
     #[test]
     fn infer_layout_flags_dynamic_dims() {
-        let e = infer_layout(&[1, 84, -1], 80, 640).unwrap_err();
+        let e = infer_layout(&[1, 84, -1], 80, 640, 0).unwrap_err();
         assert!(e.contains("动态"), "{e}");
     }
 
     // ------------------------------------------------------------- decode
+
+    #[test]
+    fn decode_end_to_end_rows_and_skips_suppression() {
+        // [1, 3, 6]：槽 0 真框，槽 1 与槽 0 完全重叠（同类、分低），槽 2 是 score=0 的填充
+        let mut a = ndarray::Array3::<f32>::zeros((1, 3, 6));
+        for (i, v) in [10.0f32, 20.0, 30.0, 40.0, 0.88, 2.0].iter().enumerate() {
+            a[[0, 0, i]] = *v;
+        }
+        for (i, v) in [10.0f32, 20.0, 30.0, 40.0, 0.50, 2.0].iter().enumerate() {
+            a[[0, 1, i]] = *v;
+        }
+        let layout = YoloLayout {
+            layout: OutputLayout::EndToEnd,
+            has_objectness: false,
+            input_size: 640,
+            anchors: 3,
+            channels: 6,
+            nm: 0,
+        };
+        let cands = decode(&a.view().into_dyn(), layout).unwrap();
+        assert_eq!(cands.len(), 3);
+        // 6 列按 x1,y1,x2,y2,score,cls 直读，不做中心点换算
+        assert!((cands[0].x1 - 10.0).abs() < 1e-6);
+        assert!((cands[0].y1 - 20.0).abs() < 1e-6);
+        assert!((cands[0].x2 - 30.0).abs() < 1e-6);
+        assert!((cands[0].y2 - 40.0).abs() < 1e-6);
+        assert_eq!(cands[0].class_id, 2);
+        assert!((cands[0].score - 0.88).abs() < 1e-6);
+        assert!(cands[2].score.abs() < 1e-6, "填充槽的 score 应为 0");
+
+        // 端到端后处理只过滤、不抑制：两个重叠同类框都该留下（与 nms 的区别）
+        let opts = DetectOptions {
+            conf_thresh: 0.25,
+            iou_thresh: 0.7,
+            class_filter: Vec::new(),
+        };
+        let kept = postprocess_end2end(cands.clone(), &opts);
+        assert_eq!(kept.len(), 2, "端到端不该跑抑制");
+        // 对照：普通 nms 会把重叠的那个抑制掉
+        assert_eq!(nms(cands, &opts).len(), 1);
+    }
+
+    #[test]
+    fn decode_end_to_end_segmentation_skips_mask_columns() {
+        // [1, 2, 8]：6 + 2 个掩码系数；掩码列塞满大数值，不能被当成分数
+        let mut a = ndarray::Array3::<f32>::zeros((1, 2, 8));
+        for (i, v) in [10.0f32, 20.0, 30.0, 40.0, 0.77, 1.0].iter().enumerate() {
+            a[[0, 0, i]] = *v;
+        }
+        a[[0, 0, 6]] = 99.0;
+        a[[0, 0, 7]] = 99.0;
+        let layout = YoloLayout {
+            layout: OutputLayout::EndToEnd,
+            has_objectness: false,
+            input_size: 640,
+            anchors: 2,
+            channels: 8,
+            nm: 2,
+        };
+        let cands = decode(&a.view().into_dyn(), layout).unwrap();
+        assert_eq!(cands[0].class_id, 1);
+        assert!((cands[0].score - 0.77).abs() < 1e-6, "掩码列不该污染分数");
+        assert!((cands[0].x2 - 30.0).abs() < 1e-6);
+    }
 
     #[test]
     fn decode_v8_transposed_layout() {
@@ -1094,6 +1353,7 @@ mod tests {
             input_size: 640,
             anchors: 3,
             channels: 6,
+            nm: 0,
         };
         let view = a.view().into_dyn();
         let cands = decode(&view, layout).unwrap();
@@ -1119,6 +1379,7 @@ mod tests {
             input_size: 640,
             anchors: 1,
             channels: 7,
+            nm: 0,
         };
         let view = a.view().into_dyn();
         let cands = decode(&view, layout).unwrap();
@@ -1141,6 +1402,7 @@ mod tests {
             input_size: 640,
             anchors: 1,
             channels: 6,
+            nm: 0,
         };
         let cands = decode(&a.view().into_dyn(), layout).unwrap();
         assert!((cands[0].score - 0.7).abs() < 1e-6);

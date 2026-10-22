@@ -32,7 +32,7 @@ export const GROUP_LABEL: Record<EndpointGroup, string> = {
 
 export const GROUP_DESC: Record<EndpointGroup, string> = {
   ocr: "把图片里的文字提取成字符串或坐标",
-  find: "在一张大图里找一张小图的位置，返回坐标",
+  find: "在一张大图里找东西的位置，返回坐标。模板找图比像素，语义找图靠模型认目标",
   vision: "识别物体类别，或者先框出区域再认字",
   status: "查服务和引擎当前状态，脚本启动时先探一下",
 };
@@ -142,6 +142,23 @@ export const ENDPOINTS: Endpoint[] = [
     note: "窗口被遮挡也没关系：截的是窗口内容，不是屏幕画面。",
     params: [{ name: "template", required: true, desc: "小图 base64 或 template_file" }],
     returns: "同上",
+  },
+  {
+    method: "POST",
+    path: "/ocr/yuyizhaotu",
+    title: "语义找图：不用模板，让模型直接找目标",
+    note: "和上面几条最大的区别是**不用准备模板截图**——换个皮肤、按下态变了照样能找到。代价是只认得模型见过的类别（YOLOE-26 的提示在导出时就烘焙进权重了，换目标要重新导模型）。返回结构和模板找图完全一样，脚本换个路径就能用。",
+    params: [
+      { name: "source", desc: "去哪找：image（默认）/ screen / window" },
+      { name: "image", desc: "source=image 时的搜索图 base64" },
+      { name: "engine", desc: "用哪个检测模型，默认 yolo（目录里第一个）" },
+      { name: "conf", desc: "置信度阈值 0~1，默认 0.25" },
+      { name: "class_filter", desc: "只保留这些类别 id，如 [0,2]；不传 = 全部" },
+      { name: "hwnd", desc: "source=window 时的窗口句柄，或改用 title" },
+      { name: "max_results", desc: "最多返回几个，默认 1" },
+    ],
+    returns:
+      "与模板找图同构：found、x、y、center_x、center_y、score、matched、matches[]、origin_x/origin_y；额外多 engine 和命中里的 class_id/class_name",
   },
 
   // ------------------------------------------------------------------ 看图

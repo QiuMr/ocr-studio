@@ -1,20 +1,21 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（检测模型可自定义 + 类名从模型读 + 外壳改浅灰）
+> 最后更新：2026-10-22（语义找图接口 + 检测模型出厂彻底清空）
 
 ---
 
 ## 0. 一句话现状
 
 **M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），此后是用户反馈驱动的
-几轮改造。**本轮（10-22 晚）：检测模型变成「用户自己的」**——可以放多个、可以指向任意
-路径（不复制文件）；**类名自动从 ONNX metadata 读**，`labels.txt` 退化为兜底；
-**标题栏与左侧栏改成通用浅灰**（外壳浅灰 / 内容纯白）。
-82 单测 + 22 重量级全绿，PP-OCR 精度**零变化**，`yolo_parity` 仍 8/8 IoU=1.0000。
+几轮改造。**本轮（10-22 深夜）：加了「语义找图」——用检测模型直接找目标，不用模板图**。
+端点是 `/ocr/yuyizhaotu`（15 个端点里的第 15 个），**出参与模板找图完全同构**，
+已有脚本换个路径就能用；同时把**出厂检测模型彻底删掉**（`detect/yolo/` 出厂为空，
+放什么模型完全由用户决定），并支持 **NMS-free 端到端输出**（v10 / v26 / YOLOE-26）。
+92 单测 + 冒烟测试全绿，PP-OCR 精度**零变化**。
 
-上一轮完成：目标检测去版本化（结构按 ONNX 形状探测）、标题栏 ACL 权限修复、
-侧栏去蓝、全局垂直对齐、DirectML 假象纠正。
+上一轮完成：检测模型可自定义（多模型 + 任意路径 + 类名从 ONNX metadata 读）、
+外壳改浅灰、标题栏 ACL 权限修复、侧栏去蓝、DirectML 假象纠正。
 
 M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）、M3.0 抽象层、
 M3.1 DDDDOCR、M3.2 目标检测、M3.3 pipeline 串联均已完成。
@@ -27,9 +28,26 @@ M3.1 DDDDOCR、M3.2 目标检测、M3.3 pipeline 串联均已完成。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
 M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）、
-M3.2（目标检测）、M3.3（pipeline 串联）、M4 界面反馈修复。
+M3.2（目标检测）、M3.3（pipeline 串联）、M4 界面反馈修复、M5 托盘常驻、M6 语义找图。
 
-### 0.0 本轮（检测模型自定义 + 外壳浅灰）做了什么
+### 0.0 本轮（语义找图 + 出厂模型清空）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 出厂模型清空 | `list_yolo_models` 不再特判 `model.onnx`：同级 `*.onnx` 按文件名排序，**第一个就是默认模型**。`models/detect/yolo/` 出厂**只有 README.txt**，没有模型就是没有检测引擎，前端给空状态引导。用户的原话是「yolo 为什么要有内置的模型？应该全部用户自定义」 |
+| 语义找图端点 | `POST /ocr/yuyizhaotu`。来源由 body 的 `source` 给（`image`/`screen`/`window`，复用 `acquire_haystack` 的三来源逻辑），阈值字段是 `conf`（检测置信度，缺省 0.25），`class_filter` 按类别 id 过滤。**出参与模板找图同构**（`found`/`x`/`y`/`center_x`/`center_y`/`score`/`matches`/`origin_x`/`origin_y`），只多 `engine` 与命中里的 `class_id`/`class_name` |
+| 出参同构怎么保证 | 抽出 `assemble_find_data()`，模板路径（`to_find_data`）与语义路径（`to_find_data_from_dets`）**共用同一段扁平字段与偏移换算**。语义路径按置信度降序排、`max_results` 夹到 1~64，`width`/`height` 用首个命中框的尺寸（没有模板可回填） |
+| NMS-free 端到端 | `OutputLayout` 增第三态 `EndToEnd`（`[1, N, 6+nm]`），判据 `anchors < grid && channels >= 6`——**不会误吃 v5 系 6 通道 raw head**。解锁 YOLOv10 / YOLO26 / YOLOE-26 |
+| 分割模型只取检测头 | `YoloLayout.nm` 记掩码系数通道数，`class_channels()` 扣掉它。YOLOE 官方只放 `-seg` 权重，`[1,300,38]` 里后 32 列是掩码，解码时跳过 |
+| YOLOE-26 导出 | `scripts/fetch_yoloe.py`：文本提示 / 视觉提示 / 免提示三模式。**本机只能走视觉提示**——文本提示要 ultralytics 的 CLIP fork，要拉 git 子模块，而本机 MSYS 的 `sh` fork 是坏的（`0xC0000142`）。视觉提示用参考图 + 框提取 vpe，不需要文本编码器 |
+| ultralytics 导出 bug | 8.4.13 的 YOLOE-26 `model.fuse()` 对 end2end head 调 `head.fuse(None)` 把 cv3/cv4 置空，随后 `head.fuse(pe)` 又去 fuse 已置空的 cv3/cv4 → `TypeError`。脚本内打补丁：end2end 时只 fuse `one2one_cv3/one2one_cv4` |
+| 前端 | 找图页顶部加「模板找图 / 语义找图」切换。语义模式下 ① 从「选模板」换成「选检测模型」（列出 `models/detect/yolo/` + 外部路径的模型），高级面板换成「置信度下限 + 只保留类别 id」，结果列表带类别名与 `#id`，徽章多显示实际引擎 |
+| 验收 | 导出 `yoloe26_bus.onnx`（11.1MB，`output0 [1,300,38]` + `output1 [1,32,160,160]`，`task=segment`）后用 Rust 引擎冒烟：检出 1 个目标 `0.955 (17,233)-(802,740)`，与 COCO 参考框 `(31.5,230.7,801.4,775.8)` 几乎重合。`cargo test --lib` **92 通过**；`cargo check` 干净；前端 `tsc --noEmit` 干净 |
+
+待办：`api_smoke` 这次被沙箱规则拦住写入 exe（既存环境问题，不是代码问题），下次换目标目录再跑；
+v5/v7 onnx 到手后跑 parity；C 盘长期只剩 1~2GB。
+
+### 0.0.1 上轮（检测模型自定义 + 外壳浅灰）做了什么
 
 | 项 | 结果 |
 |---|---|
@@ -749,6 +767,118 @@ failed to run command cargo metadata --no-deps --format-version 1: program not f
 
 ---
 
+## 7.8 M6：语义找图（YOLOE-26）+ 出厂检测模型清空（2026-10-22 深夜）
+
+### 用户的两句话决定了这一轮
+
+1. 「**yolo 为什么要有内置的模型？有什么用？yolo 模型应该全部有用户自定义啊**」
+2. 「**我还想加个 yoloe 26 的模型用来找图用，这个模型现在没人这么干，应该是个卖点**」
+
+第 1 句把「出厂自带一个 COCO 示例模型」这件事推翻了。原来的理由其实是**怕用户没有模型时
+界面空着不好看**——但那是「界面好看」压过「产品诚实」。改完之后 `detect/yolo/` 出厂为空，
+界面给空状态引导（去设置页加模型 / 用脚本导出），反而更清楚。
+
+第 2 句是这一轮的主线：**模板找图要求「长得一模一样」，语义找图不挑外观**。
+
+### 语义找图与模板找图的关系（这是设计核心）
+
+| | 模板找图 | 语义找图 |
+|---|---|---|
+| 怎么定义「要找什么」 | 截一张小图当模板 | 选一个检测模型 |
+| 判据 | 零均值 NCC（像素相似度） | 检测置信度 |
+| 抗外观变化 | 差：换皮肤、按下态、缩放都会掉出阈值 | 好：模型认的是语义 |
+| 覆盖面 | 好：任何「长得像」的东西都能找 | 差：只认得模型见过的类别 |
+| 换目标 | 换一张模板图 | **换模型**（YOLOE-26 的提示在导出时就烘焙进权重了） |
+
+两者**不是替代关系**，所以前端是「切换」而不是「升级」，并且在切换按钮旁放了
+一句话说明各自代价。文档里也照这个口径写，不吹成「模板找图被淘汰了」。
+
+**出参同构是刻意设计**：脚本作者从 `tuzhaotu1` 切到 `yuyizhaotu` 只需要改路径字符串。
+这是「已有用户不被打扰」的底线——加了新能力却让老脚本要改代码，等于把新能力的成本
+转嫁给了用户。实现上靠 `assemble_find_data()` 一处组装，两条路径共用。
+
+### NMS-free 端到端：为什么必须单独一个 `OutputLayout`
+
+YOLOv10 / YOLO26 / YOLOE-26 的导出是 `[1, N, 6]`（N 是几百），6 列是
+`x1,y1,x2,y2,score,cls`，**坐标已经是 letterbox 输入图坐标系**，且模型内部已经做完 NMS。
+
+风险是**误判**：v5/v6/v7 的 raw head 是 `[1, N, 5+cls]`，当类别数少（比如 1 类 → 6 通道）
+时形状和端到端输出**长得一样**。判据用 `anchors < grid`：raw head 的候选数 = 网格点数
+（8400 / 8400+2100+525…），端到端的 N 是 `max_det`（300 这类），数量级差得远。
+单测 `infer_layout_accepts_end_to_end_nms_output` 与 `decode_end_to_end_rows_and_skips_suppression`
+把这条钉住了。
+
+`class_channels()` 的 base 值要注意：`ChannelsFirst`/`AnchorsFirst` 是 4 或 5
+（坐标 + 可选 objectness），而 `EndToEnd` 是 **5**（4 坐标 + 1 个类别下标列），
+**不是 6**。写成 6 会让 `nm` 少算一个，分割模型解出来的类别就是错的
+（这轮真踩了：单测 `infer_layout_handles_segment_models` 当场红）。
+
+### YOLOE-26 导出：本机只能走视觉提示
+
+YOLOE 有三种提示方式：文本提示 / 视觉提示 / 免提示（内置 4585 类词表）。
+
+- **文本提示装不上**：需要 ultralytics 的 CLIP fork，`pip install git+https://github.com/ultralytics/CLIP.git`
+  要拉 git 子模块，而**本机 MSYS 的 `sh` fork 是坏的**（`0xC0000142 = STATUS_DLL_INIT_FAILED`，
+  见 §6），装不上。
+- **视觉提示不需要文本编码器**：给一张参考图 + 一个框，模型自己提取 vpe（visual prompt
+  embedding），`set_classes([名字], embeddings=vpe)` 就能导出。
+- **免提示**要 4585 类的词表，导出体积大、且和「只找一类」的用途不匹配。
+
+所以 `scripts/fetch_yoloe.py` 的默认路径是 `visual`。另外两种模式也实现了，留给
+能装上 CLIP 的机器用。
+
+**导出时踩的坑（都是 ultralytics 8.4.13 自己的）**：
+
+| 症状 | 根因 | 处理 |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'clip'` | 文本提示依赖 CLIP | 改用视觉提示 |
+| `AttributeError: 'tuple' object has no attribute 'shape'` | 用 `YOLOEVPDetectPredictor` 配了 `-seg` 模型 | 改用 `YOLOEVPSegPredictor` |
+| `TypeError: 'NoneType' object is not iterable`（export 时） | `model.fuse()` 对 end2end head 先 `head.fuse(None)` 把 cv3/cv4 置空，再 `head.fuse(pe)` 去 fuse 已置空的 cv3/cv4 | 脚本内打补丁 `_patched_fuse`：end2end 只 fuse `one2one_cv3/one2one_cv4` |
+| 补丁里 `NameError: name 'torch' is not defined` | 闭包作用域 | 在 `_patched_fuse` 内部 `import torch` |
+
+**产出与验证**：`yoloe26_bus.onnx`（11.1MB，`output0 [1,300,38]` + `output1 [1,32,160,160]`，
+metadata `task=segment`、`names={0:'yoloe26_bus'}`）。Rust 引擎冒烟
+（`cargo test --test yoloe_smoke -- --ignored`）检出 1 个目标 `0.955 (17,233)-(802,740)`，
+与 COCO 参考框 `(31.5,230.7,801.4,775.8)` 几乎重合 —— **核心卖点成立**。
+
+### 前端：语义找图不是新页面，是同一个面板的另一种模式
+
+`FindPanel` 顶部加切换。差异只在两处：
+
+- **① 从「选模板图」换成「选检测模型」**。没有模型时不显示灰按钮（小白看到灰按钮只会
+  困惑），改成一个虚线信息条「没有检测模型 —— 去「设置」页添加 .onnx」。
+- **高级面板**：模板模式给「匹配精度 / 自定义阈值」，语义模式给「置信度下限 / 只保留类别 id」。
+  「最多返回」两者共用。
+
+**语义模式不暴露 `iou`**：NMS-free 端到端模型（v10/v26/yoloe）根本不做 NMS，
+暴露一个只在部分模型上生效的参数比不暴露更让人困惑。
+
+结果列表在有 `class_id` 时显示类别名 + `#id`，并把分数标签从「相似」换成「置信」——
+同一个字段名在两套语义下含义不同，标签必须跟着变。
+
+### 本轮验收
+
+| 项 | 结果 |
+|---|---|
+| `cargo check --lib` | 干净（无 warning） |
+| `cargo test --lib` | **92 passed / 0 failed / 1 ignored**（89 + 3 个新单测） |
+| 新增单测 | `semantic_find_shares_template_find_shape`（出参同构 + 排序 + 偏移换算）、`semantic_find_empty_gives_zero_size`、`semantic_find_clamps_max_results` |
+| `paths_table_covers_all_endpoints` | 14 → **15**，`closest_path_knows_semantic_find` 验证打错也能猜回来 |
+| YOLOE 冒烟 | `yoloe_smoke` 通过（见上） |
+| 前端 | `tsc --noEmit` 干净 |
+| 文档同步 | `endpoints.ts`（接口页事实源）、`docs/PLAN.md` 第 6 节表、`pack_exe.ps1` 里的 `使用说明.txt`（14 → 15 个接口） |
+
+### 这轮没做但已评估的（按用户要求记录，含原因）
+
+| 项 | 结论 |
+|---|---|
+| 语义找图按来源分三个端点（对齐 `tuzhaotu*` 的命名习惯） | **不做**。模板找图分三组是历史产物；新端点用 body 里的 `source` 更省心（少一层「该调哪个路径」的判断），路径名也不会长到 `jubingyuyizhaotu` 这种程度 |
+| 暴露 `iou` 参数 | **不做**。见上，对 NMS-free 模型无效 |
+| 前端做「从结果反选类别」的交互（点命中项 → 只找这一类） | **不做**。类别名要等模型加载后才有（`/engine/list` 不加载模型），此时只能按 id 过滤；做一个半残的交互不如先给 id 输入框 |
+| YOLOE 文本提示导出 | **不做（本机做不了）**。CLIP 装不上，原因见上；脚本里留了 `text` 模式 |
+
+---
+
 ## 8. 关键文件索引
 
 ```
@@ -760,6 +890,7 @@ scripts/dump_det_boxes.py         # dump det 全精度框与 unclip 中间量
 scripts/probe_*.py                # 行为探针（OpenCV 定点 / pyclipper 语义 / EP 差异 / LSB 敏感性）
 scripts/gen_resize_fixture.py     # 生成 resize 的 cv2 对齐 fixture 测试
 scripts/fetch_misans_font.py      # 下载 MiSans 切片并生成本地 @font-face CSS
+scripts/fetch_yoloe.py            # YOLOE-26 导出（visual/text/promptfree），含 ultralytics 8.4.13 的 fuse 补丁
 scripts/e2e_find.py               # 找图端到端验证（真实屏幕 -> HTTP 服务 -> 坐标比对）
 scripts/models.manifest.json      # 三档模型 URL + SHA256
 scripts/fetch_models.ps1          # 下载校验模型
@@ -770,6 +901,6 @@ src-tauri/src/capture.rs          # 屏幕/窗口截图（BitBlt + PrintWindow�
 src-tauri/src/match.rs            # 模板匹配（金字塔 NCC + NMS），模块名暴露为 matcher
 src-tauri/src/api/                # HTTP 层（dto / state / routes）
 src-tauri/src/commands.rs         # Tauri invoke 命令
-src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke / capture_live
+src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke / capture_live / yolo_parity / yoloe_smoke
 src/assets/fonts/misans/          # MiSans 切片（fetch_misans_font.py 生成，勿手改）
 ```

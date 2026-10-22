@@ -81,10 +81,14 @@ models/
       old/{det.onnx,rec.onnx,charset.txt}
   detect/
     yolo/
-      model.onnx                        ← 约定位置，「默认模型」就是它
+      README.txt                        ← 出厂只有它（2026-10-22 起不预置任何模型）
       <任意名>.onnx                     ← 同目录多模型，id = 文件名
       <子目录>/<任意名>.onnx             ← 兼容旧的 v8/ 分层，id = 子目录名
 ```
+
+**默认模型 = 同级 `*.onnx` 按文件名排序后的第一个**。早期实现硬编码 `model.onnx`
+优先，2026-10-22 用户明确要求去掉（「yolo 为什么要有内置的模型？应该全部用户自定义」）：
+出厂目录为空，没有模型就是没有检测引擎，由前端给空状态引导。
 
 兼容规则：**旧路径 `models/{tiny,small,medium}/` 继续有效**——`catalog::ppocr_dir`
 先看新路径下有没有 `det.onnx`，没有再回退旧路径。这样老用户的模型不用搬家
@@ -346,6 +350,55 @@ ERROR 日志然后跳过**，整体仍返回 Ok。所以「会话建成功」不
   各自可加载，`/vision/detect` 回显规范化后的引擎名（不再回显旧写法 `yolo:v8`）；
 - `yolo_parity` 仍 **8/8 框 IoU=1.0000、conf 差=0.0000**（类名来源变了，框没变）。
 
+### 6.6 语义找图 + NMS-free 端到端（2026-10-22 深夜，用户要求）
+
+**动机**：用户要「加个 YOLOE-26 用来找图，这个模型现在没人这么干，应该是个卖点」。
+模板找图（零均值 NCC）要求「长得一模一样」——游戏换个皮肤、按钮变按下态就失配；
+开放词汇检测模型认的是语义，不挑外观。两者**不是替代关系**（模板找图的覆盖面更广），
+所以做成同一面板的两种模式，而不是把模板找图换掉。
+
+**端点**：`POST /ocr/yuyizhaotu`。来源由 body 的 `source` 给（`image`/`screen`/`window`），
+复用 `acquire_haystack` 的三来源逻辑；阈值字段 `conf`（缺省 0.25），`class_filter` 过滤类别。
+**不暴露 `iou`**：NMS-free 端到端模型根本不做 NMS，暴露一个只在部分模型上生效的参数
+比不暴露更让人困惑。
+
+**出参同构**（这是设计上的硬要求，不是顺手）：`assemble_find_data()` 是唯一组装点，
+`to_find_data`（模板）与 `to_find_data_from_dets`（语义）都调它。语义路径按置信度降序排、
+`max_results` 夹到 1~64、`width`/`height` 用首个命中框尺寸（没有模板可回填）。
+额外字段 `engine` 与命中里的 `class_id`/`class_name` 都带 `skip_serializing_if`，
+所以**模板找图的出参一个字节都没变**。
+
+**NMS-free 端到端解码**：`OutputLayout` 增第三态 `EndToEnd`，形状 `[1, N, 6+nm]`，
+6 列是 `x1,y1,x2,y2,score,cls`，坐标已在 letterbox 输入图坐标系、模型内部已做完 NMS。
+
+判据是 `anchors < grid && channels >= 6`。**必须是 `anchors < grid` 而不是只看通道数**：
+v5/v6/v7 的 raw head 是 `[1, N, 5+cls]`，类别数少（1 类 → 6 通道）时形状与端到端
+一模一样，只看通道数会误判。raw head 的候选数 = 网格点总数（8400 / 8400+2100+525…），
+端到端的 N 是 `max_det`（300 这类），数量级差得远。
+
+**`class_channels()` 的 base 值**：`ChannelsFirst`/`AnchorsFirst` 是 4 或 5
+（坐标 + 可选 objectness），`EndToEnd` 是 **5**（4 坐标 + 1 个类别下标列），**不是 6**。
+写成 6 会让 `nm` 少算一个，分割模型解出来的类别就整体错位
+（这轮真踩了，单测 `infer_layout_handles_segment_models` 当场红）。
+
+**分割模型**：`YoloLayout.nm` 记掩码系数通道数，`class_channels()` 扣掉它，
+`decode` 的 `EndToEnd` 分支只取前 6 列。YOLOE 官方只放 `-seg` 权重，
+`[1,300,38]` 里后 32 列是掩码原型系数——跳过即可，不需要掩码原型那个输出。
+
+**YOLOE-26 导出**（`scripts/fetch_yoloe.py`）：三种提示方式里本机只能走**视觉提示**，
+文本提示依赖 ultralytics 的 CLIP fork（要拉 git 子模块，本机 MSYS `sh` fork 坏、
+`0xC0000142`）；免提示要 4585 类词表，与「只找一类」的用途不匹配。
+
+**ultralytics 8.4.13 的导出 bug（必须打补丁）**：`model.fuse()` 对 end2end head 会先调
+`head.fuse(None)` 把 `cv3/cv4` 置空，随后 `head.fuse(pe)` 又去 fuse 已置空的 `cv3/cv4`
+→ `TypeError: 'NoneType' object is not iterable`。补丁：end2end 时只 fuse
+`one2one_cv3/one2one_cv4`。补丁函数内要 `import torch`（闭包作用域，否则 `NameError`）。
+
+**验收**：`yoloe26_bus.onnx`（11.1MB，`output0 [1,300,38]` + `output1 [1,32,160,160]`，
+`task=segment`）经 Rust 引擎检出 1 个目标 `0.955 (17,233)-(802,740)`，
+与 COCO 参考框 `(31.5,230.7,801.4,775.8)` 几乎重合。
+`cargo test --test yoloe_smoke -- --ignored` 通过；`cargo test --lib` 92 通过。
+
 ## 7. 不做的事（已评估，记录原因）
 
 - **不做动态插件（加载任意 .dll / .so）**：安全面太大，而实际需求只是有限几种引擎。
@@ -353,3 +406,8 @@ ERROR 日志然后跳过**，整体仍返回 Ok。所以「会话建成功」不
 - **不做多引擎同时常驻**：DirectML 显存有限，两张 det 模型就可能 OOM。用 LRU 单活。
 - **不改现有 `/ocr/*` 的默认输出结构**：已对接的脚本（易语言/按键精灵）依赖字段名，
   改一次就会全线崩，宁可加新端点。
+- **语义找图不按来源分三个端点**：模板找图的 `tuzhaotu*`/`jubingzhaotu*`/`pingmuzhaotu*`
+  分三组是历史产物；新端点用 body 里的 `source` 更省心（调用方少一层「该调哪个路径」的
+  判断），路径名也不会长到 `jubingyuyizhaotu` 这种程度。
+- **不做出厂检测模型**：见 §3。原来的理由是「没有模型时界面空着不好看」，但那是
+  「界面好看」压过「产品诚实」——改成空状态引导反而更清楚。

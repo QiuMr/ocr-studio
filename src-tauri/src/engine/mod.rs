@@ -86,7 +86,7 @@ impl EngineSpec {
         }
     }
 
-    /// 默认目标检测模型（`detect/yolo/model.onnx`，没有则列表里的第一个）。
+    /// 默认目标检测模型（目录扫描结果里的第一个；出厂目录为空，所以由用户决定）。
     pub fn yolo() -> Self {
         Self {
             kind: EngineKind::Yolo,

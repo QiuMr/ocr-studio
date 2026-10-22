@@ -571,14 +571,17 @@ export function SettingsPage() {
             </Badge>
           </div>
           <CardDescription>
-            你要是训练过 YOLO 模型（v5~v12、v26 都行），把导出的 onnx 加进来，识别页就能选它找物体。
+            程序**不预置**检测模型——这是你自己的模型工作台。把导出的 onnx 加进来，
+            识别页就能选它找物体（v5~v12、v26，以及 YOLOE 开放词汇模型都行）。
             没有模型也不影响认字。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           {models.length === 0 ? (
-            <div className="rounded-lg bg-neutral-50/70 px-3 py-4 text-center text-[12px] leading-5 text-neutral-500">
-              还没有检测模型。加一个之后，识别页的「识别方式」里会多出「找物体」这一项。
+            <div className="rounded-lg bg-neutral-50/70 px-3 py-4 text-[12px] leading-5 text-neutral-500">
+              还没有检测模型。两种加法：把 .onnx 丢进下面的「模型目录」，
+              或点「添加模型」指向任意位置的文件（只记路径、不复制）。
+              加好之后，识别页的「识别方式」里会多出「找物体」这一项。
             </div>
           ) : (
             models.map((m, i) => {

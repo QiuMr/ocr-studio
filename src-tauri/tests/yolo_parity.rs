@@ -2,7 +2,10 @@
 //!
 //! 参考值由 `scripts/ref_yolo.py` 生成：用 ultralytics 跑**同一份导出的 onnx**
 //! （而不是 .pt），这样比对差异只可能来自我们的预处理/解码/NMS。
-//! 参考文件：`models/detect/yolo/v8/ref_bus.json` / `ref_zidane.json`。
+//! 参考文件：`models/_fixtures/detect/yolo/ref_bus.json` / `ref_zidane.json`。
+//!
+//! 模型与参考都放在 `models/_fixtures/`（**开发夹具**，不进分发包、也不被
+//! 产品扫描）：产品的 `models/detect/yolo/` 出厂是空的，检测模型全由用户提供。
 //!
 //! 测试图用 **PNG**（`assets/bus.png` / `assets/zidane.png`，由官方 jpg 转存）：
 //! JPEG 解码各家实现有 ±1 的 IDCT 抖动（cv2 vs image crate），会把 conf 推动约
@@ -38,13 +41,14 @@ fn ensure_dylib_path() {
 
 fn load_engine(device: Device) -> YoloEngine {
     let root = workspace_root();
-    // 走目录发现（而不是硬编码路径）：顺便验证「多个模型 / 旧的 detect/yolo/v8/」都能找到
-    let model = ocr_studio_lib::engine::catalog::default_yolo_model(&root.join("models"), &[])
+    // 夹具根目录：目录结构与产品一致（detect/yolo/…），走真实的目录发现逻辑
+    let fixture_root = root.join("models").join("_fixtures");
+    let model = ocr_studio_lib::engine::catalog::default_yolo_model(&fixture_root, &[])
         .unwrap_or_else(|| {
             panic!(
-                "没有找到检测模型（{}），用 scripts/fetch_yolo.ps1 导出，或 \
-                 ultralytics export format=onnx opset=12 imgsz=640 后放到 detect/yolo/model.onnx",
-                root.join("models/detect/yolo").display()
+                "没有找到检测模型夹具（{}）。这是开发夹具，不应为空；\
+                 若被误删，用 scripts/fetch_yolo.ps1 重新导出后放到该目录",
+                fixture_root.join("detect/yolo").display()
             )
         });
     YoloEngine::load(YoloConfig {
@@ -94,7 +98,9 @@ fn iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
 fn check_reference(file: &str, image: &str) {
     ensure_dylib_path();
     let root = workspace_root();
-    let ref_path = ocr_studio_lib::engine::catalog::yolo_model_dir(&root.join("models")).join(file);
+    let ref_path =
+        ocr_studio_lib::engine::catalog::yolo_model_dir(&root.join("models").join("_fixtures"))
+            .join(file);
     let payload: RefPayload = serde_json::from_str(
         &std::fs::read_to_string(&ref_path).expect("读参考 JSON 失败"),
     )

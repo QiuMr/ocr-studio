@@ -141,6 +141,7 @@ models/<level>/
 | POST | `/ocr/jubingzhaotu2` | hwnd + template | 同上 容错 |
 | POST | `/ocr/pingmuzhaotu1` | template(+region) | 同上 精准 |
 | POST | `/ocr/pingmuzhaotu2` | template(+region) | 同上 容错 |
+| POST | `/ocr/yuyizhaotu` | source + 检测模型 | 语义找图，出参与模板找图同构 |
 | GET | `/ocr/health` | — | {status, model, device} |
 
 约定：图像支持 `multipart/form-data` 或 `application/json` 的 base64（二选一实现，默认 base64 兼容脚本党习惯）。

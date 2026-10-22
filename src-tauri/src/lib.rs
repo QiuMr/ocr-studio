@@ -416,6 +416,7 @@ pub fn run() {
             commands::set_autostart,
             commands::models_root,
             commands::find_image,
+            commands::find_semantic,
             commands::screen_preview,
             commands::list_windows,
             commands::get_logs,

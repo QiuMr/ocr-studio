@@ -10,15 +10,15 @@
 //! models/
 //!   ocr/ppocr/<level>/{det,rec,cls}.onnx + keys.txt   ← 新
 //!   ocr/ddddocr/<variant>/{det,rec}.onnx + charset.txt ← 新
-//!   detect/yolo/model.onnx                             ← 约定位置，默认模型
-//!   detect/yolo/<任意名>.onnx                          ← 同目录多模型，按文件名区分
+//!   detect/yolo/<任意名>.onnx                          ← 检测模型，**出厂为空**
 //!   detect/yolo/<子目录>/<任意名>.onnx                  ← 兼容旧的 v8/ 分层
 //!   <tiny|small|medium>/...                            ← 旧路径，继续有效
 //! ```
 //!
-//! 目标检测的模型是**用户自己的**：既可以往 `detect/yolo/` 丢多个 onnx，
-//! 也可以在设置里「添加模型」直接指向任意路径（存在 `config.json` 的
-//! `detect_models` 里，不复制文件）。两条来源在 [`list_yolo_models`] 里合并。
+//! 目标检测的模型是**用户自己的**：出厂不预置任何检测模型（这是「模型工作台」，
+//! 不是「送你一个模型」）。用户既可以往 `detect/yolo/` 丢多个 onnx，也可以在
+//! 设置里「添加模型」直接指向任意路径（存在 `config.json` 的 `detect_models` 里，
+//! 不复制文件）。两条来源在 [`list_yolo_models`] 里合并；**列表第一个即默认模型**。
 
 use std::path::{Path, PathBuf};
 
@@ -82,28 +82,23 @@ fn is_onnx(p: &Path) -> bool {
 
 /// 扫描 `detect/yolo/` 下所有 onnx，再并上配置里的外部路径。
 ///
-/// 顺序即优先级：`detect/yolo/model.onnx` 永远排第一（它就是「默认模型」），
-/// 然后是同级其它 onnx、子目录里的 onnx（兼容旧的 `v8/` 分层），最后是外部路径。
-/// 同一个 id 撞车时依次尝试「加父目录名」「加序号」，保证下拉里的选项不重复。
+/// 顺序即优先级：先同级 onnx（按文件名排序，顺序稳定），再一级子目录里的 onnx
+/// （兼容旧的 `v8/` 分层），最后是外部路径。**列表第一个就是「默认模型」**
+/// （`engine` 参数不写 id 时用它）——出厂时这个目录是空的，所以默认模型完全由
+/// 用户决定。同一个 id 撞车时依次尝试「加父目录名」「加序号」，保证选项不重复。
 pub fn list_yolo_models(root: &Path, external: &[String]) -> Vec<YoloModel> {
     let dir = yolo_dir(root);
     let mut paths: Vec<PathBuf> = Vec::new();
 
-    // 1) 约定的默认模型
-    let top = dir.join("model.onnx");
-    if top.is_file() {
-        paths.push(top);
-    }
-    // 2) 同级其它 onnx；3) 一级子目录里的 onnx（旧的 detect/yolo/v8/model.onnx）
+    // 同级所有 onnx + 一级子目录里的 onnx（旧的 detect/yolo/v8/model.onnx）。
+    // 这里**不预置**任何模型：没有文件就是没有检测引擎，由前端给空状态引导。
     let mut same_level: Vec<PathBuf> = Vec::new();
     let mut nested: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_file() && is_onnx(&p) {
-                if p.file_name().and_then(|n| n.to_str()) != Some("model.onnx") {
-                    same_level.push(p);
-                }
+                same_level.push(p);
             } else if p.is_dir() {
                 if let Ok(inner) = std::fs::read_dir(&p) {
                     nested.extend(
@@ -361,8 +356,10 @@ pub fn discover(root: &Path, yolo_external: &[String]) -> Vec<EngineStatus> {
         let mut note = if classes.is_empty() {
             format!("{}（类名在加载时从模型元数据读取）", m.path.display())
         } else {
+            // 不写死「labels.txt」：也可能是同名的 `<模型名>.txt`（stem 兜底）。
+            // 说清来源文件反而更啰嗦，用户关心的是「有几个类」。
             format!(
-                "{}（类名取自 labels.txt，共 {} 个）",
+                "{}（类名来自标签文件，共 {} 个）",
                 m.path.display(),
                 classes.len()
             )
@@ -484,7 +481,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ocr_eng_yolo_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let y = dir.join("detect").join("yolo");
-        // 约定位置 + 同级第二个模型 + 旧的分版本子目录
+        // 同级两个模型 + 旧的分版本子目录
         touch(&y.join("model.onnx"));
         touch(&y.join("custom.onnx"));
         touch(&y.join("v8").join("model.onnx"));
@@ -497,15 +494,35 @@ mod tests {
             .collect();
         // 一个文件一条，但**不许出现按版本分裂的 v5/v8/v11**——名字来自文件名/目录名
         assert_eq!(dets.len(), 3, "三个 onnx 应各列一条");
-        // 顺序即优先级：约定的 model.onnx 永远第一，它就是默认模型
-        assert_eq!(dets[0].spec.key(), "yolo");
-        assert_eq!(dets[1].spec.key(), "yolo:custom");
+        // 顺序即优先级：同级按文件名排序，第一个就是默认模型（出厂目录是空的，
+        // 所以这里没有任何「约定的默认文件」）
+        assert_eq!(dets[0].spec.key(), "yolo"); // custom.onnx（字典序在前）
+        assert_eq!(dets[1].spec.key(), "yolo:model");
         assert_eq!(dets[2].spec.key(), "yolo:v8");
         assert!(dets.iter().all(|d| d.available && d.capabilities.detect));
         // 空行被过滤，CRLF 被去掉（labels.txt 是兜底来源）
         assert_eq!(dets[0].capabilities.classes, vec!["person", "car", "bike"]);
         // v8 目录下没有自己的 labels.txt
         assert!(dets[2].capabilities.classes.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yolo_empty_dir_means_no_engine() {
+        // 出厂状态：detect/yolo/ 里一个 onnx 都没有 → 不该凭空造出一个检测引擎，
+        // 更不该有「默认模型」。前端据此给空状态引导。
+        let dir = std::env::temp_dir().join(format!("ocr_eng_yoloempty_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        touch(&dir.join("detect").join("yolo").join("README.txt"));
+
+        assert!(list_yolo_models(&dir, &[]).is_empty());
+        assert!(default_yolo_model(&dir, &[]).is_none());
+        let y = discover(&dir, &[])
+            .into_iter()
+            .find(|e| e.spec.kind.family() == "yolo")
+            .unwrap();
+        assert!(!y.available, "没有模型时必须标成不可用");
 
         let _ = fs::remove_dir_all(&dir);
     }

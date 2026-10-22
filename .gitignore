@@ -33,6 +33,18 @@ target
 models/**/*.onnx
 models/**/*.txt
 *.dll
+# …但目录说明文件要进仓库：它会随分发包发出去，也是「本目录出厂为空」的
+# 唯一书面说明，丢在 .gitignore 后面就等于只有本机有。
+!models/detect/yolo/README.txt
+
+# 训练权重（*.pt 是几十 MB 的原始权重，运行时只要 onnx；
+# pack_exe.ps1 也会把它们从分发包里剔掉）
+*.pt
+
+# Python 与 ultralytics 的缓存（fetch_*.py 产生的）
+__pycache__/
+*.pyc
+.ultralytics/
 
 # 诊断脚本产出的临时截图 / 无头浏览器 profile
 scripts/_*.png

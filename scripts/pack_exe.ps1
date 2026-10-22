@@ -63,6 +63,24 @@ if (-not $SkipModels) {
       Remove-Item $f.FullName -Force
       Write-Host ("[INFO] - {0} ({1:N1} MB)" -f $f.Name, ($f.Length / 1MB))
     }
+    # 开发夹具（yolo 精度基线用的模型与参考框）不进分发包
+    $fixtures = Join-Path $dstModels "_fixtures"
+    if (Test-Path $fixtures) {
+      Remove-Item $fixtures -Recurse -Force
+      Write-Host "[INFO] - models/_fixtures（开发夹具）"
+    }
+    # 检测模型也不进分发包：models/detect/yolo/ 只留 README.txt。
+    # 程序**不预置**检测模型（用户明确要求「yolo 模型应该全部用户自定义」）。
+    # 开发机上放着的模型是拿来测的，跟着发出去就又变回「内置模型」了。
+    $detectDir = Join-Path $dstModels "detect\yolo"
+    if (Test-Path $detectDir) {
+      Get-ChildItem $detectDir -Recurse -File |
+        Where-Object { $_.Name -ne 'README.txt' } |
+        ForEach-Object {
+          Remove-Item $_.FullName -Force
+          Write-Host ("[INFO] - detect/yolo/{0}" -f $_.Name)
+        }
+    }
     Write-Host "[INFO] + models/"
   } else {
     Write-Warning "models 目录不存在，分发包将缺少模型"
@@ -93,13 +111,13 @@ OCR Studio —— 免安装版使用说明
 
 界面导航（左侧 5 项）
   服务   服务状态、地址复制、启停、能力概览、接入代码。第一次用先看这里。
-  接口   14 个接口的完整文档：参数、返回、错误码、请求示例，逐条可展开。
+  接口   15 个接口的完整文档：参数、返回、错误码、请求示例，逐条可展开。
   试跑   在界面里直接传图验证，不用写代码。识别结果带耗时和框坐标。
   日志   实时看后端日志，可按级别过滤、搜索。排查「为什么没返回」先看这里。
   设置   模型档位、推理设备、端口、检测模型管理。改完自动保存。
 
 
-接口一览（共 14 个，事实来源与「接口」页一致）
+接口一览（共 15 个，事实来源与「接口」页一致）
 
   认字（4 个）
     POST /ocr/shibie          整图识别，返回拼好的整段文字（最常用）
@@ -107,13 +125,15 @@ OCR Studio —— 免安装版使用说明
     POST /ocr/duohangjson     多行 JSON，每行的文本 + 四点坐标
     POST /ocr/danzijson       逐字定位，每个字一个框
 
-  找图（6 个）
+  找图（7 个）
     POST /ocr/tuzhaotu1       上传大图 + 小图，精准档找位置
     POST /ocr/tuzhaotu2       上传大图 + 小图，容错档找位置
     POST /ocr/pingmuzhaotu1   服务自己截屏找图，精准档（返回屏幕绝对坐标）
     POST /ocr/pingmuzhaotu2   服务自己截屏找图，容错档
     POST /ocr/jubingzhaotu1   截指定窗口找图，精准档（hwnd 或窗口标题）
     POST /ocr/jubingzhaotu2   截指定窗口找图，容错档
+    POST /ocr/yuyizhaotu      语义找图：不用模板，让检测模型直接找目标
+                              （source 选 image/screen/window；出参与上面几条完全一样）
 
   看图（2 个）
     POST /vision/detect       目标检测，框出物体类别（请求里要显式带 engine: yolo）
@@ -199,11 +219,15 @@ OCR Studio —— 免安装版使用说明
   改完记得把调用地址一起改掉。
 
 
-检测模型（可选）
-  自带的是通用 COCO 模型，检出的是人/车这类物体，不是文字块——这是正常的。
-  要用自己的模型：放进 models\detect\yolo\ 目录，或到「设置」页点「添加模型」
-  选一个 .onnx 文件（只记录路径，不复制文件）。类别名自动从模型里读，不用手写。
-  注意只支持单输出的检测模型；分割/姿态/分类模型会被拒绝并给出提示。
+检测模型（全部由你自己提供）
+  程序**不预置**任何检测模型——这是你自己的模型工作台。
+  要用检测功能，把 .onnx 检测模型放进 models\detect\yolo\ 目录，
+  或到「设置」页点「添加模型」选一个 .onnx（只记录路径，不复制文件）。
+  目录里每个 onnx 都是一个可选项，列表第一个是默认模型。
+  类别名自动从模型里读（ultralytics 导出会写进 metadata），不用手写 labels.txt。
+  只支持单输出的轴对齐检测模型（v5/v6/v7/v8/v10/v11/v12/v26、YOLOE，
+  含 NMS-free 端到端导出）；分割/姿态/旋转框/分类模型会被拒绝并说明原因。
+  没有放模型时，接口会明确提示「没有找到检测模型」，不会静默返回空。
 
 
 日志与排错

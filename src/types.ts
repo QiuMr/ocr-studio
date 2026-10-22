@@ -137,6 +137,9 @@ export interface PipelineResult {
 export type FindSource = "image" | "screen" | "window";
 export type FindMode = "exact" | "loose";
 
+/** 找图模式：模板找图（比像素） / 语义找图（用检测模型认目标） */
+export type FindKind = "template" | "semantic";
+
 export interface FindHit {
   x: number;
   y: number;
@@ -144,7 +147,12 @@ export interface FindHit {
   height: number;
   center_x: number;
   center_y: number;
+  /** 模板找图是相似度（NCC）；语义找图是检测置信度 */
   score: number;
+  /** 语义找图才有：命中类别 id */
+  class_id?: number;
+  /** 语义找图才有：命中类别名 */
+  class_name?: string;
 }
 
 export interface FindResult {
@@ -155,7 +163,7 @@ export interface FindResult {
   score?: number;
   center_x?: number;
   center_y?: number;
-  /** 模板尺寸（未命中时也有，便于算点击偏移） */
+  /** 模板尺寸；语义找图是首个命中框的尺寸，未命中为 0 */
   width: number;
   height: number;
   matched: number;
@@ -164,6 +172,8 @@ export interface FindResult {
   /** 搜索图左上角在屏幕上的坐标（source=image 时为 0） */
   origin_x: number;
   origin_y: number;
+  /** 语义找图才有：实际使用的检测引擎 */
+  engine?: string;
   elapsed_ms: number;
 }
 
@@ -177,6 +187,22 @@ export interface FindArgs {
   title?: string;
   region?: [number, number, number, number];
   min_score?: number;
+  max_results?: number;
+}
+
+/** 语义找图参数：没有模板字段，多了检测参数 */
+export interface SemanticFindArgs {
+  source: FindSource;
+  image?: string;
+  hwnd?: number;
+  title?: string;
+  region?: [number, number, number, number];
+  /** `yolo`（缺省 = 目录里第一个模型）/ `yolo:<模型id>` */
+  engine?: string;
+  /** 检测置信度下限，默认 0.25 */
+  conf?: number;
+  /** 只保留这些类别 id；空 = 全部 */
+  class_filter?: number[];
   max_results?: number;
 }
 

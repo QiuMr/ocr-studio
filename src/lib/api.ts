@@ -22,6 +22,7 @@ import type {
   ModelLevel,
   PipelineResult,
   RecognizeResult,
+  SemanticFindArgs,
   WindowInfo,
 } from "../types";
 
@@ -271,6 +272,31 @@ export async function findImage(args: FindArgs): Promise<FindResult & { preview?
         ? `/ocr/jubingzhaotu${suffix}`
         : `/ocr/tuzhaotu${suffix}`;
   const res = await fetch(`${HTTP_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as FindResult;
+}
+
+/**
+ * 语义找图：用目标检测模型直接找目标，**不需要模板图**。
+ *
+ * 出参与 `findImage` 同构（`found`/`x`/`y`/`center_x`/`center_y`/`matches`…），
+ * 额外多 `engine` 与命中里的 `class_id`/`class_name`。
+ * 只认得模型见过的类别——换目标要换模型，不是换模板。
+ */
+export async function findSemantic(
+  args: SemanticFindArgs,
+): Promise<FindResult & { preview?: string }> {
+  if (isTauri()) {
+    return invoke<FindResult & { preview?: string }>("find_semantic", { args });
+  }
+  const res = await fetch(`${HTTP_BASE}/ocr/yuyizhaotu`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args),

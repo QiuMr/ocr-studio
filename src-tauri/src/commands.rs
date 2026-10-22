@@ -893,6 +893,8 @@ impl FindArgs {
             region: self.region,
             min_score: self.min_score,
             max_results: self.max_results,
+            // 语义找图专有字段由 `find_semantic` 单独填，模板找图这条路径不用
+            ..Default::default()
         }
     }
 }
@@ -1028,6 +1030,122 @@ pub async fn find_image(args: FindArgs) -> Result<FindOut, String> {
 
     Ok(FindOut {
         data: routes::to_find_data(&hits, (ox, oy), (tw, th), source, t0),
+        preview,
+    })
+}
+
+/// 语义找图参数。与 `FindArgs` 的差别：**没有模板相关字段**（语义找图不用模板），
+/// 多了检测相关的 `engine` / `conf` / `class_filter`。
+#[derive(Debug, serde::Deserialize)]
+pub struct SemanticFindArgs {
+    /// `image` / `screen` / `window`
+    pub source: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub hwnd: Option<i64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
+    /// 用哪个检测模型：`yolo`（缺省 = 目录里第一个）/ `yolo:<模型id>`
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// 检测置信度下限，缺省 0.25
+    #[serde(default)]
+    pub conf: Option<f32>,
+    /// 只保留这些 class_id；空 = 全部
+    #[serde(default)]
+    pub class_filter: Option<Vec<usize>>,
+    /// 最多返回几个命中，默认 1
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+/// 语义找图：与 HTTP 的 `/ocr/yuyizhaotu` 等价，出参与 `find_image` 同构。
+///
+/// 用检测模型（YOLOE-26 这类）直接找目标，不需要准备模板图。代价是只认得
+/// 模型见过的类别；换目标要换模型，不是换模板。
+#[tauri::command]
+pub async fn find_semantic(
+    state: State<'_, Arc<AppState>>,
+    args: SemanticFindArgs,
+) -> Result<FindOut, String> {
+    let t0 = Instant::now();
+    let source = FindSource::parse(&args.source)
+        .ok_or_else(|| format!("未知来源 {:?}（可选 image/screen/window）", args.source))?;
+
+    let conf = args.conf.unwrap_or(0.25);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return Err(format!("conf 必须在 0..1，收到 {conf}"));
+    }
+    let class_filter = args.class_filter.clone().unwrap_or_default();
+
+    let opts = crate::api::dto::FindOptions {
+        image: args.image,
+        hwnd: args.hwnd,
+        title: args.title,
+        region: args.region,
+        conf: Some(conf),
+        class_filter: Some(class_filter.clone()),
+        ..Default::default()
+    };
+    let (hay, ox, oy) = routes::acquire_haystack(source, &opts, None).map_err(|e| e.message())?;
+
+    // 缺省 `yolo` = 目录里排第一的检测模型；回显规范化后的引擎名（理由同
+    // `/vision/detect`：`yolo:v8` 这类旧写法实际生效的是默认模型）。
+    let engine_raw = args
+        .engine
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "yolo".to_string());
+    let engine_label = crate::engine::EngineSpec::parse(&engine_raw)
+        .map(|s| s.key())
+        .unwrap_or_else(|_| engine_raw.clone());
+
+    let ocr_opts = OcrOptions {
+        image: String::new(),
+        level: None,
+        device: None,
+        use_cls: None,
+        engine: Some(engine_raw),
+        keyword: None,
+        conf: Some(conf),
+        iou: None,
+        class_filter: Some(class_filter.clone()),
+        detect_engine: None,
+    };
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        // 语义找图不暴露 iou：NMS-free 端到端模型（v10/v26/yoloe）不做 NMS，
+        // 暴露一个只在部分模型上生效的参数比不暴露更让人困惑。
+        iou_thresh: 0.7,
+        class_filter,
+    };
+
+    // 只有屏幕/窗口来源需要回传截图（图片来源调用方本来就有原图）
+    let need_preview = source != FindSource::Image;
+    let preview_src = if need_preview { Some(hay.clone()) } else { None };
+
+    let dets = state
+        .detect_objects(&ocr_opts, image::DynamicImage::ImageRgb8(hay), detect)
+        .await
+        .map_err(|e| e.message())?;
+
+    let preview = match preview_src {
+        Some(img) => Some(rgb_to_png_b64(&img)?),
+        None => None,
+    };
+
+    Ok(FindOut {
+        data: routes::to_find_data_from_dets(
+            &dets,
+            (ox, oy),
+            source,
+            Some(engine_label),
+            args.max_results.unwrap_or(1),
+            t0,
+        ),
         preview,
     })
 }

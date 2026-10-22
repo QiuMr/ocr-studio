@@ -2,8 +2,9 @@
 //!
 //! 全部端点均已实现：
 //! - 识别类：`/ocr/shibie`、`/ocr/zhaozi`、`/ocr/duohangjson`
-//! - 找图类：`/ocr/tuzhaotu1|2`（传图）、`/ocr/jubingzhaotu1|2`（截窗口）、
+//! - 找图类（模板）：`/ocr/tuzhaotu1|2`（传图）、`/ocr/jubingzhaotu1|2`（截窗口）、
 //!   `/ocr/pingmuzhaotu1|2`（截屏幕）
+//! - 找图类（语义）：`/ocr/yuyizhaotu`（用检测模型直接找目标，不需要模板图）
 //! - 状态：`/ocr/health`
 //!
 //! 找图三组的后缀语义：`1` = 精准（NCC ≥ 0.92），`2` = 容错（NCC ≥ 0.72）。
@@ -111,6 +112,7 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_JU2, post(jubingzhaotu2))
         .route(P_PINGMU1, post(pingmuzhaotu1))
         .route(P_PINGMU2, post(pingmuzhaotu2))
+        .route(P_YUYI, post(yuyizhaotu))
         .route(P_HEALTH, get(health))
         .route(P_ENGINES, get(engine_list))
         .route(P_DETECT, post(vision_detect))
@@ -141,6 +143,8 @@ const P_JU1: &str = "/ocr/jubingzhaotu1";
 const P_JU2: &str = "/ocr/jubingzhaotu2";
 const P_PINGMU1: &str = "/ocr/pingmuzhaotu1";
 const P_PINGMU2: &str = "/ocr/pingmuzhaotu2";
+/// 语义找图：一个端点，来源由 body 里的 `source` 指定（模板找图才按来源分三组）
+const P_YUYI: &str = "/ocr/yuyizhaotu";
 const P_HEALTH: &str = "/ocr/health";
 const P_ENGINES: &str = "/engine/list";
 const P_DETECT: &str = "/vision/detect";
@@ -148,7 +152,7 @@ const P_PIPELINE: &str = "/vision/pipeline";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
-    P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1, P_PINGMU2,
+    P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1, P_PINGMU2, P_YUYI,
     P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE,
 ];
 
@@ -813,6 +817,109 @@ async fn find_image(
     .into_response()
 }
 
+/// POST /ocr/yuyizhaotu —— 语义找图：用目标检测模型直接找目标，**不需要模板图**。
+///
+/// 与模板找图（`tuzhaotu*` / `pingmuzhaotu*` / `jubingzhaotu*`）的取舍：
+/// - 模板找图要求「长得一模一样」——图标换个皮肤、按钮按下态就失配；
+///   语义找图不挑外观，认得「这是个按钮」就行（YOLOE-26 这类开放词汇模型尤其如此）。
+/// - 代价：只认得模型见过的类别。YOLOE-26 的提示在导出 ONNX 时就烘焙进权重了，
+///   导出后改不了类别，换目标要重新导一个模型（`scripts/fetch_yoloe.py`）。
+///
+/// **出参与模板找图完全一致**（`found`/`x`/`y`/`center_x`/`center_y`/`score`/
+/// `matches`/`origin_x`/`origin_y`），额外多出 `engine` 与命中里的
+/// `class_id`/`class_name`。已有脚本把端点路径一换就能用。
+async fn yuyizhaotu(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let parsed = match parse_find(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let opts = parsed.opts;
+
+    // 来源：body 里的 source（缺省 image——不需要窗口句柄，最不容易失败）
+    let source = match opts
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => match FindSource::parse(s) {
+            Some(s) => s,
+            None => {
+                return ApiError::BadRequest(format!(
+                    "未知 source {s:?}（可选 image / screen / window）"
+                ))
+                .into_response()
+            }
+        },
+        None => FindSource::Image,
+    };
+
+    // conf 是主字段；给了 min_score 就当别名用（脚本从模板找图切过来时常常只改路径）
+    let conf = opts.conf.or(opts.min_score.map(|v| v as f32)).unwrap_or(0.25);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return ApiError::BadRequest(format!("conf 必须在 0..1，收到 {conf}")).into_response();
+    }
+
+    let (hay, off_x, off_y) =
+        match acquire_haystack(source, &opts, parsed.image_bytes.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
+        };
+
+    // 语义找图必须走检测引擎。缺省 `yolo` = 目录里排第一的那个检测模型，
+    // 传 OCR 引擎名会得到 1002（不支持该能力），错误提示由引擎层给出。
+    let engine_raw = opts
+        .engine
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "yolo".to_string());
+    // 回显规范化后的引擎名，理由同 /vision/detect：`yolo:v8` 这类旧写法
+    // 实际生效的是默认模型，原样回显会让人以为版本号还有意义。
+    let engine_label = crate::engine::EngineSpec::parse(&engine_raw)
+        .map(|s| s.key())
+        .unwrap_or_else(|_| engine_raw.clone());
+
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        // 语义找图不暴露 iou：NMS-free 端到端模型（v10/v26/yoloe）根本不做 NMS，
+        // 暴露一个只在部分模型上生效的参数，比不暴露更容易让人困惑。
+        iou_thresh: 0.7,
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+    let ocr_opts = OcrOptions {
+        image: String::new(),
+        level: None,
+        device: None,
+        use_cls: None,
+        engine: Some(engine_raw),
+        keyword: None,
+        conf: Some(conf),
+        iou: None,
+        class_filter: opts.class_filter.clone(),
+        detect_engine: None,
+    };
+
+    let dets = match state
+        .detect_objects(&ocr_opts, DynamicImage::ImageRgb8(hay), detect)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    Json(ApiResp::ok(to_find_data_from_dets(
+        &dets,
+        (off_x, off_y),
+        source,
+        Some(engine_label),
+        opts.max_results.unwrap_or(1),
+        t0,
+    )))
+    .into_response()
+}
+
 /// 把匹配结果组装成出参。HTTP 层与 Tauri 命令层共用，避免两处坐标换算逻辑漂移。
 pub(crate) fn to_find_data(
     hits: &[matcher::MatchHit],
@@ -834,10 +941,78 @@ pub(crate) fn to_find_data(
                 center_x: cx + off_x as f64,
                 center_y: cy + off_y as f64,
                 score: h.score,
+                class_id: None,
+                class_name: None,
             }
         })
         .collect();
 
+    // 模板尺寸在未命中时也要给（调用方靠它算点击偏移），所以显式传进来
+    assemble_find_data(matches, (tw, th), offset, source, None, t0)
+}
+
+/// 把检测结果组装成**与模板找图同构**的出参（语义找图用）。
+///
+/// 坐标换算、扁平字段、`origin_x/origin_y` 全部与 `to_find_data` 走同一条路，
+/// 已有脚本把端点路径一换即可，不用改解析代码。
+pub(crate) fn to_find_data_from_dets(
+    dets: &[crate::engine::Detection],
+    offset: (i32, i32),
+    source: FindSource,
+    engine: Option<String>,
+    max_results: usize,
+    t0: Instant,
+) -> FindData {
+    let (off_x, off_y) = offset;
+    let mut matches: Vec<FindHitDto> = dets
+        .iter()
+        .map(|d| {
+            // 检测框是轴对齐的：p0 = 左上，p2 = 右下
+            let (x0, y0) = (d.points[0].0, d.points[0].1);
+            let (x1, y1) = (d.points[2].0, d.points[2].1);
+            FindHitDto {
+                x: x0.round() as i32 + off_x,
+                y: y0.round() as i32 + off_y,
+                width: (x1 - x0).round().max(0.0) as u32,
+                height: (y1 - y0).round().max(0.0) as u32,
+                center_x: (x0 + x1) / 2.0 + off_x as f64,
+                center_y: (y0 + y1) / 2.0 + off_y as f64,
+                score: d.score,
+                class_id: Some(d.class_id),
+                class_name: Some(d.class_name.clone()),
+            }
+        })
+        .collect();
+
+    // 置信度高的在前——脚本读 `x`/`y` 拿到的应该是「最像的那个」
+    matches.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    matches.truncate(max_results.clamp(1, MAX_DET_RESULTS));
+
+    // 没有模板，用首个命中框的尺寸充当 width/height（未命中为 0）
+    let size = matches
+        .first()
+        .map(|h| (h.width, h.height))
+        .unwrap_or((0, 0));
+    assemble_find_data(matches, size, offset, source, engine, t0)
+}
+
+/// 语义找图最多返回几个命中。比模板找图（上限 64）小一档：
+/// 检测模型一屏最多也就检出几十个目标，再多的返回量只会让脚本难处理。
+const MAX_DET_RESULTS: usize = 64;
+
+/// 命中列表 → 出参。扁平字段统一取**第一个**命中，两条组装路径共用这一段。
+fn assemble_find_data(
+    matches: Vec<FindHitDto>,
+    (width, height): (u32, u32),
+    offset: (i32, i32),
+    source: FindSource,
+    engine: Option<String>,
+    t0: Instant,
+) -> FindData {
     let first = matches.first().cloned();
     FindData {
         found: !matches.is_empty(),
@@ -846,13 +1021,16 @@ pub(crate) fn to_find_data(
         score: first.as_ref().map(|h| h.score),
         center_x: first.as_ref().map(|h| h.center_x),
         center_y: first.as_ref().map(|h| h.center_y),
-        width: tw,
-        height: th,
+        width,
+        height,
         matched: matches.len(),
         matches,
         source: source.name().to_string(),
-        origin_x: off_x,
-        origin_y: off_y,
+        // 上面各坐标已经是「图内坐标 + offset」的屏幕绝对坐标；这里再单独回填
+        // 一份偏移原值：前端要用它把绝对坐标换回图内坐标（多屏时原点可能是负数）。
+        origin_x: offset.0,
+        origin_y: offset.1,
+        engine,
         elapsed_ms: t0.elapsed().as_millis(),
     }
 }
@@ -913,6 +1091,11 @@ async fn parse_find(req: Request) -> Result<ParsedFind, ApiError> {
                         "min_score" => opts.min_score = txt.trim().parse().ok(),
                         "max_results" => opts.max_results = txt.trim().parse().ok(),
                         "region" => opts.region = parse_region_str(&txt),
+                        // 语义找图专有字段
+                        "source" => opts.source = Some(txt),
+                        "engine" => opts.engine = Some(txt),
+                        "conf" => opts.conf = txt.trim().parse().ok(),
+                        "class_filter" => opts.class_filter = parse_id_list(&txt),
                         _ => {}
                     }
                 }
@@ -1187,7 +1370,7 @@ mod tests {
     /// 那样 404 提示会指错地方。
     #[test]
     fn paths_table_covers_all_endpoints() {
-        assert_eq!(PATHS.len(), 14, "端点数量变了就要同步 PATHS");
+        assert_eq!(PATHS.len(), 15, "端点数量变了就要同步 PATHS");
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
         }
@@ -1202,9 +1385,84 @@ mod tests {
     fn closest_path_suggests_typo() {
         assert_eq!(closest_path("/ocr/shibei"), Some("/ocr/shibie"));
         assert_eq!(closest_path("/ocr/zhaotu1"), Some("/ocr/tuzhaotu1"));
+        assert_eq!(closest_path("/ocr/yuyizhaot"), Some("/ocr/yuyizhaotu"));
         // 完全不相干就别乱猜，返回 None 让提示退化成「看接口页」
         assert_eq!(closest_path("/favicon.ico"), None);
         assert_eq!(closest_path("/"), None);
+    }
+
+    fn det(points: [(f64, f64); 4], class_id: usize, score: f64) -> crate::engine::Detection {
+        crate::engine::Detection {
+            points,
+            class_id,
+            class_name: "button".to_string(),
+            score,
+        }
+    }
+
+    /// 语义找图出参与模板找图**同构**：脚本换路径就能用，不该出现字段差异。
+    #[test]
+    fn semantic_find_shares_template_find_shape() {
+        let dets = vec![
+            det([(10.0, 20.0), (110.0, 20.0), (110.0, 70.0), (10.0, 70.0)], 3, 0.4),
+            det(
+                [(200.0, 300.0), (300.0, 300.0), (300.0, 360.0), (200.0, 360.0)],
+                3,
+                0.9,
+            ),
+        ];
+        let d = to_find_data_from_dets(
+            &dets,
+            (100, 50),
+            FindSource::Window,
+            Some("yolo".to_string()),
+            1,
+            Instant::now(),
+        );
+        assert!(d.found);
+        // 置信度高的排前面，扁平字段取它（脚本读 data.x 拿到的应该是「最像的」）
+        assert_eq!(d.matched, 1);
+        assert_eq!(d.x, Some(300));
+        assert_eq!(d.y, Some(350));
+        assert_eq!(d.score, Some(0.9));
+        assert_eq!(d.center_x, Some(350.0));
+        assert_eq!(d.center_y, Some(380.0));
+        // 没有模板，width/height 用首个命中框的尺寸
+        assert_eq!((d.width, d.height), (100, 60));
+        // 偏移是「图内坐标 → 屏幕绝对坐标」的换算量，前端靠它反算
+        assert_eq!((d.origin_x, d.origin_y), (100, 50));
+        assert_eq!(d.source, "window");
+        assert_eq!(d.engine.as_deref(), Some("yolo"));
+        assert_eq!(d.matches[0].class_name.as_deref(), Some("button"));
+    }
+
+    /// 未命中不能 panic，尺寸给 0（语义找图没有模板可回填）。
+    #[test]
+    fn semantic_find_empty_gives_zero_size() {
+        let d = to_find_data_from_dets(
+            &[],
+            (0, 0),
+            FindSource::Image,
+            Some("yolo".to_string()),
+            5,
+            Instant::now(),
+        );
+        assert!(!d.found);
+        assert_eq!(d.matched, 0);
+        assert_eq!((d.width, d.height), (0, 0));
+        assert!(d.x.is_none() && d.center_x.is_none() && d.score.is_none());
+        assert_eq!(d.source, "image");
+    }
+
+    /// max_results 会被夹到上限，别让脚本要求 10 万条就真返回 10 万条。
+    #[test]
+    fn semantic_find_clamps_max_results() {
+        let dets: Vec<_> = (0..3)
+            .map(|i| det([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)], i, 0.5))
+            .collect();
+        let d = to_find_data_from_dets(&dets, (0, 0), FindSource::Image, None, 0, Instant::now());
+        // 0 → 夹到 1
+        assert_eq!(d.matched, 1);
     }
 
     #[test]

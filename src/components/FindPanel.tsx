@@ -1,6 +1,8 @@
 ﻿import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AppWindow,
+  Boxes,
+  Brain,
   Check,
   ChevronDown,
   Copy,
@@ -33,10 +35,26 @@ import { EmptyState } from "./ui/empty-state";
 import { Callout } from "./ui/callout";
 import { Hint } from "./ui/hint";
 import { ImageViewer } from "./ImageViewer";
-import { fileToBase64, findImage, imageSize, listWindows, screenPreview } from "../lib/api";
+import {
+  detectModels,
+  fileToBase64,
+  findImage,
+  findSemantic,
+  imageSize,
+  listWindows,
+  screenPreview,
+} from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
 import { cn } from "../lib/utils";
-import type { FindHit, FindMode, FindResult, FindSource, WindowInfo } from "../types";
+import type {
+  DetectModel,
+  FindHit,
+  FindKind,
+  FindMode,
+  FindResult,
+  FindSource,
+  WindowInfo,
+} from "../types";
 
 /** 搜索图：既可能是用户上传的，也可能是内部截的屏幕/窗口。 */
 interface Haystack {
@@ -75,7 +93,26 @@ const SOURCE_HINT: Record<FindSource, string> = {
   window: "只截指定窗口。窗口被移动、遮挡影响更小，推荐用这个。",
 };
 
+const KIND_HINT: Record<FindKind, string> = {
+  template:
+    "比像素：拿一张小图（模板）去大图里找长得一样的位置。换个皮肤、按下态变了就找不到，但胜在「只要长得像就认得」。",
+  semantic:
+    "靠模型认目标：不用准备模板，模型认得「这是个按钮」就直接框出来。代价是只认得模型见过的类别，换目标得换模型。",
+};
+
+/** `"0, 2 5"` → `[0,2,5]`；空串或全是垃圾 → undefined（= 不过滤） */
+function parseIdList(s: string): number[] | undefined {
+  const ids = s
+    .split(/[,，\s]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => Number.parseInt(p, 10))
+    .filter((n) => Number.isInteger(n) && n >= 0);
+  return ids.length > 0 ? ids : undefined;
+}
+
 export function FindPanel({ inheritedImage }: Props) {
+  const [kind, setKind] = useState<FindKind>("template");
   const [source, setSource] = useState<FindSource>("window");
   const [mode, setMode] = useState<FindMode>("exact");
   const [hay, setHay] = useState<Haystack | null>(null);
@@ -90,6 +127,11 @@ export function FindPanel({ inheritedImage }: Props) {
   const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [hwnd, setHwnd] = useState<number | null>(null);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  // ---- 语义找图专用 ----
+  const [models, setModels] = useState<DetectModel[]>([]);
+  const [modelEngine, setModelEngine] = useState("");
+  const [conf, setConf] = useState("0.25");
+  const [classIds, setClassIds] = useState("");
 
   const hayInputRef = useRef<HTMLInputElement>(null);
   const tplInputRef = useRef<HTMLInputElement>(null);
@@ -108,6 +150,22 @@ export function FindPanel({ inheritedImage }: Props) {
   useEffect(() => {
     if (source === "window" && windows.length === 0) void refreshWindows();
   }, [source, windows.length, refreshWindows]);
+
+  // 检测模型列表：只在切到语义找图时才拉（模板找图不需要它）
+  useEffect(() => {
+    if (kind !== "semantic" || models.length > 0) return;
+    let cancelled = false;
+    void detectModels()
+      .then((list) => {
+        if (cancelled) return;
+        setModels(list);
+        setModelEngine((cur) => cur || list[0]?.engine || "");
+      })
+      .catch((e) => setError(`读取检测模型失败: ${e}`));
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, models.length]);
 
   // 从识别页继承的图：只用来当模板（大概率就是用户刚从截图里裁出来的东西）
   useEffect(() => {
@@ -137,15 +195,15 @@ export function FindPanel({ inheritedImage }: Props) {
     setError(null);
   }, []);
 
-  /** 拖进来的图：还没有模板就当模板，否则当搜索图。 */
+  /** 拖进来的图：模板找图时还没有模板就当模板，否则当搜索图；语义找图一律当搜索图。 */
   const onDrop = useCallback(
     (imgs: DroppedImage[]) => {
       const first = imgs[0];
       if (!first) return;
-      if (!tpl) void applyTemplate(first.b64, first.url, first.name);
-      else void applyHaystack(first.b64, first.url);
+      if (kind === "semantic" || tpl) void applyHaystack(first.b64, first.url);
+      else void applyTemplate(first.b64, first.url, first.name);
     },
-    [tpl, applyTemplate, applyHaystack],
+    [kind, tpl, applyTemplate, applyHaystack],
   );
 
   const { dragging } = useImageDrop(onDrop);
@@ -186,8 +244,16 @@ export function FindPanel({ inheritedImage }: Props) {
   };
 
   const onFind = async () => {
-    if (!tpl) {
+    if (kind === "template" && !tpl) {
       setError("还没选模板图。模板 = 你要找的那个小图标/小按钮的截图。");
+      return;
+    }
+    if (kind === "semantic" && !modelEngine) {
+      setError(
+        models.length === 0
+          ? "还没有检测模型。去「设置」页把 .onnx 放进模型目录，或点「添加模型」；YOLOE-26 这类开放词汇模型可用 scripts/fetch_yoloe.py 导出。"
+          : "还没选模型。",
+      );
       return;
     }
     if (source === "image" && !hay) {
@@ -202,15 +268,27 @@ export function FindPanel({ inheritedImage }: Props) {
     setError(null);
     try {
       const parsed = Number.parseFloat(minScore);
-      const r = await findImage({
-        source,
-        mode,
-        image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
-        template: tpl.b64,
-        hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
-        max_results: maxResults,
-        min_score: Number.isFinite(parsed) ? parsed : undefined,
-      });
+      const parsedConf = Number.parseFloat(conf);
+      const r =
+        kind === "semantic"
+          ? await findSemantic({
+              source,
+              image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
+              hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
+              engine: modelEngine || undefined,
+              conf: Number.isFinite(parsedConf) ? parsedConf : undefined,
+              class_filter: parseIdList(classIds),
+              max_results: maxResults,
+            })
+          : await findImage({
+              source,
+              mode,
+              image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
+              template: tpl!.b64,
+              hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
+              max_results: maxResults,
+              min_score: Number.isFinite(parsed) ? parsed : undefined,
+            });
       setResult(r);
       // 后端回传了它实际看到的画面：用它当背景，框与图必然对齐。
       // origin 由后端直接给出（屏幕/窗口截图的左上角），不靠前端反推。
@@ -225,7 +303,7 @@ export function FindPanel({ inheritedImage }: Props) {
         });
       }
     } catch (e) {
-      setError(`找图失败: ${e}`);
+      setError(`${kind === "semantic" ? "语义查找" : "找图"}失败: ${e}`);
       setResult(null);
     } finally {
       setBusy(false);
@@ -251,50 +329,121 @@ export function FindPanel({ inheritedImage }: Props) {
           <div className="flex flex-col items-center gap-2 text-amber-700">
             <Upload className="h-7 w-7" />
             <span className="text-[13px] font-medium">
-              {tpl ? "松手作为搜索图" : "松手作为模板图"}
+              {kind === "semantic" || tpl ? "松手作为搜索图" : "松手作为模板图"}
             </span>
           </div>
         </div>
       )}
 
+      {/* 找图方式：模板（比像素）/ 语义（模型认目标）。
+          出参完全一样，区别只在「怎么定义要找的东西」。 */}
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex items-center gap-0.5 rounded-lg bg-neutral-100 p-0.5">
+          {(["template", "semantic"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => {
+                setKind(k);
+                setResult(null);
+                setError(null);
+              }}
+              className={cn(
+                "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] transition-colors",
+                kind === k
+                  ? "bg-white font-medium text-neutral-900 shadow-sm"
+                  : "text-neutral-500 hover:text-neutral-700",
+              )}
+            >
+              {k === "template" ? (
+                <ImageIcon className="h-3.5 w-3.5" />
+              ) : (
+                <Brain className="h-3.5 w-3.5" />
+              )}
+              {k === "template" ? "模板找图" : "语义找图"}
+            </button>
+          ))}
+        </div>
+        <span className="flex items-center gap-1 text-[12px] text-neutral-500">
+          {kind === "template" ? "拿小图去大图里找" : "让模型自己认目标"}
+          <Hint>{KIND_HINT[kind]}</Hint>
+        </span>
+      </div>
+
       {/* 三步式工具条 */}
       <div className="flex flex-wrap items-end gap-x-3 gap-y-2.5">
-        {/* ① 模板 */}
-        <div className="flex flex-col gap-1">
-          <Label className="text-[11px] text-neutral-500">① 要找什么（模板）</Label>
-          <div className="flex items-center gap-1.5">
-            <Button size="sm" variant="outline" onClick={() => tplInputRef.current?.click()}>
-              <ImageIcon className="h-3.5 w-3.5" />
-              {tpl ? "换模板" : "选模板图"}
-            </Button>
-            <input
-              ref={tplInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void loadFileTo(f, "tpl");
-                e.target.value = "";
-              }}
-            />
-            {tpl && (
-              <span
-                className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
-                title={tpl.name}
-              >
-                <img
-                  src={tpl.url}
-                  alt="模板"
-                  className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
-                />
-                <span className="font-mono text-[10.5px] text-neutral-500">
-                  {tpl.width}×{tpl.height}
+        {/* ① 要找什么：模板找图选小图，语义找图选模型 */}
+        {kind === "template" ? (
+          <div className="flex flex-col gap-1">
+            <Label className="text-[11px] text-neutral-500">① 要找什么（模板）</Label>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" variant="outline" onClick={() => tplInputRef.current?.click()}>
+                <ImageIcon className="h-3.5 w-3.5" />
+                {tpl ? "换模板" : "选模板图"}
+              </Button>
+              <input
+                ref={tplInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void loadFileTo(f, "tpl");
+                  e.target.value = "";
+                }}
+              />
+              {tpl && (
+                <span
+                  className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
+                  title={tpl.name}
+                >
+                  <img
+                    src={tpl.url}
+                    alt="模板"
+                    className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
+                  />
+                  <span className="font-mono text-[10.5px] text-neutral-500">
+                    {tpl.width}×{tpl.height}
+                  </span>
                 </span>
-              </span>
-            )}
+              )}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+              ① 用哪个模型找
+              <Hint>
+                语义找图不用模板——「找什么」由模型决定。模型只认得它见过的类别，
+                换目标要换模型（YOLOE-26 这类开放词汇模型可以按提示词重新导出，
+                见 scripts/fetch_yoloe.py）。
+              </Hint>
+            </Label>
+            <div className="flex items-center gap-1.5">
+              {models.length === 0 ? (
+                <span className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-neutral-300 px-2.5 text-[12px] text-neutral-500">
+                  <Boxes className="h-3.5 w-3.5" />
+                  没有检测模型 —— 去「设置」页添加 .onnx
+                </span>
+              ) : (
+                <Select value={modelEngine} onValueChange={setModelEngine}>
+                  <SelectTrigger className="h-8 w-[190px] text-[12.5px]">
+                    <SelectValue placeholder="选择检测模型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {models.map((m) => (
+                      <SelectItem key={m.engine} value={m.engine}>
+                        <Boxes className="mr-1.5 inline h-3.5 w-3.5" />
+                        {m.id}
+                        {m.external ? "（外部）" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ② 搜索范围 */}
         <div className="flex flex-col gap-1">
@@ -394,9 +543,17 @@ export function FindPanel({ inheritedImage }: Props) {
         {/* ③ 执行 */}
         <div className="flex flex-col gap-1">
           <Label className="text-[11px] text-neutral-500">③ 开始</Label>
-          <Button size="sm" onClick={() => void onFind()} disabled={busy || !tpl}>
-            <ScanSearch className="h-3.5 w-3.5" />
-            {busy ? "查找中…" : "开始找图"}
+          <Button
+            size="sm"
+            onClick={() => void onFind()}
+            disabled={busy || (kind === "template" ? !tpl : !modelEngine)}
+          >
+            {kind === "semantic" ? (
+              <Brain className="h-3.5 w-3.5" />
+            ) : (
+              <ScanSearch className="h-3.5 w-3.5" />
+            )}
+            {busy ? "查找中…" : kind === "semantic" ? "语义查找" : "开始找图"}
           </Button>
         </div>
 
@@ -427,40 +584,78 @@ export function FindPanel({ inheritedImage }: Props) {
       {/* 高级选项，默认收起，避免一上来一屏都是参数 */}
       {advanced && (
         <div className="flex flex-wrap items-end gap-3 rounded-lg bg-neutral-50/80 px-3 py-2.5">
-          <div className="flex flex-col gap-1">
-            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
-              匹配精度
-              <Hint>
-                精准模式要求相似度 ≥ 0.92，几乎只命中完全一样的像素；
-                容错模式放到 0.72，能容忍轻微压缩/抗锯齿差异，但更容易误命中。
-              </Hint>
-            </Label>
-            <Select value={mode} onValueChange={(v) => setMode(v as FindMode)}>
-              <SelectTrigger className="h-8 w-[130px] text-[12.5px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="exact">精准（≥0.92）</SelectItem>
-                <SelectItem value="loose">容错（≥0.72）</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {kind === "template" ? (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+                  匹配精度
+                  <Hint>
+                    精准模式要求相似度 ≥ 0.92，几乎只命中完全一样的像素；
+                    容错模式放到 0.72，能容忍轻微压缩/抗锯齿差异，但更容易误命中。
+                  </Hint>
+                </Label>
+                <Select value={mode} onValueChange={(v) => setMode(v as FindMode)}>
+                  <SelectTrigger className="h-8 w-[130px] text-[12.5px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="exact">精准（≥0.92）</SelectItem>
+                    <SelectItem value="loose">容错（≥0.72）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
 
-          <div className="flex flex-col gap-1">
-            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
-              自定义阈值
-              <Hint>
-                相似度下限，0~1，越大越严格。留空则跟随上面的精度预设。
-                不确定就留空，先用精准模式试。
-              </Hint>
-            </Label>
-            <Input
-              className="h-8 w-[86px] text-[12.5px]"
-              placeholder="跟随预设"
-              value={minScore}
-              onChange={(e) => setMinScore(e.target.value)}
-            />
-          </div>
+              <div className="flex flex-col gap-1">
+                <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+                  自定义阈值
+                  <Hint>
+                    相似度下限，0~1，越大越严格。留空则跟随上面的精度预设。
+                    不确定就留空，先用精准模式试。
+                  </Hint>
+                </Label>
+                <Input
+                  className="h-8 w-[86px] text-[12.5px]"
+                  placeholder="跟随预设"
+                  value={minScore}
+                  onChange={(e) => setMinScore(e.target.value)}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+                  置信度下限
+                  <Hint>
+                    模型给每个框的把握，0~1，越大越严格。默认 0.25（与 ultralytics 一致）。
+                    找不到就把这个调小，误检多就调大。
+                  </Hint>
+                </Label>
+                <Input
+                  className="h-8 w-[86px] text-[12.5px]"
+                  placeholder="0.25"
+                  value={conf}
+                  onChange={(e) => setConf(e.target.value)}
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+                  只保留类别 id
+                  <Hint>
+                    模型可能认得好几类东西。只想要其中几类时填类别 id，逗号分隔，如
+                    「0,2」。留空 = 全都返回。类别 id 看命中结果里每条后面的编号。
+                  </Hint>
+                </Label>
+                <Input
+                  className="h-8 w-[120px] text-[12.5px]"
+                  placeholder="留空 = 全部"
+                  value={classIds}
+                  onChange={(e) => setClassIds(e.target.value)}
+                />
+              </div>
+            </>
+          )}
 
           <div className="flex flex-col gap-1">
             <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
@@ -478,7 +673,8 @@ export function FindPanel({ inheritedImage }: Props) {
           </div>
 
           <div className="pb-1 text-[11.5px] text-neutral-400">
-            当前在「{SOURCE_LABEL[source]}」里找
+            当前用「{kind === "template" ? "模板" : modelEngine || "未选模型"}」在「
+            {SOURCE_LABEL[source]}」里找
             {source === "window" && currentWindow ? ` · ${currentWindow.title.slice(0, 20)}` : ""}
           </div>
         </div>
@@ -520,23 +716,47 @@ export function FindPanel({ inheritedImage }: Props) {
                 <EmptyState
                   icon={<Hand className="h-5 w-5" />}
                   title="还没确定搜索范围"
-                  description="模板是「要找的小图」，搜索范围是「去哪张图里找」。两个都有了才能开始。"
-                  steps={[
-                    {
-                      icon: <ImageIcon className="h-3.5 w-3.5" />,
-                      text: "① 选一张模板图（要找到的小图标）",
-                    },
-                    {
-                      icon: <AppWindow className="h-3.5 w-3.5" />,
-                      text: "② 选一个窗口，或整个屏幕",
-                      detail: "点「开始找图」时会自动截当前画面",
-                    },
-                    {
-                      icon: <ScanSearch className="h-3.5 w-3.5" />,
-                      text: "③ 点「开始找图」",
-                      detail: "命中的位置会用琥珀色框标出来",
-                    },
-                  ]}
+                  description={
+                    kind === "template"
+                      ? "模板是「要找的小图」，搜索范围是「去哪张图里找」。两个都有了才能开始。"
+                      : "语义找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
+                  }
+                  steps={
+                    kind === "template"
+                      ? [
+                          {
+                            icon: <ImageIcon className="h-3.5 w-3.5" />,
+                            text: "① 选一张模板图（要找到的小图标）",
+                          },
+                          {
+                            icon: <AppWindow className="h-3.5 w-3.5" />,
+                            text: "② 选一个窗口，或整个屏幕",
+                            detail: "点「开始找图」时会自动截当前画面",
+                          },
+                          {
+                            icon: <ScanSearch className="h-3.5 w-3.5" />,
+                            text: "③ 点「开始找图」",
+                            detail: "命中的位置会用琥珀色框标出来",
+                          },
+                        ]
+                      : [
+                          {
+                            icon: <Brain className="h-3.5 w-3.5" />,
+                            text: "① 选一个检测模型（决定能找什么）",
+                            detail: "模型只认它见过的类别，没有模型先去设置页加",
+                          },
+                          {
+                            icon: <AppWindow className="h-3.5 w-3.5" />,
+                            text: "② 选一个窗口，或整个屏幕",
+                            detail: "点「语义查找」时会自动截当前画面",
+                          },
+                          {
+                            icon: <Brain className="h-3.5 w-3.5" />,
+                            text: "③ 点「语义查找」",
+                            detail: "命中的目标会连类别一起列在右边",
+                          },
+                        ]
+                  }
                 />
               }
             />
@@ -553,6 +773,7 @@ export function FindPanel({ inheritedImage }: Props) {
               {result && (
                 <Badge variant={result.found ? "warning" : "secondary"}>
                   {result.found ? `命中 ${result.matched}` : "未找到"} · {result.elapsed_ms} ms
+                  {result.engine ? ` · ${result.engine}` : ""}
                 </Badge>
               )}
             </div>
@@ -575,8 +796,14 @@ export function FindPanel({ inheritedImage }: Props) {
                             <span className="font-mono text-[12.5px] text-neutral-900">
                               ({h.x}, {h.y})
                             </span>
+                            {h.class_name && (
+                              <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10.5px] text-neutral-600">
+                                {h.class_name}
+                                {h.class_id != null ? ` #${h.class_id}` : ""}
+                              </span>
+                            )}
                             <span className="ml-auto font-mono text-[10.5px] text-neutral-400">
-                              相似 {h.score.toFixed(3)}
+                              {h.class_id != null ? "置信" : "相似"} {h.score.toFixed(3)}
                             </span>
                           </div>
                           <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
@@ -611,8 +838,12 @@ export function FindPanel({ inheritedImage }: Props) {
                 title={result ? "没找到匹配" : "还没有结果"}
                 description={
                   result
-                    ? "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
-                    : "模板和搜索范围都选好后，点「开始找图」。"
+                    ? kind === "semantic"
+                      ? "模型没在这个画面里认出目标。先把「置信度下限」调小试试；还不行就是模型不认得这类目标，得换模型。"
+                      : "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
+                    : kind === "semantic"
+                      ? "模型和搜索范围都选好后，点「语义查找」。"
+                      : "模板和搜索范围都选好后，点「开始找图」。"
                 }
               />
             )}

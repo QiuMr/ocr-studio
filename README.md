@@ -15,6 +15,7 @@ powershell -File scripts\fetch_models.ps1            # PP-OCR 三档模型（默
 powershell -File scripts\fetch_ddddocr.ps1           # 可选：DDDDOCR 识别模型（54MB）
 powershell -File scripts\fetch_yolo.ps1              # 可选：检测模型（默认 yolov8n，约 19MB，需本机装 ultralytics）
 powershell -File scripts\fetch_yolo.ps1 -Model yolo11n.pt   # 换其它 ultralytics 检测权重
+python scripts\fetch_yoloe.py --image assets\bus.png --box 30,230,800,776 --name bus  # 可选：YOLOE-26 语义找图模型
 pnpm build                       # 前端（tsc --noEmit + vite build）
 cd src-tauri
 cargo build --release            # exe 在 $CARGO_TARGET_DIR/release（本机为 D:\rust-target）
@@ -82,6 +83,7 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/tuzhaotu1\|2` | 在**上传的图**里找图（1=精准 ≥0.92，2=容错 ≥0.72） |
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
+| `POST /ocr/yuyizhaotu` | **语义找图**：不用模板图，让检测模型直接找目标（`source` 选 image/screen/window）。出参与模板找图**完全同构**，脚本换个路径就能用 |
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
 | `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
@@ -118,32 +120,55 @@ DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文
 
 只有一个引擎族 `yolo`（别名 `detect`），但**模型可以有多个、可以放在任意位置**：
 
-- 往 `models\detect\yolo\` 丢 onnx —— 每个 `*.onnx` 都是一个可选项，`model.onnx` 是默认；
+- 往 `models\detect\yolo\` 丢 onnx —— 每个 `*.onnx` 都是一个可选项，
+  **按文件名排序后的第一个就是默认模型**；
 - 或者去「设置 → 目标检测模型 → 添加模型」直接指向任意目录的 onnx（**不复制文件**，
   配置里只记路径）。`.pt` 请先用 `yolo export format=onnx` 导出。
 
+> 这个目录**出厂为空**：程序不预置任何检测模型。没有模型时检测类接口会明确提示，
+> 不会静默返回空。想快速要一个现成的，跑 `scripts\fetch_yolo.ps1`（yolov8n+coco）。
+
 模型结构在加载时从 ONNX 的输入输出形状**自动识别**：输出是 `[1,C,N]` 还是 `[1,N,C]`、
-有没有 objectness、输入边长多少。所以 `yolov5u / yolov8 / yolo11 / yolo12 / yolo26`
-这类单输出导出直接放进去就能跑，换模型不用改配置。
+有没有 objectness、输入边长多少、是不是 NMS-free 端到端（`[1,N,6+nm]`）。
+所以 `yolov5u / yolov8 / yolo11 / yolo12 / yolo26 / yolov10 / YOLOE` 这类单输出导出
+直接放进去就能跑，换模型不用改配置。
 
 **类名自动从模型里读**（ultralytics 导出会写进 ONNX metadata 的 `names`），
 不用手写 `labels.txt`。`labels.txt` 只是给非 ultralytics 导出的兜底。
 
 `models\detect\yolo\v8\model.onnx` 这种旧的分层结构仍然认（`v8` 会作为模型名）。
 
-不支持的三种情况会**明确报错**而不是给出垃圾框：
+不支持的两种情况会**明确报错**而不是给出垃圾框：
 
 | 情况 | 原因 |
 |---|---|
 | v3/v4 原始多输出 head（3 个输出张量） | 要按 anchor 逐层解码，另一套逻辑 |
-| 自带 NMS 的端到端导出（如 `[1,300,6]`） | 候选数对不上锚点网格 |
-| `task` 不是 `detect`（segment / pose / obb / classify） | 输出多 mask/关键点通道，按检测解会整体错位 |
+| `task` 是 `pose` / `obb` / `classify` | 输出关键点 / 角度 / 类别向量，按检测解会整体错位 |
+
+`task=segment` 的模型**只取检测头**（掩码系数列会被跳过），所以 YOLOE-26 这种
+官方只放 `-seg` 权重的情况也能用——这正是语义找图默认走的那条路。
+
+### 语义找图（YOLOE-26）
+
+模板找图要求「长得一模一样」；语义找图让检测模型自己认目标，**不挑外观**。
+代价是只认得模型见过的类别。
+
+YOLOE-26 是开放词汇检测模型，提示词在**导出 ONNX 时就烘焙进权重**，导出后改不了类别：
+
+```powershell
+python scripts\fetch_yoloe.py --image assets\bus.png --box 30,230,800,776 --name bus
+# 产出 models/detect/yolo/yoloe26_bus.onnx，之后 /ocr/yuyizhaotu 里 engine 传 yolo:yoloe26_bus
+```
+
+本机走的是**视觉提示**（给参考图 + 框），因为文本提示要 ultralytics 的 CLIP fork，
+而那要拉 git 子模块、本机 MSYS 的 `sh` fork 是坏的。详见 docs/PROGRESS.md §7.8。
 
 ## 验证
 
 ```powershell
-cargo test                    # 82 个单元测试
+cargo test                    # 92 个单元测试
 cargo test -- --ignored       # 22 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
+cargo test --test yoloe_smoke -- --ignored   # 语义找图冒烟（目录里没有检测模型会自动跳过）
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
 python scripts/ref_yolo.py models/detect/yolo/model.onnx assets/bus.png out.json   # yolo 官方实现参照
