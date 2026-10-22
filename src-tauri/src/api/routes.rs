@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::to_bytes;
-use axum::extract::{FromRequest, Multipart, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::header::{self, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -130,6 +130,12 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
     // 404/405 统一成 {code,msg} 信封。顺序有意义：后 layer 的在外层，
     // 所以 CORS 在 unify 外面——OPTIONS 预检要能在进入 unify 之前被处理。
     router = router.layer(axum::middleware::from_fn(unify_router_errors));
+    // 放开请求体上限。**必须显式设**：JSON 路径自己用 `to_bytes(body, MAX_BODY)`
+    // 带了上限，但 multipart 走 `Multipart` extractor，它读的是 `DefaultBodyLimit`
+    // —— axum 0.8 默认只有 **2MB**。用户传一张 3MB 的截图就 400
+    // 「Error parsing multipart/form-data request」，而同一张图走 JSON 却正常，
+    // 极难排查（本轮用 9.7MB 的图实测确认）。
+    router = router.layer(DefaultBodyLimit::max(MAX_BODY));
     if allow_browser {
         router = router.layer(axum::middleware::from_fn(cors_headers));
     }

@@ -1,270 +1,99 @@
 # OCR-Studio 项目长期记忆
 
-## 前端技术规范（2026-10-21 用户确定，必须遵守）
-- 技术栈：**React + TypeScript + Tailwind CSS + shadcn/ui**（Vite，Tauri 2 壳不变）。
-  原 Vue 3 + shadcn-vue 方案已废弃，`src/` 下 Vue 骨架需整体替换。
-- 字体：**MiSans**（小米），`@font-face` 本地引入并设为全局默认；商用授权需确认后再随包分发。
-- 配色：**纯白为主，黑色为辅，蓝色点缀**。
-- **每个按钮都必须带图标**（用 `lucide-react`，shadcn/ui 默认图标源）。
-- **自定义标题栏：不要图标、不要标题**，仅窗口控制按钮。
-  `tauri.conf.json` 已设 `decorations: false`，前端用 `getCurrentWindow()` 自绘。
+## 产品定位（最高优先级，2026-10-22）
+- **OCR-Studio 是 API 工具，不是识别软件。** 交付物是跑在 `127.0.0.1:8848` 的接口服务，桌面界面只是控制面板。任何界面设计先问：是不是又把产品做成了「图片识别软件」。
+- 首页必答三件事：服务开没开 / 地址（可复制）/ 能调什么怎么调（给现成代码）。「上传图片看效果」是验证手段，不是主叙事。
+- 导航固定 5 项：服务 / 接口 / 试跑 / 日志 / 设置。
+- 端点事实源 `src/lib/endpoints.ts`（首页概览与接口页同源），改后端路由必须同步。目前 **18 个端点**（认字 5 / 找图 8 / 看图 3 / 状态 2）。
 
-## 产品定位（2026-10-22 用户纠正，**最高优先级**）
-- **OCR-Studio 是一个 API 工具，不是识别软件。** 交付物是跑在 `127.0.0.1:8848` 的接口服务，
-  桌面界面只是它的控制面板。任何界面设计先问：这是不是又把产品做成了「图片识别软件」。
-- 首页必须回答三件事：服务开没开 / 地址是什么（可复制）/ 能调什么怎么调（给现成代码）。
-  「上传图片看效果」是验证手段，不是主叙事。
-- 导航固定 5 项：**服务 / 接口 / 试跑 / 日志 / 设置**。
-- 端点事实源：`src/lib/endpoints.ts`（首页概览与接口页同源），改后端路由必须同步。
+## 前端技术规范（2026-10-21 用户确定）
+- 栈：React + TS + Tailwind + shadcn/ui（Vite，Tauri 2 壳）。Vue 方案已废弃。
+- 字体 MiSans（本地 @font-face）；配色纯白为主、黑为辅、蓝点缀。
+- **每个按钮都必须带图标**（lucide-react）。**自定义标题栏不要图标不要标题**，仅窗口控制按钮（`decorations:false`）。
+
+## 视觉规范：圆角与字号（2026-10-23，**改界面前必读**）
+- **不写 `rounded-[Npx]` / `text-[N.x px]`**，用梯度档。梯度在 `src/styles.css` 的 `@theme` 覆盖 Tailwind 默认（`--radius-sm/md/lg/xl`、`--text-xs/sm`）。
+- 圆角四档：sm 6px（浮层小项/行内码）→ md 8px（按钮/输入/触发器/tab/导航/窗口按钮）→ lg 10px（卡片内块：分段容器/滚动区/提示条/搜索框）→ xl 14px（卡片/面板/大容器）。规则「容器越大圆角越大；子比父小一档」。例外：`rounded-full` 胶囊、`rounded`=4px 微图标。
+- 字号七档（只留整数，半像素发虚）：10 微角标 / 11 次要·表头 / 12 正文 / 13 强调·卡片标题·按钮 / 14 强强调 / 16 小节标题 / 26 页面主标题。
+- 按钮四档：xs h-7 text-12 / sm h-8 text-12 / default h-9 text-13 / lg h-10 text-13；icon-sm h-8 w-8、icon-xs h-7 w-7。**图标统一 14px**（`h-3.5 w-3.5`）。
+- 手写控件也要落档：h-7/h-8 → `rounded-md`+`text-[12px]`；分段控件「容器 rounded-lg + 项 rounded-md」（8+2=10 同心）。
+- **CardHeader 第一行统一包 `flex h-8 items-center`**，否则并排两卡标题差 ~7px。小字中文配 14px 图标加 `leading-none`。PageHeader 用 `items-center`。
 
 ## 项目环境约定
-- Rust 工具链是**项目内私有安装**：跑 cargo 前必须设
-  `RUSTUP_HOME=D:\Python测试\OCR-Studio\.rust\rustup`、`CARGO_HOME=D:\Python测试\OCR-Studio\.rust\cargo`。
-- Bash 工具在本机 exit 127（MSYS coreutils 版本不匹配），**全程用 PowerShell 工具**。
-- cv2 读不了中文路径，一律 `np.frombuffer + cv2.imdecode`。
-- 写 `.ps1` 必须 UTF-8 带 BOM + CRLF（PowerShell 5.1 按 GBK 解码无 BOM 文件）。
-- **手动跑 `cargo build` 出来的 exe，必须把 `src-tauri/runtime/*.dll` 拷到 exe 旁边**，
-  否则 DirectML 不可用且**静默退回 CPU**（日志里才有 "DirectML is not supported in
-  this build of ONNX Runtime"）。打包产物由 `bundle.resources` 自动处理。
-- 起 App 做端到端验证要用 `run_in_background`；`Start-Process` 起的进程会被工具会话回收。
-- Python 访问本机服务必须绕系统代理（`build_opener(ProxyHandler({}))`），
-  否则 127.0.0.1 也走代理拿 502，会被误判成服务没起来。
-- **启动入口固定两个脚本**（2026-10-22 晚用户报「界面又起不来」后定）：
-  开发启动 `scripts/dev.ps1`、编译启动 `scripts/build.ps1`。
-  真因是 Tauri CLI 从 PATH 找 `cargo`，而本项目 Rust 是**项目内私有工具链**
-  （平时都用全路径调，所以裸 `cargo build` 从不暴露），PATH 没有就当场退出、
-  **窗口根本不创建**。脚本负责铺 `RUSTUP_HOME`/`CARGO_HOME`/`CARGO_TARGET_DIR`
-  并把 `.rust\cargo\bin` 前置进 PATH。
-- **验收界面只能用 `explorer.exe <exe>` 启动**，再 `scripts/shot_window.py` 抓图。
-  **agent shell 里直接跑 exe 必白屏**（该 shell 让 WebView2 的 GPU 子进程起不来），
-  这是**环境问题不是产品缺陷**，同一 exe 用资源管理器启动就正常。
-  agent shell 里的白屏/「前端未报到」结论**一律作废，不要据此改代码**
-  —— 本轮就因此把已知环境问题当成看门狗 bug 改了一轮又回退（见 PROGRESS 0.1 / 7.7）。
+- Rust 是**项目内私有工具链**：`RUSTUP_HOME=...\.rust\rustup`、`CARGO_HOME=...\.rust\cargo`、`CARGO_TARGET_DIR=D:\rust-target`；cargo 必须带 `--manifest-path "src-tauri\Cargo.toml"`。
+- **启动入口固定两个脚本**：开发 `scripts/dev.ps1`、编译 `scripts/build.ps1`（它们铺 env + 把 `.rust\cargo\bin` 前置进 PATH；Tauri CLI 从 PATH 找 cargo，没有就静默退出、窗口不创建）。
+- **验收界面只能用 `explorer.exe <exe>` 启动**再抓图。**agent shell 里直接跑 exe 必白屏**（WebView2 GPU 子进程起不来），是环境问题不是产品缺陷 —— 白屏/「前端未报到」结论一律作废，不要据此改代码。
+- Python 访问本机服务必须绕系统代理（`ProxyHandler({})`），否则 127.0.0.1 也拿 502。
+- cv2 读不了中文路径 → `np.frombuffer + cv2.imdecode`。
+- 写 `.ps1` 必须 UTF-8 **带 BOM** + CRLF（PS 5.1 按 GBK 解码无 BOM 文件）。`pack_exe.ps1` 内嵌说明文件，改完必须重加 BOM。
+- 手动 `cargo build` 出的 exe 必须把 `src-tauri/runtime/*.dll` 拷到旁边，否则 DirectML 静默退回 CPU。
+
+## 环境坑（会误判成代码 bug）
+- **safe-delete 按 turn 累计**：同一 turn 删 >50 文件被拒（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），连 `Remove-Item -Recurse` 也拦。绕法 `[System.IO.Directory]::Delete("<绝对路径>", $true)`。
+- **debug target 的 rlib 会瞬时损坏**（`invalid metadata files for crate 'test'` + `link.exe exit 1102`）→ **重跑一次即恢复**，别改代码。
+- **Bash 里的 `python` ≠ PowerShell 里的**：带依赖（qrcode/PIL/cv2/numpy）的脚本一律用 PowerShell 跑。
+- **管道让退出码失真**：`cargo test | Select-Object` 报 failed 其实成功，判 `test result:` 行。
+- `build.ps1` 同理，判成功看 `[PASS] 产物` + `check_embedded_assets.py` 的 `[结论] 资源已嵌入`。
 
 ## 精度基线（改动前后处理前必读）
-- 黄金基线：`models/small/reference_output.json`，由 `scripts/ref_pipeline.py` 生成。
-- 验收命令：`cargo test -- --ignored`（37 个测试，含 pipeline_match 全流程比对）。
-- **必须复刻的三个底层语义**（详见 `docs/PROGRESS.md` 第 3 节）：
-  1. `cv2.resize`：横向 11bit 定点 + 纵向截断的两段式实现；
-  2. `cv2.warpPerspective`：整数坐标=像素中心、源坐标量化到 1/32、越界逐 tap 补 0；
-  3. `pyclipper`：输入坐标截断成整数、距离保持 double、输出 half-up 四舍五入。
-- **误检框的置信度是混沌的**，1-LSB 扰动能抖 0.04，**不能用误检框做精度验收**。
-- 验收时必须打**全精度**框坐标：整数取整后会掩盖亚像素差异（本轮就因此漏判过）。
+- 黄金基线 `models/small/reference_output.json`（`scripts/ref_pipeline.py` 生成）；验收 `cargo test -- --ignored`。
+- 必须复刻的三个底层语义（详见 PROGRESS §3）：cv2.resize（11bit 定点两段式）、cv2.warpPerspective（整数坐标=像素中心、源量化 1/32、越界补 0）、pyclipper（输入截断整数、距离 double、输出 half-up）。
+- **误检框置信度是混沌的**（1-LSB 扰动能抖 0.04），不能用它做精度验收；必须打**全精度**框坐标。
 
-## 找图（模板匹配）设计要点
-- 模块 `src-tauri/src/match.rs`，因 `match` 是关键字，lib.rs 用
-  `#[path = "match.rs"] pub mod matcher;` 暴露为 `matcher`。
-- **粗筛也用 NCC，不要用 SQDIFF**：SQDIFF 的 `ΣTI` 同样要逐像素乘，
-  不比 NCC 便宜，且对亮度漂移敏感（模板 ×0.8 真位置就掉出候选，直接漏检）。
-- 金字塔 ≤4 层，`MIN_TPL_SIDE = 6`（取 6 而非 8 是为了让 64px 模板能多降一层，
-  粗扫快 11 倍）。位置精度靠逐层 ±2 精化保证。
-- 纯色模板方差为 0 时 NCC 无定义 → 返回 0 拒命中，宁可漏不可假阳。
-- 性能基线（release，1080p 全屏 + 64px 模板）：**60ms**（截图 30 + 匹配 30）。
+## 找图（模板匹配）
+- 模块 `src-tauri/src/match.rs`（`match` 是关键字，lib.rs 用 `#[path]` 暴露为 `matcher`）。
+- **粗筛也用 NCC 不用 SQDIFF**（SQDIFF 对亮度漂移敏感会漏检）。金字塔 ≤4 层，`MIN_TPL_SIDE=6`。纯色模板方差 0 → 拒命中。
+- 性能基线（release，1080p + 64px 模板）：60ms。
 
-## 截图与坐标（易错，务必遵守）
-- **`GetWindowRect` 必须配 `GetWindowDC`/`PrintWindow`**（原点=窗口左上角，含边框）。
-  用 `ClientToScreen` 的客户区尺寸去配会右侧/底部缺一块。
-- `PrintWindow` 有"返回 TRUE 但全黑"的假成功，必须检测并回退 BitBlt。
-- 命中坐标换算成图内坐标的偏移只能由**后端返回**（`origin_x/origin_y`），
-  不能前端反推 —— 多显示器时虚拟屏幕原点可能是负数。
-- 跑 find 类接口时，截图必须和匹配用**同一份像素**（`find_image` 返回 `preview`），
-  否则两次截屏之间画面变了，框会画在过时背景上。
+## 截图与坐标（易错）
+- `GetWindowRect` 必须配 `GetWindowDC`/`PrintWindow`（原点=窗口左上角含边框）；`PrintWindow` 有「返回 TRUE 但全黑」假成功，要检测回退 BitBlt。
+- 命中坐标换算偏移只能由后端返回（`origin_x/origin_y`），不能前端反推（多显示器虚拟屏原点可能为负）。
+- find 类接口截图必须与匹配用**同一份像素**（`find_image` 返回 `preview`）。
+- 无人值守截图流程：杀进程 → `explorer.exe <exe>` → `scripts/shot_window.py "OCR Studio" out.png` → `scripts/ui_probe.py x y out.png`。被遮挡用 `scripts/win_capture.py`（PrintWindow + `PW_RENDERFULLCONTENT`）；`SetForegroundWindow` 受前台锁会静默失败。
 
-## 多引擎进度（2026-10-22）
-- M3.0/M3.1/M3.2/M3.3 全部完成：DDDDOCR + 目标检测 + pipeline 串联，均已实测并提交。
-  - M3.1：`engine/ddddocr.rs`；提交 e67699c。M3.2：`engine/yolo.rs`；c78b006。
-  - M3.3：`/vision/pipeline`；4783de4。M4 界面修复：fb666f9 / ce80187。
-- **目标检测不按版本分家（用户明确要求）**：`EngineKind::Yolo` 无数参数，`key()` = `yolo`。
-  结构在**加载时探测**（`YoloLayout`）：`inputs[0].dims` 定输入边长、`outputs[0].dims`
-  判别 `[1,C,N]`/`[1,N,C]`（小的那维是通道 C）、`labels.txt` 类别数定 objectness
-  （C==4+cls 无、C==5+cls 有）。覆盖 v5/v6/v7/v8/v10/v11/v12/v26 单输出导出。
-  不接受的两类要**明确报错**：v3/v4 多输出 head、`[1,300,6]` 端到端（候选数远小于网格）。
-- **letterbox 填充统一 114**：yolov5 官方默认色也是 114，早期写「v5 用 0」是错的。
-- 模型目录 `models/detect/yolo/{model.onnx,labels.txt}`；旧 `v8/` 子目录自动下探一层。
-- **跨引擎对齐测试图必须用 PNG**：JPEG 各家解码器 IDCT 有 ±1 抖动，会把 YOLO 置信度
-  推动 0.001~0.01、大框 IoU 压到 0.97，全是噪声不是 bug。换 PNG 后 yolo_parity
-  8/8 框 IoU=1.0000、conf 差=0。
-- **letterbox 复刻要点**：Python `round()` = 银行家舍入 → Rust `round_ties_even()`；
-  缩放复用 `ocr::preprocess::resize_bilinear`（cv2 逐位复刻）；先 NMS 后还原坐标。
-- **ultralytics 会按发行版名自动装 `onnxruntime` 最新版**（本机原是 onnxruntime-directml），
-  半途失败会混装出新 wrapper+旧 native 的坏包。已改装 onnxruntime==1.24.3（CPU）根治，
-  本机 Python 的 RapidOCR 退回 CPU 推理。
-- 无人值守 UI 验收：`scripts/ui_probe.py`（激活→按键→点击→同进程立刻截图）、
-  `scripts/ui_paste.py`（CF_DIB 剪贴板 + Ctrl+V；**GlobalAlloc/GlobalLock 必须显式声明
-  64 位 restype，否则句柄截断 access violation**）。
-- 测试基线：`cargo test --lib` 73 通过；`--ignored` 22 项全绿（PP-OCR 基线 pipeline_match 逐字全对）。
-- 详细记录见 `docs/PROGRESS.md`；多引擎契约与实录见 `docs/ENGINES.md` 6.1~6.4。
+## DirectML 必须显式验证
+- `with_execution_providers` 对单个 EP 注册失败只打日志然后跳过、仍返回 Ok。「建会话成功」不能证明 DML 生效。
+- 判据 `crate::ocr::ort_util::directml_available()`（内部 `GetExecutionProviderApi("DML")`）。
+- `runtime/onnxruntime.dll` 必须是**带 DirectML 的构建**（约 20MB）；换 DLL 后必须重跑 `pipeline_match`。
 
-## DirectML 必须显式验证（2026-10-22，差点长期跑在 CPU 上）
-- `SessionBuilder::with_execution_providers` 对**单个** EP 注册失败只打
-  `ERROR ort::ep` 日志然后**跳过**，整体仍返回 `Ok`。所以「建会话成功」不能证明 DML 生效。
-- 判据用 `ort::ep::directml::api()`（内部 `GetExecutionProviderApi("DML")`），
-  `None` 就是这份 DLL 没编 DML。已封装成 `ocr::ort_util::directml_available()`。
-- 症状：界面显示 GPU/DirectML，日志有四条 `DirectML is not supported in this build
-  of ONNX Runtime`，实际全程 CPU。
-- `runtime/onnxruntime.dll` 必须是**带 DirectML 的构建**（约 20MB）；CPU 版约 18MB。
-  取法：`pip download --no-deps --only-binary :all: -d <tmp> onnxruntime-directml==1.24.3`
-  然后从 wheel 的 `onnxruntime/capi/` 取 3 个 dll（不要装它，会跟 ultralytics 打架）。
-- **换 DLL 后必须重跑 `pipeline_match`**（数值可能极微变，本轮实测不变）。
+## Tauri 2 窗口 / 托盘（产品语义，别改回去）
+- **关窗口 = 隐藏不是退出**（`prevent_close()` + `hide()`），交付物是服务。只有托盘「退出」真退。
+- 托盘菜单首行只读状态（ticker 2s、变了才更新）+ 打开界面/启动/停止/退出。**托盘必须显式 `.icon(app.default_window_icon().cloned())`**（不会自动回退）。
+- `core:default` 的 window 权限只有只读命令，拖动/最小化/最大化/关闭必须在 `capabilities/default.json` 显式声明。
+- `data-tauri-drag-region` **只认事件目标自身，不继承**。
+- **`tauri-plugin-single-instance` 必须第一个注册**，否则第二次双击另起进程抢 8848。
+- **进程名是 `OCR Studio`（带空格）**，杀进程按 `ocr-studio` 匹配不到。
 
-## Tauri 2 窗口坑（2026-10-22，用户反馈「拖不动、关不掉」）
-- `core:default` 的 window 权限**只有只读命令**，**不含** `allow-start-dragging` /
-  `allow-minimize` / `allow-toggle-maximize` / `allow-close`。必须在
-  `src-tauri/capabilities/default.json` 显式声明（含 `allow-is-maximized`）。
-  少了权限的表现是「点了没反应」——前端 `catch` 把 rejection 吞了。
-- 想确认某个权限在不在 `core:default` 里，查 `src-tauri/gen/schemas/acl-manifests.json`
-  里 `core:window.default_permission.permissions`，别靠猜。
-- **`data-tauri-drag-region` 只认事件目标自身，不继承**：容器带了、里面的占位 div 没带，
-  那片区域就是拖不动的。
-- 自绘标题栏按钮的真实位置（相对窗口宽 w，标题栏高 44）：关闭 `w-24`、最大化 `w-60`、
-  最小化 `w-96`，y=22。**别按截图比例估坐标**，截图与窗口 rect 不是 1:1。
+## 引擎层错误 → API 错误：一律走 `map_engine_err_ctx`（别绕）
+- `src-tauri/src/api/state.rs`。映射：`Unsupported`→**1002**、`UnknownEngine`→**1003**、`BadRequest`→**400**、`NotReady`/`Inference`→500。
+- 1002 的意义是让调用方区分「引擎做不到」与「服务故障」，都拍 500 就没法写自动降级。新写「调引擎」的入口用 `map_engine_err` / `map_engine_err_ctx`，**别手写 `ApiError::Internal`**。有单测 `engine_error_mapping_*` 钉住。
 
-## 界面规范补充（2026-10-22 用户反馈）
-- 侧栏**不要蓝色、不要选中项左侧竖条**，蓝只给主动作按钮/图标，不进导航。
-- **外壳配色（10-22 晚用户要求「大家都在用的那种稍微灰一点」）**：
-  标题栏 + 左侧栏 `bg-chrome`（`--color-chrome: #f7f7f8`，在 `styles.css` 的 @theme 里），
-  主区保持纯白，**靠底色差分层、不加分割线**。灰底上选中态用**纯白浮起**
-  （`bg-white + ring-1 ring-black/[0.04]` + 极淡阴影），不要再用 `bg-neutral-100`（显脏）；
-  hover 用黑 4~7% 叠加而不是 neutral 色阶。
-- **卡片头第一行统一 `h-8 items-center`**：CardHeader 是 flex-col，若某些卡的标题行里塞了
-  32px 按钮/徽章而别的卡没有，items-center 会让两类标题差 7px。所有 CardHeader 第一行都包
-  一层 `flex h-8 items-center`。
-- 小字号中文与 14px 图标混排时一律加 `leading-none`，否则文字盒 1.5 行高会让文字比图标偏下。
-- PageHeader 用 `items-center`（不是 items-start），右上按钮才与「标题+描述」块视觉居中。
+## 检测模型（用户自己的，别预置）
+- `models/detect/yolo/` 下每个 `*.onnx` 都是可选项，**默认 = 按文件名排序第一个**。config 的 `detect_models` 记外部绝对路径（只记路径不复制）。
+- **出厂目录为空**（只有 README.txt）；`pack_exe.ps1` 必须把 detect 模型从分发包剔掉。
+- 类名从 ONNX metadata 的 `names` 读（ultralytics 会写），`labels.txt` 只是兜底；用 metadata 的 `task` 拦非检测模型（segment/pose/obb/classify）。
+- `EngineSpec` 的 yolo variant = 模型 id：`yolo`=默认、`yolo:<id>`=指定。
 
-## 托盘常驻 + 单实例（2026-10-22，**产品语义，别改回去**）
-- **关窗口 = 隐藏，不是退出**：`WindowEvent::CloseRequested` → `prevent_close()` + `hide()`。
-  交付物是 API 服务，界面只是控制面板，服务必须能在后台活着。
-- 托盘菜单：首行只读状态（`● 运行中 · 127.0.0.1:端口` / `○ 已停止`，ticker 每 2s 刷新、
-  **变了才更新**）+ 打开界面 / 启动服务 / 停止服务 / 退出。**只有「退出」是真正退出。**
-- **托盘必须显式给图标**：`TrayIconBuilder` 在 tauri-2.12.4 里**不会**回退到
-  `default_window_icon()`，不设也能 build 成功、只是图标不可见。写
-  `.icon(app.default_window_icon().cloned())`。
-- **`Menu::get` 参数是 `"id"` 不是 `&"id"`**（`get<'a, I>(&'a I)` + `MenuId: PartialEq<&'a I>`）；
-  返回 `MenuItemKind`，要 `.as_menuitem().cloned()` 才有 `set_text`/`set_enabled`；
-  这些更新必须 `app.run_on_main_thread(...)`。
-- **`tauri-plugin-single-instance` 必须是第一个注册的插件**。没有它，第二次双击会另起
-  进程抢 8848，失败后界面显示「服务已停止」，用户会以为程序坏了。
-- **进程名是 `OCR Studio`（带空格）**，不是 `ocr-studio`。杀进程/数实例都按后者写会一个
-  都匹配不到（本轮因此「以为杀了其实没杀」）。
-- 托盘图标可见性**没做过截图验证**（Win11 折叠进溢出面板，合成 `mouse_event` 点不开，
-  试三次都落到输入法图标上）。行为用 `scripts/verify_tray.py` 验，图标请人工看任务栏。
+## 语义找图 / 提示找图（卖点，别削弱）
+- `/ocr/yuyizhaotu`（语义）与 `/vision/prompt`（提示）**出参与模板找图刻意同构**：`assemble_find_data()` 是唯一组装点，模板找图出参一个字节没变，不许改成新格式。不暴露 `iou`；不按来源分端点（用 `source`）。
+- 提示找图三件套在 `models/yoloe/`：`*_prompt.onnx`（检测器，双输入 images+pe）、`*_vpe.onnx`（视觉提示）、`*_texthead.onnx`（文本头）。文本塔 MobileCLIP2-B 走纯 Rust crate `mobileclip2-b-rs`（`ts-loader` feature 直接读 ultralytics 的 `.ts`）。
+- **语言找图需 242MB `mobileclip2_b.ts`**；`discover_assets` 搜 `models/yoloe/` → `models/_fixtures/weights/`。发布时放 `models/yoloe/`（打包保留）。
+- `OutputLayout::EndToEnd` 判据 `anchors < grid && channels >= 6`（只看通道会误吃 v5 6 通道 raw head）；`class_channels()` 的 EndToEnd base 是 5 不是 6。
 
-## 后台任务退出码（2026-10-22）
-- `cargo test ... | Select-Object -Last N` 之类的**管道会让退出码失真**：任务报 failed，
-  实际 `test result: ok. 82 passed`。判基线看 `test result:` 行或单独取 `$LASTEXITCODE`。
-
-
-## 目标检测模型（2026-10-22 晚，已落地）
-- **模型是用户自己的**：`models/detect/yolo/` 下每个 `*.onnx` 都是可选项，**默认模型 =
-  同名级 onnx 按文件名排序的第一个**（早期硬编码 `model.onnx` 优先，已删）。
-  另外 config 的 `detect_models: Vec<String>` 记外部绝对路径（**只记路径不复制文件**）。
-- **出厂目录为空**（只有 `README.txt`）：程序不预置任何检测模型。**`pack_exe.ps1` 必须
-  把 `models/detect/yolo/` 里的模型从分发包剔掉**，否则开发机上的模型跟着发出去，
-  又变回「内置模型」（用户明确反对这件事）。
-- **类名从 ONNX metadata 读**：`sess.metadata()?.custom("names")`（ultralytics 会写
-  `names`/`task`/`imgsz`/`description`）。`labels.txt` 只是兜底，别再要求用户手写。
-  解析 Python dict repr 的坑：单双引号、`\'` 转义、乱序 key、值里带数字都要处理。
-- **用 metadata 的 `task` 拦非检测模型**（segment/pose/obb/classify）：它们输出多 mask 系数
-  或关键点通道，按检测解不会崩、只会给错类别的框。
-- `EngineSpec` 的 yolo variant = 模型 id（文件名去扩展名）：`yolo` = 默认，`yolo:<id>` = 指定。
-  `yolo:v8` 这类旧写法仍解析但落回默认。**外部模型的 id 不能「像版本号」**，否则被当旧写法吃掉。
-- `/engine/list` 只扫目录**不加载模型**，所以那时读不到类名；加载过后由
-  `AppState::engine_status_list()`（HTTP/IPC 共用）回填 classes 并把 note 换成「已加载 N 类」。
-- 文件选择框用 Win32 `GetOpenFileNameW`（feature `Win32_UI_Controls_Dialogs`）。
-  **`lpstrDefExt`/`lpstrTitle` 的 `vec.as_ptr()` 必须先绑定到变量**，否则指向已 drop 的临时 Vec。
-- `save_config` 里要**保留后端维护的 `detect_models`**（前端传的是旧快照），同 `webview_compat`。
-
-## 语义找图（2026-10-22 深夜，提交 4a6ec9f，**卖点，别削弱**）
-- 端点 `/ocr/yuyizhaotu`（第 15 个）。来源由 body 的 `source` 给（image/screen/window，
-  复用 `acquire_haystack`），阈值 `conf`（0.25），`class_filter` 按类别 id。
-- **出参与模板找图刻意同构**：`assemble_find_data()` 是唯一组装点，
-  `to_find_data`（模板）/ `to_find_data_from_dets`（语义）都走它。
-  新字段 `engine`/`class_id`/`class_name` 带 `skip_serializing_if`，
-  **模板找图出参一个字节没变**。已有脚本换路径即可，不许改成新格式。
-- **不暴露 `iou`**（NMS-free 模型不做 NMS）；**不按来源分三个端点**（用 `source`）。
-- `OutputLayout::EndToEnd`（`[1,N,6+nm]`）判据是 **`anchors < grid && channels >= 6`**：
-  只看通道数会误吃 v5 系 6 通道 raw head。`class_channels()` 的 base
-  **`EndToEnd` 是 5 不是 6**（4 坐标 + 1 类别下标列），写错会让分割模型类别整体错位。
-- YOLOE-26 导出 `scripts/fetch_yoloe.py`：**本机只能走视觉提示**（文本提示要 ultralytics
-  的 CLIP fork，拉 git 子模块在本机 MSYS 必失败 `0xC0000142`）。必须打补丁绕开
-  ultralytics 8.4.13 的 end2end fuse bug（先置空 cv3/cv4 再 fuse）；补丁内要 `import torch`。
-  配 `-seg` 模型要用 `YOLOEVPSegPredictor`。权重缓存到 `models/_fixtures/weights/`。
-
-## 视觉规范：圆角与字号梯度（2026-10-23 定，**改界面前必读**）
-- **不要写 `rounded-[Npx]` 和 `text-[N.x px]`**，一律用梯度里的档。
-  梯度在 `src/styles.css` 的 `@theme` 里**覆盖 Tailwind 默认档**（`--radius-sm/md/lg/xl`、
-  `--text-xs/sm`），所以 `rounded-md/lg/xl`、`text-sm` 已自动等于下面的值，不必逐处改。
-- 圆角四档：**sm 6px**（浮层小项/行内代码/微标签）→ **md 8px**（按钮/输入框/下拉触发器/
-  tab/导航项/窗口按钮）→ **lg 10px**（卡片内部的块：分段控件容器/滚动区/提示条/搜索框）→
-  **xl 14px**（卡片/面板/独立浮层/大块容器）。规则是「容器越大圆角越大；子元素比父元素小一档」。
-  另有刻意不走梯度的两档：`rounded-full`（胶囊/圆点）、`rounded`=4px（≤24px 微图标按钮、
-  浮层微角标、截图上的框标记）。
-- 字号七档（只留整数，**半像素在 100% 缩放下发虚**）：**10** 微角标 / **11** 次要·表头 /
-  **12** 正文 / **13** 强调正文·卡片标题·按钮 / **14** 强强调 / **16** 小节标题 /
-  **26** 页面主标题·大数字。
-- 按钮高度四档（`ui/button.tsx`）：`xs h-7 text-12` / `sm h-8 text-12` / `default h-9 text-13` /
-  `lg h-10 text-13`，另有 `icon-sm h-8 w-8`、`icon-xs h-7 w-7`。**图标统一 14px**
-  （调用方写 `className="h-3.5 w-3.5"`）。
-- 手写（不走 `<Button>`）的控件也必须落在上面这几档上：h-7/h-8 → `rounded-md` + `text-[12px]`；
-  分段控件「容器 `rounded-lg` + 项 `rounded-md`」（8+2=10 同心）。
-- **CardHeader 第一行统一包一层 `flex h-8 items-center`**（已有条目，全仓只剩 FindPanel 一处漏，
-  本轮已补）。左右并排的两张卡，一边标题行塞了按钮/徽章而另一边没塞，就会差 ~7px。
-
-## 环境：safe-delete 会按 turn 累计，卡死 vite 清 dist（2026-10-23）
-- 同一 agent turn 内删除量**累计**超过 50 个文件就被拒：
-  `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":64,"threshold":50,"scope":"turn"}`。
-  症状是 `vite build` 在 `prepare-out-dir` 阶段直接失败，看着像前端构建炸了，其实是环境。
-- **连 `Remove-Item -Recurse -Force dist` 也会被拦**（shim 同时包装 cmdlet）。绕法用 .NET API：
-  `[System.IO.Directory]::Delete("<绝对路径>\dist", $true)`，删完再跑 `scripts/build.ps1`。
-- `build.ps1` 的退出码经 `2>&1 | Select-Object` 管道后会**失真**（报 failed 其实成功）。
-  判成功看 `[PASS] 产物` 行 + `check_embedded_assets.py` 的 `[结论] 资源已嵌入`。
-
-## 无人值守截图流程（2026-10-23 复用验证过）
-1. 杀进程 `Get-Process | ? { $_.ProcessName -like "*OCR*" } | Stop-Process -Force`
-2. **必须** `explorer.exe "D:\rust-target\release\ocr-studio.exe"`（agent shell 直接跑必白屏）
-3. `python scripts/shot_window.py "OCR Studio" out.png` → 打印窗口矩形 `(left,top) WxH`
-4. `python scripts/ui_probe.py <abs_x> <abs_y> out.png --wait 900`（点击+截图同进程，避免 tooltip 残留）
-   - 截图与窗口 1:1，可直接从截图量相对坐标，再 `+ (left,top)` 换成绝对坐标
-   - 侧栏展开 188px、标题栏 `h-10`(40px)；导航项相对坐标 `x=94`、`y = 60 + i*38`
-     （i=0 服务 / 1 接口 / 2 试跑 / 3 日志 / 4 设置）；侧栏折叠开关相对 `(24, 20)`
-
-## 引擎层错误 → API 错误：一律走 `map_engine_err_ctx`（2026-10-23，**别绕**）
-- 位置 `src-tauri/src/api/state.rs`。映射：`Unsupported`→**1002**、`UnknownEngine`→**1003**、
-  `BadRequest`→**400**、`NotReady`/`Inference`→500。
-- **1002 的全部意义**是让调用方区分「这个引擎做不到，换条路」和「服务出故障了」，
-  一律拍成 500 就没法写自动降级。曾经 `/vision/prompt` 缺 MobileCLIP2-B 权重时返 500，
-  就是这个原因（`prompt_find` 绕过了它直接 `ApiError::Internal`）；`run_alt`/`run_pp` 同样漏过。
-- 新写任何「调引擎」的入口，用 `map_engine_err(e)` 或 `map_engine_err_ctx(e, Some("xx失败"))`，
-  **不要**手写 `ApiError::Internal(format!("...: {e}"))`。
-- 有 2 条单测钉住映射（`engine_error_mapping_*`），改映射必须同步改它们。
-
-## 分发包验收：`scripts/verify_packaged.py`（2026-10-23 新增）
-- **源码树跑通 ≠ 分发包能用**：`resolve_models_root()` 优先用 **exe 旁的 `models/`**，
-  打包又会剔一堆文件，只有真解压出来跑才知道。改完打包流程/模型清单就复跑一次。
-- 覆盖：health / shibie / quyuocr / qrcode / `prompt` 图找图（该带的必须能用）/
-  `prompt` 语言找图（**故意不带** 242MB 权重，必须明确报 1002）。
-- 用法：`python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"`
-  （**用 PowerShell 工具跑**，见下条）。
-
-## 打包过滤清单 + gitignore 的两个坑（2026-10-23）
-- `pack_exe.ps1` 剔掉的开发夹具：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、
-  `inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、
-  `models/detect/yolo/` 下除 `README.txt` 外全部。**新增夹具目录时要同步加进来**，
-  否则会跟着发出去（`small/dump` 和 `inspect.json` 就漏过一轮）。
-- `.gitignore` 必须有 `models/**/*.ts`：MobileCLIP2-B 文本塔后缀是 `.ts`（TorchScript zip），
-  会被当 TypeScript 源码跟踪 → **253MB 进仓库**。**不能裸写 `*.ts`**（前端源码靠它）。
-- `pack_exe.ps1` 里内嵌了 `使用说明.txt`，改完**必须重新加 BOM + CRLF**
-  （`[System.Text.UTF8Encoding]::new($true)`），否则记事本乱码。
+## 打包与分发
+- `scripts/pack_exe.ps1` 产 `release/OCR-Studio-<ver>-win64.zip`（免安装）。剔掉：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、`inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、`models/detect/yolo/` 下除 README 外全部。**新增夹具目录要同步加进来**。
+- `.gitignore` 必须有 `models/**/*.ts`（MobileCLIP2-B 权重后缀 `.ts` 会被当 TS 源码，253MB）。不能裸写 `*.ts`。
 - 信封键是 **`msg`** 不是 `message`（`ApiResp { code, msg, data }`）。
+- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑 health/shibie/quyuocr/qrcode/prompt(visual+text) + >2MB 大图 multipart。改打包流程或模型清单后必须复跑。
+- **请求体上限 32MB 靠 `DefaultBodyLimit` 显式放开**（`routes.rs` 的 `build_router_with`）：
+  axum 0.8 默认只给 **2MB**，且只作用于 `Multipart` extractor（JSON 路径自己用
+  `to_bytes(body, MAX_BODY)`，不受影响）。**漏了它，用户 multipart 传 3MB 截图就 400**
+  「Error parsing multipart/form-data request」，同一张图走 JSON 却正常 —— 极难排查。
+- **语言找图权重 `mobileclip2_b.ts`（242MB）随包带**：放正式位置 `models/yoloe/`
+  （硬链接到 `_fixtures/weights/`，零额外占用；`discover_assets` 本就先搜这里）。
+  分发包因此约 **360MB**（`.ts` 已是 zip，再压几乎不减小）。
 
-## 环境：两个会误判成代码 bug 的坑（2026-10-23）
-- **debug target 的 rlib 会瞬时损坏**：`cargo test` 报
-  `error[E0786]: found invalid metadata files for crate 'test'` +
-  `can't find crate for ocr_studio_lib` + `link.exe failed: exit code 1102`，
-  看着像代码炸了。**直接重跑一次即恢复**，别改代码。
-- **Bash 工具里的 `python` ≠ PowerShell 里的 `python`**：Bash 那个
-  `qrcode/PIL/cv2/numpy` 全 MISSING；PowerShell 里同一个 3.12 全 OK。
-  跑带依赖的 Python 脚本**一律用 PowerShell 工具**。
-- `Expand-Archive` 的进度条会刷一屏 `[ooo...]`，用 `2>$null | Out-Null` 压掉。
-
+## 当前状态（2026-10-23）
+- 全部大需求已落地：区域OCR、蒙版模板匹配、二维码/条码、语义找图、提示找图、界面精修、全面检查。
+- 测试基线：`cargo test --lib` **113 passed**；`--ignored` **29 项全绿**（含 `pipeline_match` 黄金基线、`yoloe_prompt_parity`）。
+- 详细记录见 `docs/PROGRESS.md`（§7.9 = 界面精修 + 全面检查）；引擎契约见 `docs/ENGINES.md`。

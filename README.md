@@ -50,8 +50,8 @@ models/                  模型（缺了会提示「引擎未加载」）
 > `scripts\copy_runtime.ps1` 从 `onnxruntime-directml` 包取）。CPU 版也能跑，
 > 但启动时会 warn「不带 DML 执行提供器，改用 CPU」，界面上的推理设备会如实显示 CPU。
 >
-> `models/ocr/ddddocr/` 占 54MB、`models/detect/yolo/` 占约 19MB，只用 PP-OCR 的话
-> 可以整目录删掉，引擎列表里会显示「未安装」，其余功能不受影响。
+> `models/detect/yolo/` **出厂为空**（程序不预置检测模型）；`models/ocr/ddddocr/` 占 54MB，
+> 只用 PP-OCR 的话可以整目录删掉，引擎列表里会显示「未安装」，其余功能不受影响。
 
 ### 前端改动不生效？
 
@@ -60,35 +60,48 @@ models/                  模型（缺了会提示「引擎未加载」）
 
 ## 界面
 
+产品是「API 工具」，界面只是它的控制面板 —— 导航固定 5 项：
+
 | 页面 | 作用 |
 |---|---|
-| 仪表盘 | 引擎状态、模型档位、推理设备、本地 HTTP 服务开关 |
-| 测试台 | 拖拽/粘贴图片 → 文字识别（文本 / 逐行 / 逐字 / JSON）或找图定位 |
-| 运行日志 | 后端 tracing 实时日志，按级别过滤、搜索、暂停、复制 |
-| 设置 | 端口、默认档位/设备、找图阈值、渲染兼容模式 |
+| 服务 | 服务状态（运行中 / 已停止）、地址复制、启停、能力概览、接入代码 |
+| 接口 | 18 个接口的完整文档：参数、返回、错误码、可复制的请求示例 |
+| 试跑 | 在界面里直接传图验证（识别 / 找图 / 语义找图 / 提示找图 / 扫码），带耗时与框坐标 |
+| 日志 | 后端 tracing 实时日志，按级别过滤、搜索、暂停、复制 |
+| 设置 | 模型档位、推理设备、端口、检测模型管理、开机自启、CORS |
 
 侧边栏可收起成图标栏（按钮在标题栏左上角，状态会记住）。
+**关窗口 = 收进托盘**（服务继续跑），真正退出要点托盘菜单的「退出 OCR Studio」。
 
 ## HTTP 接口
 
-服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。
+服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。**共 18 个端点**
+（认字 5 / 找图 8 / 看图 3 / 状态 2）。完整清单与参数以 `src/lib/endpoints.ts` 为
+**唯一事实源**（首页概览与「接口」页同源），与 `src-tauri/src/api/routes.rs` 的 `PATHS` 一一对应。
 
 | 端点 | 说明 |
 |---|---|
-| `GET /ocr/health` | 引擎状态 |
+| `GET /ocr/health` | 服务与引擎状态（脚本启动时先探它，code 为 0 才继续） |
+| `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
 | `POST /ocr/shibie` | 整图识别，返回拼接文本 + 框 + 分数 |
 | `POST /ocr/zhaozi` | 按关键词（或 `/正则/`）筛选命中行 |
 | `POST /ocr/duohangjson` | 多行结构 |
 | `POST /ocr/danzijson` | **逐字**：每行每个字的四点框 + 置信度 + CTC 帧区间 |
+| `POST /ocr/quyuocr` | **区域识别**：只认指定矩形里的字，框坐标已平移回原图 |
 | `POST /ocr/tuzhaotu1\|2` | 在**上传的图**里找图（1=精准 ≥0.92，2=容错 ≥0.72） |
-| `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
-| `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
-| `POST /ocr/yuyizhaotu` | **语义找图**：不用模板图，让检测模型直接找目标（`source` 选 image/screen/window）。出参与模板找图**完全同构**，脚本换个路径就能用 |
+| `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图（hwnd 或窗口标题） |
+| `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图（返回屏幕绝对坐标） |
+| `POST /ocr/yuyizhaotu` | **语义找图**：不用模板图，让检测模型直接找目标（`source` 选 image/screen/window） |
+| `POST /vision/prompt` | **提示找图**：当场给参考图+框（`mode=visual`）或提示词（`mode=text`），换目标不用重导模型 |
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
-| `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
+| `POST /vision/qrcode` | **扫码**：读出二维码 / 条形码内容（纯 CPU，与引擎无关） |
 
-请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`）。
+请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`），上限 32MB。
+
+找图类（模板 / 语义 / 提示）**出参完全同构**（`found / x / y / center_x / center_y / score /
+matched / matches[] / origin_x / origin_y`），脚本换个路径就能用；语义与提示找图额外多
+`engine` 与命中里的 `class_id / class_name`。
 
 ### 选择引擎
 
@@ -153,22 +166,38 @@ DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文
 模板找图要求「长得一模一样」；语义找图让检测模型自己认目标，**不挑外观**。
 代价是只认得模型见过的类别。
 
-YOLOE-26 是开放词汇检测模型，提示词在**导出 ONNX 时就烘焙进权重**，导出后改不了类别：
+YOLOE-26 是开放词汇检测模型，用 `scripts/fetch_yoloe.py` 导出的版本里
+提示词在**导出 ONNX 时就烘焙进权重**，导出后改不了类别：
 
 ```powershell
 python scripts\fetch_yoloe.py --image assets\bus.png --box 30,230,800,776 --name bus
 # 产出 models/detect/yolo/yoloe26_bus.onnx，之后 /ocr/yuyizhaotu 里 engine 传 yolo:yoloe26_bus
 ```
 
-本机走的是**视觉提示**（给参考图 + 框），因为文本提示要 ultralytics 的 CLIP fork，
-而那要拉 git 子模块、本机 MSYS 的 `sh` fork 是坏的。详见 docs/PROGRESS.md §7.8。
+### 提示找图（`/vision/prompt`，换目标不用换模型）
+
+上面那条的提示烘焙在权重里；这条把提示当成检测器的**额外输入**，当场给：
+
+| 模式 | 怎么给提示 | 依赖 |
+|---|---|---|
+| `mode=visual`（图找图） | 一张参考图 + 在上面框住要找的东西 | `models/yoloe/` 三件套（随包带） |
+| `mode=text`（语言找图） | 几个词，如 `"person,bus"` | 额外要 MobileCLIP2-B 文本塔（约 242MB，**随包带**） |
+
+两者出参都与模板找图同构。模型由 `scripts/export_yoloe_prompt.py` 导出到 `models/yoloe/`：
+检测器（`*_prompt.onnx`，双输入 `images` + `pe`）、视觉提示编码器（`*_vpe.onnx`）、
+文本提示头（`*_texthead.onnx`）。文本塔走纯 Rust 的 `mobileclip2-b-rs`（直接读 ultralytics 的 `.ts`）。
+**提示词请用英文** —— 文本塔是 CLIP 的英文词表，中文会被拆成字节 token，基本匹配不上。
+
+> 本机导出只走**视觉提示**：文本提示要 ultralytics 的 CLIP fork，而那要拉 git 子模块、
+> 本机 MSYS 的 `sh` fork 是坏的（`0xC0000142`）。详见 docs/PROGRESS.md §7.8。
 
 ## 验证
 
 ```powershell
-cargo test                    # 92 个单元测试
-cargo test -- --ignored       # 22 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
-cargo test --test yoloe_smoke -- --ignored   # 语义找图冒烟（目录里没有检测模型会自动跳过）
+cargo test                    # 113 个单元测试 + 16 个 API 冒烟
+cargo test -- --ignored       # 29 个重量级：精度基线、真实截图、逐字对齐、跨语言对齐、提示找图
+python scripts/verify_http_contract.py --exe "<OCR Studio.exe>"   # 404/405 与 CORS 信封
+python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"  # 分发包端到端
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
 python scripts/ref_yolo.py models/detect/yolo/model.onnx assets/bus.png out.json   # yolo 官方实现参照
@@ -179,7 +208,7 @@ python scripts/ref_ddddocr.py --image models/small/dump/box_0_src.png   # ddddoc
 
 ## 文档
 
-- `docs/PLAN.md` —— 总体方案与里程碑
+- `docs/PLAN.md` —— 总体方案与里程碑（含视觉规范）
 - `docs/PROGRESS.md` —— **现在做到哪里了**（含踩坑记录）
-- `docs/ENGINES.md` —— 多引擎（DDDDOCR / YOLO）扩展设计
-- `docs/DECISIONS.md` —— 关键技术决策与实测依据
+- `docs/ENGINES.md` —— 多引擎（DDDDOCR / YOLO / YOLOE 提示）扩展设计
+- `src/lib/endpoints.ts` —— 接口清单的**事实源**（首页概览与接口页同源）

@@ -86,6 +86,11 @@ D:/Python测试/OCR-Studio/
 └── vite.config.ts
 ```
 
+> ⚠️ `src/` 部分是**最初规划**（Vue 3）；2026-10-21 已改为 **React + TypeScript**（见 7.1），
+> 实际为 `src/pages/*.tsx` + `src/components/*`，导航 = 服务 / 接口 / 试跑 / 日志 / 设置。
+> `src-tauri/` 部分与现状基本一致，另新增了 `engine/`（多引擎）、`api/state.rs`、
+> `logbuf.rs`、`barcode.rs`。
+
 ---
 
 ## 4. 推理管线
@@ -127,7 +132,10 @@ models/<level>/
 
 ---
 
-## 6. HTTP 接口（1:1 复刻原产品）
+## 6. HTTP 接口（原产品 12 条 + 后续扩展，现共 18 条）
+
+> **事实源**：`src/lib/endpoints.ts`（首页概览与「接口」页同源）与
+> `src-tauri/src/api/routes.rs` 的 `PATHS`。改路由必须同步这两处。
 
 | 方法 | 路径 | 入参 | 出参 |
 |---|---|---|---|
@@ -135,6 +143,7 @@ models/<level>/
 | POST | `/ocr/zhaozi` | image + 关键词/正则 | 命中框列表 |
 | POST | `/ocr/duohangjson` | image | 多行 [{text, box, score}] |
 | POST | `/ocr/danzijson` | image | 单字 [{char, box, score}] |
+| POST | `/ocr/quyuocr` | image + region | 只认矩形内的字，框坐标已平移回原图 |
 | POST | `/ocr/tuzhaotu1` | screen + template | {found, x, y, score} 精准 |
 | POST | `/ocr/tuzhaotu2` | screen + template | 同上 容错 |
 | POST | `/ocr/jubingzhaotu1` | hwnd + template | 同上 精准 |
@@ -142,18 +151,27 @@ models/<level>/
 | POST | `/ocr/pingmuzhaotu1` | template(+region) | 同上 精准 |
 | POST | `/ocr/pingmuzhaotu2` | template(+region) | 同上 容错 |
 | POST | `/ocr/yuyizhaotu` | source + 检测模型 | 语义找图，出参与模板找图同构 |
+| POST | `/vision/prompt` | mode + 参考图/提示词 | 提示找图，出参与模板找图同构 |
+| POST | `/vision/detect` | image + engine:yolo | 目标检测 |
+| POST | `/vision/pipeline` | image + detect_engine | 检测 + 识别串联 |
+| POST | `/vision/qrcode` | image | 二维码 / 条形码 |
 | GET | `/ocr/health` | — | {status, model, device} |
+| GET | `/engine/list` | — | 可用引擎与能力 |
 
-约定：图像支持 `multipart/form-data` 或 `application/json` 的 base64（二选一实现，默认 base64 兼容脚本党习惯）。
+约定：图像支持 `multipart/form-data` 或 `application/json` 的 base64（默认 base64 兼容脚本党习惯）；
+请求体上限 32MB（`DefaultBodyLimit`，见 `routes.rs`）。
 
 ---
 
 ## 7. UI 设计
 
-- **Dashboard**：模型档位下拉（Tiny/Small/Medium）、设备（DirectML/CPU）+ 当前实际设备、模型加载状态、服务端口、启动/停止、健康检查按钮。
-- **Playground**：拖入/粘贴图片 → 调 `/ocr/shibie`、`/ocr/zhaozi`、找图；左图右结果，框可叠加显示。
-- **Logs**：实时日志（tracing → 前端事件）。
-- **Settings**：端口、默认档位、是否开机自启、模板匹配阈值。
+产品是 **API 工具**，界面只是它的控制面板。导航固定 5 项（原方案 4 项，已加「接口」页）：
+
+- **服务**：服务状态（运行中/已停止）、地址复制、启停、能力概览、接入代码。
+- **接口**：18 个端点的完整文档（参数 / 返回 / 错误码 / 可复制示例），数据来自 `endpoints.ts`。
+- **试跑**：拖入/粘贴图片 → 识别 / 找图 / 语义找图 / 提示找图 / 扫码；左图右结果，框可叠加。
+- **日志**：实时日志（tracing → 前端事件）。
+- **设置**：端口、默认档位、设备、检测模型管理、开机自启、CORS。
 
 ### 7.1 视觉规范（2026-10-21 确定）
 

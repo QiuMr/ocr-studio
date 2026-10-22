@@ -24,6 +24,21 @@ user32.SetProcessDPIAware()
 VK_ESCAPE = 0x1B
 KEYEVENTF_KEYUP = 0x0002
 
+VK_MENU = 0x12
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+
+# 不声明 argtypes 时 HWND(-1)（HWND_TOPMOST）按 32 位传，
+# SetWindowPos 返回 0 静默失败；声明后才靠谱。
+user32.SetWindowPos.argtypes = [
+    wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint
+]
+user32.SetWindowPos.restype = wt.BOOL
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.SetForegroundWindow.restype = wt.BOOL
+
 
 def find_window(keyword: str):
     hits = []
@@ -69,9 +84,17 @@ def main() -> int:
     hits = find_window("OCR Studio")
     if hits:
         hwnd = hits[0]
-        user32.ShowWindow(hwnd, 9)
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+        # **顺序要紧**：先敲 ALT 解锁 Windows 的前台切换限制，再 SetWindowPos(TOPMOST)，
+        # 最后才 SetForegroundWindow。反过来（先 SetForegroundWindow）会被前台锁拒绝，
+        # 点击落到压在 App 上面的窗口上 —— 表现是「点了没反应，截图还是原页面」
+        # （本轮就因此误判过一次，以为坐标算错了）。
+        tap(VK_MENU)
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
         user32.SetForegroundWindow(hwnd)
-        time.sleep(0.25)
+        user32.BringWindowToTop(hwnd)
+        time.sleep(0.6)
 
     if key:
         tap(int(key, 16) if key.lower().startswith("0x") else int(key))
@@ -101,6 +124,8 @@ def main() -> int:
         shot = sct.grab({"left": rect.left, "top": rect.top, "width": w, "height": h})
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
     img.save(out)
+    if hwnd:
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
     print(f"[INFO] 点击 ({x}, {y}) 后 {wait}ms 截图 -> {out} ({w}x{h})")
     return 0
 

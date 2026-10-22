@@ -11,8 +11,7 @@
   3. /ocr/quyuocr         区域识别（框坐标已平移回原图）
   4. /vision/qrcode       扫码（纯 CPU，与引擎无关）
   5. /vision/prompt visual 图找图：分发包**带全了**这套模型，必须能出框
-  6. /vision/prompt text   语言找图：分发包**故意不带** 242MB 文本塔权重，
-                           必须返回明确的「缺 MobileCLIP2-B」而不是静默空结果
+  6. /vision/prompt text   语言找图：分发包**带全了** 242MB 文本塔权重，必须能出框
 
 用法：
     python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe" [--port 8848]
@@ -149,6 +148,39 @@ def main() -> int:
         check("shibie 有文字返回", bool(text.strip()), repr(text[:60]))
         print(f"[INFO] 识别文字: {text[:80]!r}")
 
+        # ---------------- 2b. multipart 大图（>2MB）----------------
+        # axum 的 `DefaultBodyLimit` 默认只有 **2MB**，而 multipart 走的是
+        # `Multipart` extractor（JSON 路径自己用 `to_bytes(body, 32MB)`，不受影响）。
+        # 没显式放开的话，用户传一张 3MB 的截图就 400
+        # 「Error parsing multipart/form-data request」，而同一张图走 JSON 却正常，
+        # 极难排查。这里用一张 >2MB 的图钉住它。
+        print("\n=== /ocr/shibie multipart（>2MB 大图，验 DefaultBodyLimit） ===")
+        try:
+            import numpy as np
+            from PIL import Image
+
+            big = Path(tempfile.gettempdir()) / "ocr_smoke_big.png"
+            rng = np.random.default_rng(0)
+            Image.fromarray(
+                rng.integers(0, 256, (1200, 1200, 3), dtype=np.uint8)
+            ).save(big)
+            raw_bytes = big.read_bytes()
+            print(f"[INFO] 大图 {len(raw_bytes) / 1e6:.2f} MB")
+            boundary = "----ocrsmoke"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="image"; filename="big.png"\r\n'
+                f"Content-Type: image/png\r\n\r\n"
+            ).encode() + raw_bytes + f"\r\n--{boundary}--\r\n".encode()
+            st, raw = req(
+                "POST", f"{base}/ocr/shibie", body,
+                {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            )
+            j = json.loads(raw.decode("utf-8"))
+            check("multipart 大图 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+        except ImportError:
+            print("[SKIP] 没装 numpy/PIL，跳过大图 multipart 项")
+
         # ---------------- 3. quyuocr ----------------
         print("\n=== /ocr/quyuocr（区域识别） ===")
         st, j = post_json(f"{base}/ocr/quyuocr",
@@ -202,17 +234,21 @@ def main() -> int:
                   f"score={h.get('score')} class={h.get('class_name')}")
         check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
 
-        # ---------------- 6. prompt text（语言找图，应明确报缺权重） ----------------
-        print("\n=== /vision/prompt mode=text（语言找图，分发包故意不带 242MB 权重） ===")
+        # ---------------- 6. prompt text（语言找图，分发包应带全） ----------------
+        print("\n=== /vision/prompt mode=text（语言找图，分发包应带全） ===")
         st, j = post_json(f"{base}/vision/prompt", {
             "mode": "text",
             "image": b64(bus),
-            "words": "bus",
+            "words": "person,bus",
+            "conf": 0.25,
         })
-        msg = (j.get("msg") or "") + (j.get("message") or "")
-        print(f"[INFO] code={j.get('code')} msg={msg[:200]!r}")
-        check("text 模式明确拒绝（code=1002）", j.get("code") == 1002, str(j.get("code")))
-        check("报错点名 MobileCLIP2-B", "MobileCLIP2-B" in msg, msg[:160])
+        d = j.get("data") or {}
+        print(json.dumps(d, ensure_ascii=False)[:500])
+        check("prompt text code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+        check("prompt text 命中", bool(d.get("found")), str(d.get("found")))
+        check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
+        names = [m.get("class_name") for m in (d.get("matches") or [])]
+        check("类名就是提示词", any(n in ("person", "bus") for n in names), str(names[:5]))
 
     finally:
         stop()

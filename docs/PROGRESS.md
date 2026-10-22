@@ -242,13 +242,12 @@ release/OCR-Studio-0.1.0-win64.zip                  exe + 3 个 dll + models + �
 
 打包产物实测（2026-10-23，`scripts/verify_packaged.py` 全绿，见 §7.9）：
 ```
-release/OCR-Studio-0.1.0-win64.zip                  120.73 MB（解压 165.62 MB / 19 文件）
+release/OCR-Studio-0.1.0-win64.zip                  约 360 MB（含语言找图 242MB 文本塔）
 OCR Studio.exe                                      14.84 MB
 解压目录直接跑                                       health ok / actual_device=directml
 /ocr/shibie /ocr/quyuocr /vision/qrcode             全部 code=0，结果正确
 /vision/prompt mode=visual                          found=true score=0.955 engine=yoloe-prompt
-/vision/prompt mode=text（故意不带 242MB 权重）      code=1002，消息点名 MobileCLIP2-B
-```
+/vision/prompt mode=text                            found=true（类名=提示词）engine=yoloe-prompt
 ```
 
 基线文件：`models/small/reference_output.json`（由 `scripts/ref_pipeline.py` 生成）。
@@ -947,14 +946,16 @@ metadata `task=segment`、`names={0:'yoloe26_bus'}`）。Rust 引擎冒烟
 模板找图同构 —— 结果接口页上它跑到别组去了，注释和实际分组对不上。已特判归「找图」
 （分组计数变为 找图 8 / 看图 3，总数仍是 18）。
 
-**打包发现（重要，未擅自改，需拍板）**：
+**打包决策（用户拍板：随包带）**：
 `/vision/prompt` 的「语言找图」需要 MobileCLIP2-B 文本塔权重 `mobileclip2_b.ts`（**242MB**），
-它现在放在 `models/_fixtures/weights/`，而 `pack_exe.ps1` 会**整个删掉 `_fixtures`**
-→ 分发包里语言找图不可用。
-图找图**不受影响**：它只要 `models/yoloe/*.onnx`（28MB），那三个文件会随包发出去。
-已把这一点写进 `pack_exe.ps1` 的 `使用说明.txt`（缺什么、放哪、怎么拿），
-服务端也会明确报「缺 MobileCLIP2-B 权重 / 词表 / 提示头」，不会静默失败。
-**是否默认随包带 242MB，留给用户决定。**
+原放在 `models/_fixtures/weights/`，而 `pack_exe.ps1` 会**整个删掉 `_fixtures`**
+→ 分发包里语言找图不可用（图找图不受影响，它只要 `models/yoloe/*.onnx`）。
+用户决定**随包带**，做法：在引擎认定的正式位置 `models/yoloe/` 建该权重的**硬链接**
+（同分区、零额外占用；`_fixtures/weights/` 那份保留给 `ref_yoloe_prompt.py` 等开发脚本继续用），
+`discover_assets` 本就先搜 `models/yoloe/`，**无需改任何代码**。
+同步更新 `使用说明.txt`（两种模式均开箱可用，并提示提示词要用英文）与
+`verify_packaged.py`（语言找图从「必须报 1002」改为「必须出框」）。
+代价：zip 从 120.73 MB 涨到约 360 MB（`.ts` 本身已是 zip，再压几乎不减小）。
 
 **分发包说明同步**：`使用说明.txt` 的接口一览从 15 → **18**
 （补 `/ocr/quyuocr`、`/vision/qrcode`、`/vision/prompt`），并新增「提示找图」整节说明
@@ -977,7 +978,8 @@ metadata `task=segment`、`names={0:'yoloe26_bus'}`）。Rust 引擎冒烟
 前面那些都是「源码树里跑通」，分发包是另一回事：`resolve_models_root()` 优先用
 **exe 旁的 `models/`**，打包时又会剔掉一堆东西，两边不一致只有真解压出来跑才知道。
 新脚本对解压目录起服务，逐项验：health / shibie / quyuocr / qrcode /
-`prompt` 图找图（**该带的必须能用**）/ `prompt` 语言找图（**故意不带的必须明确报错**）。
+`prompt` 图找图（**该带的必须能用**）/ `prompt` 语言找图（**同样必须能用**）/
+**>2MB 大图 multipart**（钉住 `DefaultBodyLimit` 那条修复）。
 
 **跑出来的结果（`[PASS] 全部通过`）**：
 
@@ -987,7 +989,8 @@ shibie   'OCRStudio测试样本第一行\n混合English123与中文混排\n订�
 quyuocr  region=[0,0,400,200] 原图 900x560
 qrcode   count=1 format=QR_CODE text='https://example.com/ocr-studio'
 prompt   mode=visual found=true score=0.955 center=(409.1,486.2) engine=yoloe-prompt 903ms
-prompt   mode=text   code=1002 '提示找图失败: 该引擎不支持 text（缺 MobileCLIP2-B 权重 / 词表 / 提示头）'
+prompt   mode=text   found=true class=person/bus engine=yoloe-prompt
+multipart 大图 4.33 MB → code=0
 ```
 
 #### 又修一个真 bug：能力不支持被拍成了 500（打包验收跑出来的）
@@ -1015,6 +1018,32 @@ eng.run(&target, &input, &opts)
 补了 2 条单测钉住映射（`engine_error_mapping_keeps_special_codes` /
 `engine_error_mapping_ctx_prefixes_message_only`），`cargo test --lib` 111 → **113**。
 
+#### 又修一个真 bug：multipart 传 >2MB 的图必失败（发布前全局检查抓出来的）
+
+**症状**：同一张 9.73MB 的图，走 JSON base64 成功，走 multipart 就 **400**：
+
+```
+JSON  base64  body=12.98MB → code=0
+multipart     body= 9.73MB → code=400  {"msg":"multipart 数据读取失败: Error parsing `multipart/form-data` request"}
+multipart 小图 body=42KB   → code=0
+```
+
+**根因**：`routes.rs` 的 `MAX_BODY = 32MB` 只传给了 `to_bytes(req.into_body(), MAX_BODY)`
+（JSON 路径自己带上限），而 multipart 走 `Multipart` extractor，它读的是
+`DefaultBodyLimit` —— **axum 0.8 默认只有 2MB**，而 `build_router_with()` 里压根没设这个 layer。
+
+```rust
+// 修：显式放开，两条入参路径的上限必须一致
+router = router.layer(DefaultBodyLimit::max(MAX_BODY));
+```
+
+**为什么这个必须赶在发布前修**：README 与 `使用说明.txt` 都宣传支持 multipart，
+用户按文档写 `requests.post(url, files={"image": f})` 传一张 3MB 截图就 400，
+报错文案还含糊（没说超限），只会以为是自己代码写错了 —— 这是「发出去才被撞上」的典型。
+
+补救：`verify_packaged.py` 新增 **2b** 项回归用例（`numpy` 生成 1200×1200 噪声 PNG、
+手搓 multipart body），打包验收实测 `multipart 大图 4.33 MB → code=0`。
+
 #### 仓库卫生（顺手清掉的三处）
 
 1. **`models/small/dump/`（15 文件）与 `inspect.json` 之前会进分发包**。
@@ -1033,12 +1062,12 @@ eng.run(&target, &input, &opts)
 
 | 项 | 值 |
 |---|---|
-| `release/OCR-Studio-0.1.0-win64.zip` | **120.73 MB**（解压 165.62 MB / 19 文件） |
-| 上轮同款 zip | 95.56 MB —— 涨的是 `models/yoloe/` 图找图三件套（约 30MB） |
-| exe | 14.84 MB（LTO，嵌入 6 个前端 chunk） |
+| `release/OCR-Studio-0.1.0-win64.zip` | **345.3 MB**（含语言找图 242MB 文本塔；`_fixtures`/`small/dump`/`inspect.json`/`detect` 出厂模型全已剔除） |
+| 上上轮同款 zip | 95.56 MB（无图找图模型）→ 120.73 MB（+ 图找图三件套约 30MB）→ 本轮 345.3 MB（+ 语言找图文本塔约 225MB） |
+| exe | 14.85 MB（LTO，嵌入 6 个前端 chunk） |
 
-比上轮大是**有意为之**：图找图是开箱能力，模型必须随包；语言找图那 242MB
-仍然没带（缺时明确报 1002，已验）。
+比上轮大是**有意为之**：图找图与语言找图都是开箱能力，模型必须随包
+（语言找图那 242MB 文本塔由用户拍板随包带，见 §7.9「打包决策」）。
 
 ---
 
@@ -1059,7 +1088,7 @@ scripts/ref_yoloe_prompt.py       # 提示引擎的精度基准（生成 models/
 scripts/e2e_find.py               # 找图端到端验证（真实屏幕 -> HTTP 服务 -> 坐标比对）
 scripts/win_capture.py            # 无人值守抓图：PrintWindow 取窗口自身画面（被遮挡也能抓）
 scripts/focus_shot.py             # 无人值守抓图：ALT 解锁前台 + 置顶后再屏幕截图（兜底）
-scripts/verify_packaged.py        # 免安装分发包端到端验收（解压即用 / 缺权重须报 1002）
+scripts/verify_packaged.py        # 免安装分发包端到端验收（解压即用 / 语言找图必须出框 / 大图 multipart）
 scripts/verify_http_contract.py   # HTTP 协议契约（404/405 信封、CORS 开关）
 scripts/verify_tray.py            # 托盘行为验收（关窗口隐藏 / 单实例）
 scripts/verify_autostart.py       # 开机自启注册表项验收
