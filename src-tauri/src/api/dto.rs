@@ -18,6 +18,10 @@ pub const CODE_BAD_REQUEST: i32 = 400;
 pub const CODE_ENGINE_NOT_READY: i32 = 503;
 /// 已规划但尚未实现的功能。
 pub const CODE_NOT_IMPLEMENTED: i32 = 501;
+/// 路径不存在（打错接口名）。带最近似路径提示。
+pub const CODE_NOT_FOUND: i32 = 404;
+/// 路径对但方法不对（例如对 POST 接口发了 GET）。
+pub const CODE_METHOD_NOT_ALLOWED: i32 = 405;
 
 /// 统一响应信封。
 #[derive(Debug, Serialize)]

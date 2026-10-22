@@ -821,6 +821,38 @@ pub fn models_root(state: State<'_, Arc<AppState>>) -> String {
     state.models_root.display().to_string()
 }
 
+// ---------------------------------------------------------------- 开机自启
+
+/// 开机自启当前是否开启。
+///
+/// 状态只存在操作系统里（注册表 Run 项），**不写进 config.json**：
+/// 两处都存就会出现「配置文件说开着、系统里其实没有」的分裂状态，
+/// 用户还得自己判断哪个是真的。
+#[tauri::command]
+pub fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("读取开机自启状态失败: {e}"))
+}
+
+/// 打开/关闭开机自启，返回操作后的真实状态。
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    let r = if enabled { al.enable() } else { al.disable() };
+    r.map_err(|e| {
+        format!(
+            "{}失败: {e}",
+            if enabled { "开启开机自启" } else { "关闭开机自启" }
+        )
+    })?;
+    // 回读而不是直接返回 enabled：注册表可能因权限被拒，如实反映才可信
+    al.is_enabled()
+        .map_err(|e| format!("回读开机自启状态失败: {e}"))
+}
+
 // ---------------------------------------------------------------- 找图
 
 /// 前端发来的找图参数。字段与 HTTP 的 `FindOptions` 一一对应，额外多一个

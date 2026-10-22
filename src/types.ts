@@ -78,6 +78,8 @@ export interface AppConfig {
   template_threshold: number;
   /** 兼容渲染（软件合成）。由后端维护：WebView 白屏时自动置位，前端只读 */
   webview_compat?: boolean;
+  /** 允许浏览器页面跨域调用（CORS）。默认 false，开启后需重启服务生效 */
+  allow_browser?: boolean;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {

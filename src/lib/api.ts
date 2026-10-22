@@ -104,6 +104,16 @@ export async function serverStop(): Promise<void> {
   return invoke<void>("server_stop");
 }
 
+/** 开机自启是否已开启（状态只在系统里，不在 config.json）。 */
+export async function getAutostart(): Promise<boolean> {
+  return invoke<boolean>("get_autostart");
+}
+
+/** 打开/关闭开机自启，返回操作后的真实状态。 */
+export async function setAutostart(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_autostart", { enabled });
+}
+
 export async function modelsRoot(): Promise<string> {
   return invoke<string>("models_root");
 }

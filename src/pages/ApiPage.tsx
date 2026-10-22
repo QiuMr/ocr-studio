@@ -26,6 +26,8 @@ const ORDER: EndpointGroup[] = ["ocr", "find", "vision", "status"];
 const ERRORS = [
   { code: "0", text: "成功，结果在 data 里" },
   { code: "400", text: "参数有问题（缺 image、base64 解不开、正则写错）" },
+  { code: "404", text: "路径不存在。msg 里会给出最接近的可用路径" },
+  { code: "405", text: "路径对了但方法不对（这些接口基本都是 POST）" },
   { code: "501", text: "该能力还没实现" },
   { code: "503", text: "引擎没加载好：模型不全或 onnxruntime.dll 缺失" },
   { code: "1002", text: "这个引擎不支持该能力（比如用 OCR 引擎去目标检测）" },

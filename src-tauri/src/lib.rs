@@ -278,6 +278,12 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // 开机自启：拉起时带 `--tray`，直接缩在托盘里不弹窗，
+        // 否则每次开机都在屏幕中间冒一个窗口。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--tray"]),
+        ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 注意用 app_data_dir 而不是 data_dir：
@@ -332,21 +338,44 @@ pub fn run() {
                 }
             }
 
+            // 开机自启拉起时带 --tray：只留托盘，不弹窗
+            if std::env::args().any(|a| a == "--tray") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                    tracing::info!("检测到 --tray：主窗口保持隐藏，仅托盘常驻");
+                }
+            }
+
             // 看门狗：等前端报到；超时说明 WebView 已死（JS 一次都没执行），
             // 切软件合成重建。只在没有外部指定参数且尚未处于兼容模式时尝试。
+            //
+            // ⚠️ 2026-10-22 又绕了一圈的教训（别再重复）：
+            // 这条兜底在**本项目的 agent shell 里永远救不回来** —— 那个 shell 会让
+            // WebView2 的 GPU 子进程必崩（见 docs/PROGRESS.md 0.1 节），连重建都起不来。
+            // 那是**环境问题，不是产品缺陷**：同一个 exe 用资源管理器启动就正常。
+            // 所以不要拿 agent shell 里的白屏去改代码，验收界面一律
+            // `explorer.exe <exe>` 启动后再用 scripts/shot_window.py 抓图。
+            //
+            // build() 保持在子线程调用：Tauri 内部会把它派发到主线程并等待结果，
+            // 子线程调用是正常路径；反过来在主线程直接调会死锁（已试过，更糟）。
             if forced.is_some() || compat_already {
                 return Ok(());
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                for _ in 0..40 {
+                // release 4 秒：白窗挂 10 秒足够让用户认定程序坏了；
+                // dev 12 秒：vite 首次加载慢，给足。
+                let budget_ms: u64 = if tauri::is_dev() { 12_000 } else { 4_000 };
+                let mut waited = 0u64;
+                while waited < budget_ms {
                     if UI_READY.load(Ordering::SeqCst) {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(250));
+                    waited += 250;
                 }
                 tracing::error!(
-                    "前端 10 秒内未报到，判定 WebView 渲染失败（GPU 进程崩溃），切换软件合成重建窗口"
+                    "前端 {budget_ms} ms 内未报到，判定 WebView 渲染失败（GPU 进程崩溃），切换软件合成重建窗口"
                 );
 
                 if let Some(old) = handle.get_webview_window("main") {
@@ -383,6 +412,8 @@ pub fn run() {
             commands::server_status,
             commands::server_start,
             commands::server_stop,
+            commands::get_autostart,
+            commands::set_autostart,
             commands::models_root,
             commands::find_image,
             commands::screen_preview,

@@ -8,7 +8,7 @@ pub mod routes;
 pub mod state;
 
 pub use dto::{ApiError, ApiResp, OcrOptions, CODE_NOT_IMPLEMENTED, CODE_OK};
-pub use routes::build_router;
+pub use routes::{build_router, build_router_with};
 pub use state::{resolve_models_root, workspace_root, AppState};
 
 use std::sync::Arc;
@@ -33,7 +33,15 @@ pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
     }
 
     tracing::info!("HTTP 服务已启动: http://127.0.0.1:{port}");
-    axum::serve(listener, build_router().with_state(state))
+    let allow_browser = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow_browser;
+    if allow_browser {
+        tracing::info!("已允许浏览器页面跨域调用（CORS 打开）");
+    }
+    axum::serve(listener, build_router_with(allow_browser).with_state(state))
         .with_graceful_shutdown(async {
             let _ = rx.await;
         })

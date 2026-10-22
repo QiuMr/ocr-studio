@@ -81,6 +81,12 @@ pub struct AppConfig {
     /// （模型动辄几十上百 MB，复制一份纯属浪费磁盘）。
     /// 目录 `models/detect/yolo/` 下扫到的模型不需要记在这里。
     pub detect_models: Vec<String>,
+    /// 允许浏览器页面调用（CORS）。
+    ///
+    /// 默认 **false**：这些接口能读本机屏幕（`/ocr/pingmuzhaotu*`），
+    /// 默认放行任意网页等于把「截屏 + 识别」交给任何打开着的网页去驱动。
+    /// 需要在本地 HTML / Electron 页面里 fetch 时才打开。
+    pub allow_browser: bool,
 }
 
 impl Default for AppConfig {
@@ -92,6 +98,7 @@ impl Default for AppConfig {
             template_threshold: 0.9,
             webview_compat: false,
             detect_models: Vec::new(),
+            allow_browser: false,
         }
     }
 }

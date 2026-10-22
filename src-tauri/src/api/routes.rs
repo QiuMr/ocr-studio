@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use axum::body::to_bytes;
 use axum::extract::{FromRequest, Multipart, Request, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{self, CONTENT_TYPE};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -24,7 +25,7 @@ use super::dto::{
     decode_base64_image, decode_image, err_resp, ApiError, ApiResp, Box4, CharDto, DanziData,
     DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData, FindHitDto, FindOptions,
     HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto, ShibieData, ZhaoziData,
-    CODE_ENGINE_NOT_READY, EngineItemDto, EngineListData,
+    CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED, CODE_NOT_FOUND, EngineItemDto, EngineListData,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -89,22 +90,189 @@ impl FindSource {
 }
 
 /// 构建路由。调用方需 `with_state` 注入 `Arc<AppState>`。
+///
+/// CORS 默认**关闭**：这些接口能读本机屏幕（`/ocr/pingmuzhaotu*`），
+/// 默认放行任意网页等于把「截屏 + 识别」交给任何打开的网页去驱动。
+/// 需要从浏览器页面调用时，去设置里显式打开。
 pub fn build_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/ocr/shibie", post(shibie))
-        .route("/ocr/zhaozi", post(zhaozi))
-        .route("/ocr/duohangjson", post(duohangjson))
-        .route("/ocr/danzijson", post(danzijson))
-        .route("/ocr/tuzhaotu1", post(tuzhaotu1))
-        .route("/ocr/tuzhaotu2", post(tuzhaotu2))
-        .route("/ocr/jubingzhaotu1", post(jubingzhaotu1))
-        .route("/ocr/jubingzhaotu2", post(jubingzhaotu2))
-        .route("/ocr/pingmuzhaotu1", post(pingmuzhaotu1))
-        .route("/ocr/pingmuzhaotu2", post(pingmuzhaotu2))
-        .route("/ocr/health", get(health))
-        .route("/engine/list", get(engine_list))
-        .route("/vision/detect", post(vision_detect))
-        .route("/vision/pipeline", post(vision_pipeline))
+    build_router_with(false)
+}
+
+/// 带 CORS 开关的路由构建。
+pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
+    let mut router = Router::new()
+        .route(P_SHIBIE, post(shibie))
+        .route(P_ZHAOZI, post(zhaozi))
+        .route(P_DUOHANG, post(duohangjson))
+        .route(P_DANZI, post(danzijson))
+        .route(P_TU1, post(tuzhaotu1))
+        .route(P_TU2, post(tuzhaotu2))
+        .route(P_JU1, post(jubingzhaotu1))
+        .route(P_JU2, post(jubingzhaotu2))
+        .route(P_PINGMU1, post(pingmuzhaotu1))
+        .route(P_PINGMU2, post(pingmuzhaotu2))
+        .route(P_HEALTH, get(health))
+        .route(P_ENGINES, get(engine_list))
+        .route(P_DETECT, post(vision_detect))
+        .route(P_PIPELINE, post(vision_pipeline))
+        // 兜底：先注册再套 layer，layer 才会把 fallback 一起包住
+        .fallback(not_found);
+
+    // 404/405 统一成 {code,msg} 信封。顺序有意义：后 layer 的在外层，
+    // 所以 CORS 在 unify 外面——OPTIONS 预检要能在进入 unify 之前被处理。
+    router = router.layer(axum::middleware::from_fn(unify_router_errors));
+    if allow_browser {
+        router = router.layer(axum::middleware::from_fn(cors_headers));
+    }
+    router
+}
+
+// ---------------------------------------------------------------- 路径表
+
+/// 端点路径的**单一事实源**：`.route()` 与「你是不是想调 X」提示都从这里取，
+/// 不可能只改一处。加路由时同时加到这个表里。
+const P_SHIBIE: &str = "/ocr/shibie";
+const P_ZHAOZI: &str = "/ocr/zhaozi";
+const P_DUOHANG: &str = "/ocr/duohangjson";
+const P_DANZI: &str = "/ocr/danzijson";
+const P_TU1: &str = "/ocr/tuzhaotu1";
+const P_TU2: &str = "/ocr/tuzhaotu2";
+const P_JU1: &str = "/ocr/jubingzhaotu1";
+const P_JU2: &str = "/ocr/jubingzhaotu2";
+const P_PINGMU1: &str = "/ocr/pingmuzhaotu1";
+const P_PINGMU2: &str = "/ocr/pingmuzhaotu2";
+const P_HEALTH: &str = "/ocr/health";
+const P_ENGINES: &str = "/engine/list";
+const P_DETECT: &str = "/vision/detect";
+const P_PIPELINE: &str = "/vision/pipeline";
+
+/// 全部端点（给 404 提示与自检用）。
+pub const PATHS: &[&str] = &[
+    P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1, P_PINGMU2,
+    P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE,
+];
+
+// ---------------------------------------------------------------- 兜底与 CORS
+
+/// 默认 fallback。正常情况下会被 `unify_router_errors` 改写，保留它是为了
+/// 中间件顺序被改动时也不至于返回空 body。
+async fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(err_resp(CODE_NOT_FOUND, "没有这个接口")),
+    )
+        .into_response()
+}
+
+/// 把 axum 自动产生的空体 404/405 换成统一信封。
+///
+/// 为什么值得做：全站约定是 `{code,msg,data}`，但 axum 的路由层自己回的
+/// 404/405 是**空 body**。小白照着文档把 `shibie` 打成 `shibei`，只会拿到
+/// 一个空响应，完全不知道是路径写错了——这类问题靠猜最耗时间。
+async fn unify_router_errors(req: Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let resp = next.run(req).await;
+
+    if resp.status() == StatusCode::NOT_FOUND {
+        let msg = match closest_path(&path) {
+            Some(p) => format!("没有这个接口：{path}，你是不是想调 {p}？"),
+            None => format!(
+                "没有这个接口：{path}。可用接口见界面「接口」页，或 GET /engine/list"
+            ),
+        };
+        return (StatusCode::NOT_FOUND, Json(err_resp(CODE_NOT_FOUND, msg))).into_response();
+    }
+
+    if resp.status() == StatusCode::METHOD_NOT_ALLOWED {
+        let allow = resp
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("POST")
+            .to_string();
+        let hint = if method == Method::OPTIONS {
+            "（浏览器页面调用需要先在设置里打开「允许浏览器页面调用」）"
+        } else {
+            ""
+        };
+        let msg = format!("{path} 不支持 {method}，请改用 {allow}{hint}");
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(err_resp(CODE_METHOD_NOT_ALLOWED, msg)),
+        )
+            .into_response();
+    }
+    resp
+}
+
+/// 给响应补 CORS 头；OPTIONS 预检直接短路返回 204。
+///
+/// 回显 Origin 而不是写死 `*`：将来若要支持 credentials，写死 `*` 会被浏览器拒绝。
+async fn cors_headers(req: Request, next: axum::middleware::Next) -> Response {
+    let origin = req.headers().get(header::ORIGIN).cloned();
+    if req.method() == Method::OPTIONS {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        add_cors(&mut resp, origin);
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    add_cors(&mut resp, origin);
+    resp
+}
+
+fn add_cors(resp: &mut Response, origin: Option<HeaderValue>) {
+    let h = resp.headers_mut();
+    if let Some(o) = origin {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, o);
+        h.insert(header::VARY, HeaderValue::from_static("Origin"));
+    } else {
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+    }
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Content-Type"),
+    );
+    h.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+}
+
+/// 在已知路径里找最接近的一条（编辑距离 ≤ 3 才算），用于「你是不是想调 X」。
+fn closest_path(input: &str) -> Option<&'static str> {
+    let mut best: Option<(&'static str, usize)> = None;
+    for p in PATHS {
+        let d = edit_distance(input, p);
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((p, d));
+        }
+    }
+    best.filter(|(_, d)| *d <= 3).map(|(p, _)| p)
+}
+
+/// 标准 Levenshtein 距离（两条短路径，O(n·m) 足够）。
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 // ---------------------------------------------------------------- 入参解析
@@ -1007,5 +1175,43 @@ fn build_matcher(keyword: &str) -> Result<Matcher, ApiError> {
             .map_err(|e| ApiError::BadRequest(format!("正则表达式无效: {e}")))
     } else {
         Ok(Matcher::Sub(k.to_string()))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 路径表就是路由表的镜像：数量对不上说明有人加了路由忘了登记，
+    /// 那样 404 提示会指错地方。
+    #[test]
+    fn paths_table_covers_all_endpoints() {
+        assert_eq!(PATHS.len(), 14, "端点数量变了就要同步 PATHS");
+        for p in PATHS {
+            assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
+        }
+        let mut uniq = PATHS.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), PATHS.len(), "PATHS 里有重复项");
+    }
+
+    /// 打错一个字母要能猜回来（这是 404 提示的全部价值）。
+    #[test]
+    fn closest_path_suggests_typo() {
+        assert_eq!(closest_path("/ocr/shibei"), Some("/ocr/shibie"));
+        assert_eq!(closest_path("/ocr/zhaotu1"), Some("/ocr/tuzhaotu1"));
+        // 完全不相干就别乱猜，返回 None 让提示退化成「看接口页」
+        assert_eq!(closest_path("/favicon.ico"), None);
+        assert_eq!(closest_path("/"), None);
+    }
+
+    #[test]
+    fn edit_distance_basics() {
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "abd"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("shibie", "shibei"), 2);
     }
 }

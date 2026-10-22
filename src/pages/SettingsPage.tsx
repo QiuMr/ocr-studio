@@ -32,6 +32,7 @@ import { Switch } from "../components/ui/switch";
 import { Slider } from "../components/ui/slider";
 import {
   detectModels,
+  getAutostart,
   getConfig,
   getHealth,
   listEngines,
@@ -42,6 +43,7 @@ import {
   serverStart,
   serverStatus,
   serverStop,
+  setAutostart,
   setDevice,
   setLevel,
 } from "../lib/api";
@@ -83,6 +85,8 @@ export function SettingsPage() {
   const [copied, setCopied] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  /** 开机自启：状态存在系统注册表里，不来自 config.json，所以单独拉 */
+  const [autostart, setAutostartState] = useState<boolean | null>(null);
 
   const saveTimer = useRef<number | undefined>(undefined);
 
@@ -111,6 +115,24 @@ export function SettingsPage() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void getAutostart()
+      .then(setAutostartState)
+      .catch(() => setAutostartState(null));
+  }, []);
+
+  const onToggleAutostart = async (on: boolean) => {
+    try {
+      setAutostartState(await setAutostart(on));
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+      // 失败就回读真实状态，别让开关停在用户以为成功的位置
+      void getAutostart().then(setAutostartState).catch(() => {});
+    }
+  };
 
   /** 写盘（延迟 600ms 合并连点；改坏了也不会写一半） */
   const persist = useCallback((next: AppConfig) => {
@@ -480,6 +502,59 @@ export function SettingsPage() {
           <p className="text-[11.5px] leading-5 text-neutral-400">
             服务只监听本机 127.0.0.1，不对外网开放，别人连不进来。
           </p>
+
+          {/* CORS：默认关。开之前必须让用户知道代价——截屏类接口会被网页驱动 */}
+          <div className="flex items-start justify-between gap-3 border-t border-neutral-100 pt-3">
+            <div className="min-w-0">
+              <Label htmlFor="allow-browser" className="flex items-center gap-1.5 text-[12px] text-neutral-700">
+                允许浏览器页面调用
+                <Hint>
+                  本地 HTML 页面、Electron 应用里用 fetch 调这些接口时，浏览器会先发 OPTIONS 预检。不开这个开关，预检过不去，页面里只会看到一个 CORS 报错。
+                </Hint>
+              </Label>
+              <p className="mt-1 text-[11.5px] leading-5 text-neutral-500">
+                {cfg.allow_browser
+                  ? "已允许任意网页跨域调用。注意：截屏找图类接口（pingmuzhaotu / jubingzhaotu）会读你的屏幕，任何打开着的网页都能驱动它，用完建议关掉。"
+                  : "默认关闭。只有在你自己的网页里调接口时才需要打开。"}
+              </p>
+            </div>
+            <Switch
+              id="allow-browser"
+              checked={!!cfg.allow_browser}
+              onCheckedChange={(v) => patch({ allow_browser: v })}
+              disabled={!isTauri()}
+            />
+          </div>
+          {cfg.allow_browser && (
+            <p className="text-[11.5px] leading-5 text-amber-700">
+              改动会在服务重启后生效（改端口或点一次「停止 → 启动」即可）。
+            </p>
+          )}
+
+          {/* 开机自启：常驻服务的标配。开机后只进托盘，不弹窗 */}
+          <div className="flex items-start justify-between gap-3 border-t border-neutral-100 pt-3">
+            <div className="min-w-0">
+              <Label htmlFor="autostart" className="flex items-center gap-1.5 text-[12px] text-neutral-700">
+                开机自动启动
+                <Hint>
+                  开机后程序自动在后台跑起来，界面直接缩在托盘里，不会弹窗打扰你。脚本一开机就能调接口，不用先点一下图标。
+                </Hint>
+              </Label>
+              <p className="mt-1 text-[11.5px] leading-5 text-neutral-500">
+                {autostart === null
+                  ? "当前状态读取失败，可稍后重试。"
+                  : autostart
+                    ? "已开启。开机后自动进托盘，右键托盘图标可打开界面或退出。"
+                    : "关闭。每次开机需要自己双击一次程序。"}
+              </p>
+            </div>
+            <Switch
+              id="autostart"
+              checked={!!autostart}
+              onCheckedChange={(v) => void onToggleAutostart(v)}
+              disabled={!isTauri() || autostart === null}
+            />
+          </div>
         </CardContent>
       </Card>
 

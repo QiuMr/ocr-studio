@@ -671,6 +671,84 @@ exit=0
 
 ---
 
+## 7.7 「界面又起不来了」：一个真问题 + 一次自找的循环（2026-10-22 晚）
+
+用户报：**开发启动和编译启动一样，界面都起不来**，并提醒「之前碰到过，文档里有记录」。
+查下来：**只有一个是真问题，另一个是我把已知环境问题当成了产品 bug。**
+
+| # | 性质 | 结论 |
+|---|---|---|
+| A | **真问题**（环境/入口） | dev 启动时 `cargo` 不在 PATH，Tauri CLI 当场退出，窗口根本不创建 |
+| B | **不是问题**（我的循环） | agent shell 里跑 exe 必白屏，0.1 节早就记录过；我却据此改了看门狗，已回退 |
+
+### 根因 A：dev 启动找不到 `cargo`（真问题，已修）
+
+`npm run tauri dev` 第一句就死：
+
+```
+failed to run 'cargo metadata' command to get workspace directory:
+failed to run command cargo metadata --no-deps --format-version 1: program not found
+```
+
+**原因**：本项目的 Rust 是**项目内私有工具链**（`.rust\cargo`），平时干活都用全路径调
+`cargo.exe`，所以裸 `cargo build` 从没暴露过这个问题；但 Tauri CLI 是从 PATH 里找
+`cargo` 的，PATH 里没有就当场退出。**窗口根本不会被创建**，看起来就是「界面起不来」。
+
+**修法（不是加 PATH 就完事）**：
+
+| 手段 | 文件 | 作用 |
+|---|---|---|
+| 一键开发启动 | `scripts/dev.ps1` | 铺好 `RUSTUP_HOME`/`CARGO_HOME`/`CARGO_TARGET_DIR`，把 `.rust\cargo\bin` 前置进 PATH，先探 1420 是否被占，再交 `npm run tauri dev` |
+| 一键编译启动 | `scripts/build.ps1` | 前端 build → 改 `build.rs` 时间戳触发重嵌 → `cargo build --release` → 校验嵌入资源 →（可选）打包/启动 |
+| 去掉 pnpm 依赖 | `tauri.conf.json` | `beforeDevCommand` 由 `pnpm dev` 改成 `npm run dev`（npm 一定随 node，pnpm 是全局装的，少一个失败点） |
+
+判据：`dev.ps1` 会先打印 `[INFO] cargo: <路径>`；没打印出来就是 PATH 没铺上，直接停。
+
+### 「根因 B」不存在 —— 那是我自己在 agent shell 里制造的循环（**教训**）
+
+我一度以为看门狗有 bug：在 agent shell 里用 `subprocess.Popen([exe])` 拉起 exe，
+必然看到「前端 N ms 内未报到 → 切软件合成重建」然后窗口不可见，于是去改 `lib.rs`
+（把 destroy/build 挪进 `run_on_main_thread`），结果**在同一个坏环境里再测还是失败**，
+又继续改 —— 这就是循环。
+
+**真相**：这正是 0.1 节第 5 条已经写死的事实 ——
+> GPU 崩溃与我们的代码无关：同一 exe 由资源管理器启动（干净环境）时 GPU 正常、界面正常；
+> **在本项目的 agent shell 里启动才必崩**（该 shell 环境会让 WebView2 的 GPU 子进程起不来）。
+
+那个 shell 里 WebView2 控制器本身就创建不出来，**兜底重建当然也建不出来**，
+所以「重建卡住」是这个环境的必然结果，不是产品缺陷。**用户双击根本不会触发看门狗。**
+
+处理：`lib.rs` 已**回退**到原来的子线程 `build()` 实现（文档验收过的版本）。
+当时改成主线程反而更危险 —— Tauri 的 `build()` 内部会派发到主线程并等待，
+在主线程直接调用会死锁。
+
+**铁律（下次别再犯）**：
+
+1. **验收界面只能用 `explorer.exe <exe>` 启动**，再用 `scripts/shot_window.py` 抓图。
+2. **在 agent shell 里跑 exe 得到的任何白屏/未报到结论一律作废**，不要据此改代码。
+3. 顺手删掉了 `scripts/verify_watchdog.py` —— 那个脚本专门在坏环境里自证「bug」，
+   留着下次还会带偏。
+
+### 本轮唯一保留的代码改动：看门狗阈值
+
+`10 秒` → **release 4 秒 / dev 12 秒**（纯常量调整，不改线程模型）。
+白窗挂 10 秒足够让用户认定程序坏了；dev 要等 vite 首次加载，给足。
+
+### 这轮的验证矩阵（全部用文档规定的方式）
+
+| 场景 | 启动方式 | 结果 |
+|---|---|---|
+| 打包版 exe | `explorer.exe` 双击 | PASS（非白像素 33.6%） |
+| 点关闭按钮 | 同上 | PASS：窗口隐藏、进程存活、8848 仍应答 |
+| 隐藏后再双击 exe | 同上 | PASS：单实例回调拉回窗口，进程数仍 1 |
+| `scripts/dev.ps1` | 脚本（cargo 已进 PATH） | PASS：vite + cargo 起来，窗口渲染（debug 全量 2m08s） |
+
+诊断脚本：`scripts/shot_window.py`（窗口截图 + 非白像素比）、`scripts/verify_tray.py`、
+`scripts/verify_http_contract.py`、`scripts/verify_autostart.py`。截图脚本已统一用
+`DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`，避免把窗口外桌面拍进来。
+
+---
+
 ## 8. 关键文件索引
 
 ```

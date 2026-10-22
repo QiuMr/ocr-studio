@@ -29,6 +29,17 @@
 - 起 App 做端到端验证要用 `run_in_background`；`Start-Process` 起的进程会被工具会话回收。
 - Python 访问本机服务必须绕系统代理（`build_opener(ProxyHandler({}))`），
   否则 127.0.0.1 也走代理拿 502，会被误判成服务没起来。
+- **启动入口固定两个脚本**（2026-10-22 晚用户报「界面又起不来」后定）：
+  开发启动 `scripts/dev.ps1`、编译启动 `scripts/build.ps1`。
+  真因是 Tauri CLI 从 PATH 找 `cargo`，而本项目 Rust 是**项目内私有工具链**
+  （平时都用全路径调，所以裸 `cargo build` 从不暴露），PATH 没有就当场退出、
+  **窗口根本不创建**。脚本负责铺 `RUSTUP_HOME`/`CARGO_HOME`/`CARGO_TARGET_DIR`
+  并把 `.rust\cargo\bin` 前置进 PATH。
+- **验收界面只能用 `explorer.exe <exe>` 启动**，再 `scripts/shot_window.py` 抓图。
+  **agent shell 里直接跑 exe 必白屏**（该 shell 让 WebView2 的 GPU 子进程起不来），
+  这是**环境问题不是产品缺陷**，同一 exe 用资源管理器启动就正常。
+  agent shell 里的白屏/「前端未报到」结论**一律作废，不要据此改代码**
+  —— 本轮就因此把已知环境问题当成看门狗 bug 改了一轮又回退（见 PROGRESS 0.1 / 7.7）。
 
 ## 精度基线（改动前后处理前必读）
 - 黄金基线：`models/small/reference_output.json`，由 `scripts/ref_pipeline.py` 生成。

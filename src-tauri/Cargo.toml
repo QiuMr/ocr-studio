@@ -21,6 +21,9 @@ tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
 # 单实例：这个程序常驻托盘、独占 8848 端口，被双击第二次时不能让新进程去抢端口。
 # 新进程会把参数转交给已存在的实例并立刻退出，回调里把旧窗口拉出来。
 tauri-plugin-single-instance = "2"
+# 开机自启：常驻 API 服务的标配。用官方插件而不是自己写注册表，
+# 路径带空格时的引号处理与「禁用时清干净」都由插件负责。
+tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
