@@ -62,7 +62,7 @@ pub struct OcrOptions {
     /// 是否启用方向分类（缺省用当前配置）
     #[serde(default)]
     pub use_cls: Option<bool>,
-    /// 引擎：`ppocr:small` / `ddddocr:common` / `yolo:v8`。
+    /// 引擎：`ppocr:small` / `ddddocr:common` / `yolo`。
     ///
     /// 缺省 = 用当前 PP-OCR 配置（行为与历史版本完全一致）。
     /// 写 `ppocr:*` 也归到缺省路径，档位由 `level` 参数控制。
@@ -80,7 +80,7 @@ pub struct OcrOptions {
     /// 只保留这些 class_id（仅 `/vision/detect`）。空/缺省 = 全部
     #[serde(default)]
     pub class_filter: Option<Vec<usize>>,
-    /// `/vision/pipeline` 的检测引擎。缺省 `yolo:v8`
+    /// `/vision/pipeline` 的检测引擎。缺省 `yolo`
     #[serde(default)]
     pub detect_engine: Option<String>,
 }
@@ -351,7 +351,7 @@ impl From<&crate::engine::Capabilities> for CapabilitiesDto {
 /// `/engine/list` 的一条引擎记录。
 #[derive(Debug, Serialize)]
 pub struct EngineItemDto {
-    /// 规范化引擎名，如 `ppocr:small`、`yolo:v8`
+    /// 规范化引擎名，如 `ppocr:small`、`yolo`
     pub name: String,
     /// 引擎族：ppocr / ddddocr / yolo
     pub family: String,

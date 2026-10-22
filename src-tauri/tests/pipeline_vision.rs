@@ -84,7 +84,7 @@ async fn pipeline_reads_text_inside_detected_regions() {
             level: None,
             device: None,
             use_cls: None,
-            engine: Some("yolo:v8".to_string()),
+            engine: Some("yolo".to_string()),
             keyword: None,
             conf: None,
             iou: None,

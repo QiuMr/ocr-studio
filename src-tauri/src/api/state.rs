@@ -436,7 +436,7 @@ impl AppState {
         use crate::engine::EngineKind;
         use image::GenericImageView;
 
-        // 检测引擎：显式指定 > 请求 engine 字段 > 默认 yolo:v8
+        // 检测引擎：显式指定 > 请求 engine 字段 > 默认（唯一的目标检测引擎）
         let detect_spec = match opts
             .detect_engine
             .as_deref()
@@ -448,13 +448,13 @@ impl AppState {
                 other => ApiError::BadRequest(other.to_string()),
             })?,
             None => match alt_spec_of(opts)? {
-                Some(s) if matches!(s.kind, EngineKind::Yolo(_)) => s,
-                _ => EngineSpec::yolo(crate::engine::YoloVersion::V8),
+                Some(s) if matches!(s.kind, EngineKind::Yolo) => s,
+                _ => EngineSpec::yolo(),
             },
         };
         if matches!(detect_spec.kind, EngineKind::PpOcr | EngineKind::DdddOcr) {
             return Err(ApiError::Unsupported(
-                "pipeline 的检测引擎必须是 yolo:*（OCR 引擎不会找目标区域）".to_string(),
+                "pipeline 的检测引擎必须是目标检测引擎（OCR 引擎不会找目标区域）".to_string(),
             ));
         }
 

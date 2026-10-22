@@ -10,13 +10,14 @@
 //! models/
 //!   ocr/ppocr/<level>/{det,rec,cls}.onnx + keys.txt   ← 新
 //!   ocr/ddddocr/<variant>/{det,rec}.onnx + charset.txt ← 新
-//!   detect/yolo/<version>/{model.onnx,labels.txt}      ← 新
+//!   detect/yolo/{model.onnx,labels.txt}                ← 新（不分版本）
+//!   detect/yolo/<任意名>/{model.onnx,labels.txt}        ← 兼容旧的 v8/ v11/ 分层
 //!   <tiny|small|medium>/...                            ← 旧路径，继续有效
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use super::{Capabilities, EngineSpec, EngineStatus, YoloVersion};
+use super::{Capabilities, EngineSpec, EngineStatus};
 use crate::config::ModelLevel;
 
 /// PP-OCR 档位模型目录。新路径优先，找不到 `det.onnx` 就回退旧路径。
@@ -36,8 +37,38 @@ pub fn ddddocr_dir(root: &Path, variant: &str) -> PathBuf {
     root.join("ocr").join("ddddocr").join(variant)
 }
 
-pub fn yolo_dir(root: &Path, version: YoloVersion) -> PathBuf {
-    root.join("detect").join("yolo").join(version.as_str())
+/// 目标检测模型的**约定目录**（不一定真的有文件，见 [`yolo_model_dir`]）。
+pub fn yolo_dir(root: &Path) -> PathBuf {
+    root.join("detect").join("yolo")
+}
+
+/// 实际放 `model.onnx` 的目录。
+///
+/// 先看 `detect/yolo/` 本身，再**下探一层**子目录——这样旧的
+/// `detect/yolo/v8/` 结构不用搬家就能继续用（模型动辄几十 MB，
+/// 让人手动挪目录是没必要的摩擦）。
+pub fn yolo_model_dir(root: &Path) -> Option<PathBuf> {
+    let dir = yolo_dir(root);
+    if dir.join("model.onnx").is_file() {
+        return Some(dir);
+    }
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("model.onnx").is_file())
+        .collect();
+    // 有多个候选时按名字排序取第一个，保证「同一台机器结果稳定」
+    subs.sort();
+    if subs.len() > 1 {
+        tracing::warn!(
+            "{} 下有 {} 个模型目录，只用 {}（建议只保留一个）",
+            dir.display(),
+            subs.len(),
+            subs[0].display()
+        );
+    }
+    subs.into_iter().next()
 }
 
 /// 读 `labels.txt`：每行一个类名，行号即 `class_id`。
@@ -151,31 +182,37 @@ pub fn discover(root: &Path) -> Vec<EngineStatus> {
         });
     }
 
-    // ---- YOLO：v5 / v7 / v8 / v11 ----
-    for ver in [
-        YoloVersion::V5,
-        YoloVersion::V7,
-        YoloVersion::V8,
-        YoloVersion::V11,
-    ] {
-        let dir = yolo_dir(root, ver);
-        let model = dir.join("model.onnx");
-        let available = model.exists();
-        let classes = if available {
-            let labels = load_labels(&dir.join("labels.txt"));
-            if labels.is_empty() {
-                tracing::warn!(
-                    "{} 缺少 labels.txt，类别名将显示为 class_{{id}}",
-                    dir.display()
-                );
-            }
-            labels
-        } else {
-            Vec::new()
+    // ---- 目标检测：只列**一条**，不按版本分 ----
+    //
+    // 版本差异（输出布局 / objectness / 输入边长）在加载时按 ONNX 形状探测，
+    // 所以这里的发现逻辑只关心「有没有 model.onnx」。
+    {
+        let convention = yolo_dir(root);
+        let found = yolo_model_dir(root);
+        let available = found.is_some();
+        let classes = found
+            .as_ref()
+            .map(|d| load_labels(&d.join("labels.txt")))
+            .unwrap_or_default();
+
+        let note = match &found {
+            Some(d) if *d == convention => Some(
+                "自动识别模型结构（输出布局 / objectness / 输入边长），无需指定版本".to_string(),
+            ),
+            Some(d) => Some(format!(
+                "使用 {}（旧的分版本目录，可把 model.onnx 与 labels.txt 移到 {}）",
+                d.display(),
+                convention.display()
+            )),
+            None => Some(format!(
+                "{} 缺少 model.onnx。放一个 ultralytics 导出的单输出 ONNX + labels.txt 即可，\
+                 v5/v8/v11 等结构会自动识别",
+                convention.display()
+            )),
         };
 
         out.push(EngineStatus {
-            spec: EngineSpec::yolo(ver),
+            spec: EngineSpec::yolo(),
             capabilities: Capabilities {
                 line_boxes: false,
                 char_boxes: false,
@@ -186,11 +223,7 @@ pub fn discover(root: &Path) -> Vec<EngineStatus> {
             },
             available,
             actual_device: None,
-            note: if available {
-                None
-            } else {
-                Some(format!("{} 缺少 model.onnx", dir.display()))
-            },
+            note,
         });
     }
 
@@ -212,7 +245,7 @@ pub fn model_dir(root: &Path, spec: &EngineSpec) -> PathBuf {
             variant.and_then(ModelLevel::from_str).unwrap_or_default(),
         ),
         super::EngineKind::DdddOcr => ddddocr_dir(root, variant.unwrap_or("common")),
-        super::EngineKind::Yolo(ver) => yolo_dir(root, *ver),
+        super::EngineKind::Yolo => yolo_model_dir(root).unwrap_or_else(|| yolo_dir(root)),
     }
 }
 
@@ -274,42 +307,84 @@ mod tests {
     }
 
     #[test]
-    fn yolo_labels_become_capabilities() {
+    fn yolo_is_a_single_engine_not_one_per_version() {
         let dir = std::env::temp_dir().join(format!("ocr_eng_yolo_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let v8 = dir.join("detect").join("yolo").join("v8");
-        touch(&v8.join("model.onnx"));
-        fs::write(v8.join("labels.txt"), "person\r\ncar\r\n\r\nbike\r\n").unwrap();
+        let y = dir.join("detect").join("yolo");
+        touch(&y.join("model.onnx"));
+        fs::write(y.join("labels.txt"), "person\r\ncar\r\n\r\nbike\r\n").unwrap();
 
         let list = discover(&dir);
-        let y = list
-            .iter()
-            .find(|e| e.spec.key() == "yolo:v8")
-            .expect("应列出 yolo:v8");
+        let dets: Vec<&EngineStatus> = list.iter().filter(|e| e.spec.kind.family() == "yolo").collect();
+        // 只列一条：不能出现 yolo:v5 / yolo:v8 / yolo:v11 这种按版本分裂的条目
+        assert_eq!(dets.len(), 1, "目标检测只能有一个引擎条目");
+        let y = dets[0];
+        assert_eq!(y.spec.key(), "yolo");
         assert!(y.available);
         assert!(y.capabilities.detect);
         // 空行被过滤，CRLF 被去掉
         assert_eq!(y.capabilities.classes, vec!["person", "car", "bike"]);
-        // 其他版本不可用
-        let v5 = list.iter().find(|e| e.spec.key() == "yolo:v5").unwrap();
-        assert!(!v5.available);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fallback_to_class_id_when_labels_missing() {
-        let dir = std::env::temp_dir().join(format!("ocr_eng_nolabel_{}", std::process::id()));
+    fn yolo_old_versioned_subdir_still_found() {
+        // 旧结构 detect/yolo/v8/ 不许因为改名而失效
+        let dir = std::env::temp_dir().join(format!("ocr_eng_yoloold_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let v8 = dir.join("detect").join("yolo").join("v8");
         touch(&v8.join("model.onnx"));
+        fs::write(v8.join("labels.txt"), "person\n").unwrap();
 
-        let list = discover(&dir);
-        let y = list.iter().find(|e| e.spec.key() == "yolo:v8").unwrap();
+        let y = discover(&dir)
+            .into_iter()
+            .find(|e| e.spec.kind.family() == "yolo")
+            .expect("应列出检测引擎");
+        assert!(y.available);
+        assert!(y.capabilities.detect);
+        // note 要告诉用户实际用的是哪个子目录
+        assert!(
+            y.note.as_deref().unwrap_or("").contains("v8"),
+            "{:?}",
+            y.note
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yolo_fallback_to_class_id_when_labels_missing() {
+        let dir = std::env::temp_dir().join(format!("ocr_eng_nolabel_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let y = dir.join("detect").join("yolo");
+        touch(&y.join("model.onnx"));
+
+        let y = discover(&dir)
+            .into_iter()
+            .find(|e| e.spec.kind.family() == "yolo")
+            .unwrap();
         // 没有 labels 只是类别名不可读，不该让引擎不可用
         assert!(y.available);
         assert!(y.capabilities.detect);
         assert!(y.capabilities.classes.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yolo_missing_model_explains_where_to_put_it() {
+        let dir = std::env::temp_dir().join(format!("ocr_eng_noyolo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let y = discover(&dir)
+            .into_iter()
+            .find(|e| e.spec.kind.family() == "yolo")
+            .unwrap();
+        assert!(!y.available);
+        let note = y.note.unwrap_or_default();
+        assert!(note.contains("model.onnx"), "{note}");
 
         let _ = fs::remove_dir_all(&dir);
     }

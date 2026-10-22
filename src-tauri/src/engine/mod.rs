@@ -33,65 +33,21 @@ use crate::ocr::{CharBox, EngineConfig, LineDetail, OcrEngine, Pt};
 // 引擎身份
 // ---------------------------------------------------------------------------
 
-/// YOLO 版本。
-///
-/// 版本必须显式写进模型目录名，**不能靠猜**：v5/v7 与 v8/v11 的输出布局、letterbox
-/// 填充值、有无 objectness 通道全都不同，猜错会让置信度整体偏移且框位错乱。
-/// 下面两个方法把这三处差异编码在一处，避免后处理代码里再散落 `if version`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum YoloVersion {
-    V5,
-    V7,
-    V8,
-    V11,
-}
-
-impl YoloVersion {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            YoloVersion::V5 => "v5",
-            YoloVersion::V7 => "v7",
-            YoloVersion::V8 => "v8",
-            YoloVersion::V11 => "v11",
-        }
-    }
-
-    /// 接受 `v8` / `yolov8` / `yolo11` 等写法。
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "v5" | "yolov5" => Some(YoloVersion::V5),
-            "v7" | "yolov7" => Some(YoloVersion::V7),
-            "v8" | "yolov8" => Some(YoloVersion::V8),
-            "v11" | "yolov11" | "yolo11" => Some(YoloVersion::V11),
-            _ => None,
-        }
-    }
-
-    /// 输出是否带 objectness 通道。
-    ///
-    /// v5/v7 输出 `[1, N, 5+C]`（cx,cy,w,h,obj,cls...）；v8/v11 输出 `[1, 4+C, N]`
-    /// （无 obj，且需要转置）。两者后处理不通用。
-    pub fn has_objectness(self) -> bool {
-        matches!(self, YoloVersion::V5 | YoloVersion::V7)
-    }
-
-    /// letterbox 填充值：v5 用 0（纯黑），v8+ 用 114（灰）。
-    /// 填错会让置信度整体偏移 0.05 以上，肉眼看不出来但阈值一改就翻。
-    pub fn pad_value(self) -> u8 {
-        if self.has_objectness() {
-            0
-        } else {
-            114
-        }
-    }
-}
-
 /// 引擎族。`variant`（档位/版本）不在这里，见 [`EngineSpec`]。
+///
+/// **YOLO 不按版本分家**（2026-10-22 用户要求）：目标检测只作为**一类**引擎，
+/// 版本差异（输出布局、有无 objectness、输入边长）在加载时从 ONNX 的
+/// 输入输出形状**自动探测**，见 [`yolo::YoloLayout`]。
+///
+/// 为什么不让用户选版本：他手上只有一个 `model.onnx`，版本号既不是他填的，
+/// 也决定不了怎么后处理——真正决定后处理的是那个文件的输出形状。而且白名单
+/// 必然落后（v10 / v12 / v26 已经在用了，v3 的多 head 又是另一套结构）。
+/// 按形状探测能覆盖「结构差不多」的所有版本，且模型换了不用改配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EngineKind {
     PpOcr,
     DdddOcr,
-    Yolo(YoloVersion),
+    Yolo,
 }
 
 impl EngineKind {
@@ -99,19 +55,19 @@ impl EngineKind {
         match self {
             EngineKind::PpOcr => "ppocr",
             EngineKind::DdddOcr => "ddddocr",
-            EngineKind::Yolo(_) => "yolo",
+            EngineKind::Yolo => "yolo",
         }
     }
 }
 
 /// 引擎完整标识：`<family>[:<variant>]`。
 ///
-/// 例：`ppocr:small`、`ddddocr:common`、`yolo:v8`。
+/// 例：`ppocr:small`、`ddddocr:common`、`yolo`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EngineSpec {
     pub kind: EngineKind,
     /// ppocr 的档位（tiny/small/medium）或 ddddocr 的版本（common/old）。
-    /// YOLO 的版本已编码进 `kind`，故恒为 `None`。
+    /// 目标检测没有这一层：模型结构在加载时探测。
     pub variant: Option<String>,
 }
 
@@ -130,17 +86,18 @@ impl EngineSpec {
         }
     }
 
-    pub fn yolo(version: YoloVersion) -> Self {
+    pub fn yolo() -> Self {
         Self {
-            kind: EngineKind::Yolo(version),
+            kind: EngineKind::Yolo,
             variant: None,
         }
     }
 
-    /// 解析 `"ppocr:small"` / `"ddddocr"` / `"yolo:v8"`。
+    /// 解析 `"ppocr:small"` / `"ddddocr"` / `"yolo"`。
     ///
     /// 缺省 variant 时取各族默认值（ppocr=small、ddddocr=common）。
-    /// 但 `"yolo"` 不带版本直接报错——不能猜，见 [`YoloVersion`] 的说明。
+    /// `"detect"` 是 `"yolo"` 的别名；`"yolo:v8"` 这类**旧写法继续接受**，
+    /// 版本部分被忽略（只校验形状像不像版本号，避免把拼写错误咽下去）。
     pub fn parse(s: &str) -> Result<Self, VisionError> {
         let raw = s.trim();
         if raw.is_empty() {
@@ -170,18 +127,16 @@ impl EngineSpec {
                 // 由 catalog 判定是否真的存在，避免这里成为白名单瓶颈。
                 Ok(Self::ddddocr(v))
             }
-            "yolo" => {
-                let v = variant.ok_or_else(|| {
-                    VisionError::UnknownEngine(
-                        "yolo 必须带版本，例如 `yolo:v8`（可选 v5 / v7 / v8 / v11）".to_string(),
-                    )
-                })?;
-                let ver = YoloVersion::parse(v).ok_or_else(|| {
-                    VisionError::UnknownEngine(format!(
-                        "未知的 yolo 版本 `{v}`（可选 v5 / v7 / v8 / v11）"
-                    ))
-                })?;
-                Ok(Self::yolo(ver))
+            "yolo" | "detect" => {
+                if let Some(v) = variant {
+                    if !looks_like_yolo_version(v) {
+                        return Err(VisionError::UnknownEngine(format!(
+                            "`{v}` 不像 yolo 版本号。目标检测已不再需要指定版本，\
+                             直接写 `yolo` 即可（模型结构在加载时自动探测）"
+                        )));
+                    }
+                }
+                Ok(Self::yolo())
             }
             other => Err(VisionError::UnknownEngine(format!(
                 "未知引擎 `{other}`（可选 ppocr / ddddocr / yolo）"
@@ -189,14 +144,28 @@ impl EngineSpec {
         }
     }
 
-    /// 规范化字符串，兼作缓存键。`yolo` 的版本在 kind 里，故形如 `yolo:v8`。
+    /// 规范化字符串，兼作缓存键。目标检测恒为 `yolo`。
     pub fn key(&self) -> String {
         match (&self.kind, &self.variant) {
-            (EngineKind::Yolo(v), _) => format!("yolo:{}", v.as_str()),
+            (EngineKind::Yolo, _) => "yolo".to_string(),
             (k, Some(v)) => format!("{}:{}", k.family(), v),
             (k, None) => k.family().to_string(),
         }
     }
+}
+
+/// `v8` / `yolov8` / `v26` 这类写法算版本号；`abc` / `latest` 不算。
+///
+/// 只用于**校验旧写法的拼写**——版本值本身被丢弃。放行明显笔误会让
+/// 「写错了也能跑」变成习惯，最后没人知道 `yolo:v10` 和 `yolo:v100` 有区别。
+fn looks_like_yolo_version(s: &str) -> bool {
+    let s = s.trim();
+    let digits = s
+        .strip_prefix("yolov")
+        .or_else(|| s.strip_prefix("yolo"))
+        .or_else(|| s.strip_prefix('v'))
+        .unwrap_or("");
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 impl fmt::Display for EngineSpec {
@@ -469,7 +438,8 @@ const _: fn() = || {
 ///
 /// - `ppocr:*` 走既有的 [`OcrEngine::load`]，**一个字节都没改**，精度基线不受影响；
 /// - `ddddocr:*` 走 [`ddddocr::DdddOcrEngine`]，行检测借 `default_level` 档的 PP-OCR det；
-/// - `yolo:*` 走 [`yolo::YoloEngine`]，检测能力经 `/vision/detect` 暴露。
+/// - `yolo` 走 [`yolo::YoloEngine`]，检测能力经 `/vision/detect` 暴露。
+///   模型结构（输出布局 / objectness / 输入边长）全部在加载时探测，不需要版本号。
 ///
 /// 返回 `Box<dyn VisionEngine>` 而不是枚举：新增引擎时只需加一个分支，
 /// 调用方（状态层 / 路由）不用改 match。
@@ -507,7 +477,7 @@ pub fn load_engine(
                 device,
             )?))
         }
-        EngineKind::Yolo(v) => Ok(Box::new(yolo::engine_from_root(models_root, *v, device)?)),
+        EngineKind::Yolo => Ok(Box::new(yolo::engine_from_root(models_root, device)?)),
     }
 }
 
@@ -530,27 +500,27 @@ mod tests {
             EngineSpec::parse("DDDDOCR").unwrap(),
             EngineSpec::ddddocr("common")
         );
-        assert_eq!(
-            EngineSpec::parse("yolo:v8").unwrap(),
-            EngineSpec::yolo(YoloVersion::V8)
-        );
-        assert_eq!(
-            EngineSpec::parse("yolo:yolo11").unwrap(),
-            EngineSpec::yolo(YoloVersion::V11)
-        );
+        assert_eq!(EngineSpec::parse("yolo").unwrap(), EngineSpec::yolo());
+        assert_eq!(EngineSpec::parse("detect").unwrap(), EngineSpec::yolo());
+    }
+
+    #[test]
+    fn yolo_accepts_legacy_versioned_names_but_ignores_version() {
+        // 旧调用方写 yolo:v8 不能突然报错；版本被丢弃，key 归一成 yolo
+        for s in ["yolo:v8", "yolo:yolov5", "detect:v11", "yolo:v26", "yolo:v3"] {
+            let spec = EngineSpec::parse(s).unwrap_or_else(|e| panic!("{s} 应可解析: {e}"));
+            assert_eq!(spec, EngineSpec::yolo(), "{s}");
+            assert_eq!(spec.key(), "yolo", "{s}");
+        }
+        // 明显不是版本号的要拦住，别把拼写错误咽下去
+        assert!(matches!(
+            EngineSpec::parse("yolo:abc"),
+            Err(VisionError::UnknownEngine(_))
+        ));
     }
 
     #[test]
     fn parse_engine_spec_rejects_ambiguous() {
-        // 不带版本的 yolo 必须报错，不能猜
-        assert!(matches!(
-            EngineSpec::parse("yolo"),
-            Err(VisionError::UnknownEngine(_))
-        ));
-        assert!(matches!(
-            EngineSpec::parse("yolo:v9"),
-            Err(VisionError::UnknownEngine(_))
-        ));
         assert!(matches!(
             EngineSpec::parse("ppocr:huge"),
             Err(VisionError::UnknownEngine(_))
@@ -563,22 +533,11 @@ mod tests {
 
     #[test]
     fn engine_spec_key_roundtrip() {
-        for s in ["ppocr:small", "ddddocr:common", "yolo:v8", "yolo:v5"] {
+        for s in ["ppocr:small", "ddddocr:common", "yolo"] {
             let spec = EngineSpec::parse(s).unwrap();
             assert_eq!(spec.key(), s);
             // key 能被再解析回同一个 spec
             assert_eq!(EngineSpec::parse(&spec.key()).unwrap(), spec);
         }
-    }
-
-    #[test]
-    fn yolo_version_encodes_the_known_pitfalls() {
-        // v5/v7 有 objectness、letterbox 用 0；v8/v11 反之
-        assert!(YoloVersion::V5.has_objectness());
-        assert!(YoloVersion::V7.has_objectness());
-        assert!(!YoloVersion::V8.has_objectness());
-        assert!(!YoloVersion::V11.has_objectness());
-        assert_eq!(YoloVersion::V5.pad_value(), 0);
-        assert_eq!(YoloVersion::V8.pad_value(), 114);
     }
 }

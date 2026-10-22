@@ -413,11 +413,11 @@ async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
 
 // ---------------------------------------------------------------- 目标检测
 
-/// POST /vision/detect —— 通用目标检测（当前 `yolo:v8`）。
+/// POST /vision/detect —— 通用目标检测（引擎名 `yolo`）。
 ///
 /// 与 `/ocr/*` 共用引擎槽：OCR 引擎没有检测能力，会返回 code 1002；
 /// `engine` 参数缺省时按 PP-OCR 处理（同样 1002），想检测必须显式写
-/// `engine: "yolo:v8"`。
+/// `engine: "yolo"`。
 async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
     let (img, opts) = match parse_recognize(req).await {
@@ -487,7 +487,7 @@ async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Resp
 
 /// POST /vision/pipeline —— 检测 + 识别串联：检测引擎找区域，PP-OCR 框内认字。
 ///
-/// `detect_engine` 缺省 `yolo:v8`；`engine` 字段若指向 yolo 也会被用作检测引擎。
+/// `detect_engine` 缺省 `yolo`；`engine` 字段若指向 yolo 也会被用作检测引擎。
 /// 用 yolov8n+coco 时检出的是人/车而不是文字块——**这是预期**，pipeline 面向
 /// 自训检测模型（见 docs/ENGINES.md 6.3）。
 async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {
@@ -524,12 +524,12 @@ async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Re
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
-            opts.engine
-                .clone()
-                .filter(|s| s.starts_with("yolo"))
-                .filter(|s| !s.trim().is_empty())
+            opts.engine.clone().filter(|s| {
+                let t = s.trim().to_ascii_lowercase();
+                t.starts_with("yolo") || t.starts_with("detect")
+            })
         })
-        .unwrap_or_else(|| "yolo:v8".to_string());
+        .unwrap_or_else(|| "yolo".to_string());
 
     let regions = match state.run_pipeline(&opts, img, detect).await {
         Ok(v) => v,

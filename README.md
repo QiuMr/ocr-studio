@@ -13,7 +13,8 @@
 pnpm install
 powershell -File scripts\fetch_models.ps1            # PP-OCR 三档模型（默认只下 small）
 powershell -File scripts\fetch_ddddocr.ps1           # 可选：DDDDOCR 识别模型（54MB）
-powershell -File scripts\fetch_yolo.ps1              # 可选：YOLO v8 检测模型（约 19MB，需本机装 ultralytics）
+powershell -File scripts\fetch_yolo.ps1              # 可选：检测模型（默认 yolov8n，约 19MB，需本机装 ultralytics）
+powershell -File scripts\fetch_yolo.ps1 -Model yolo11n.pt   # 换其它 ultralytics 检测权重
 pnpm build                       # 前端（tsc --noEmit + vite build）
 cd src-tauri
 cargo build --release            # exe 在 $CARGO_TARGET_DIR/release（本机为 D:\rust-target）
@@ -43,6 +44,10 @@ models/                  模型（缺了会提示「引擎未加载」）
 
 > 单独把 exe 拷给别人是跑不起来的：缺 `DirectML.dll` 会起不来，
 > 缺 `onnxruntime.dll` 会静默退回 CPU。务必整包分发。
+>
+> `runtime\onnxruntime.dll` 必须是**带 DirectML 的构建**（用
+> `scripts\copy_runtime.ps1` 从 `onnxruntime-directml` 包取）。CPU 版也能跑，
+> 但启动时会 warn「不带 DML 执行提供器，改用 CPU」，界面上的推理设备会如实显示 CPU。
 >
 > `models/ocr/ddddocr/` 占 54MB、`models/detect/yolo/` 占约 19MB，只用 PP-OCR 的话
 > 可以整目录删掉，引擎列表里会显示「未安装」，其余功能不受影响。
@@ -77,8 +82,8 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/tuzhaotu1\|2` | 在**上传的图**里找图（1=精准 ≥0.92，2=容错 ≥0.72） |
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图 |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图 |
-| `POST /vision/detect` | **通用目标检测**（`engine: "yolo:v8"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
-| `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 yolo:v8） |
+| `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
+| `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
 | `GET /engine/list` | 列出本机可用引擎与能力（只扫目录、不加载模型） |
 
 请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`）。
@@ -96,26 +101,39 @@ models/                  模型（缺了会提示「引擎未加载」）
 | 不传 / `ppocr:*` | PP-OCR（默认）。成段文字、扫描件、截图用这个 |
 | `ddddocr:common` | DDDDOCR 54MB 版。验证码、短英文数字更快，长文本会丢空格与标点 |
 | `ddddocr:old` | DDDDOCR 13.6MB 版。同上，精度略低但体积小 |
-| `yolo:v8` | YOLOv8n 目标检测（COCO 80 类）。**只能配 `POST /vision/detect` 用**，不能做文字识别 |
+| `yolo` | 目标检测（别名 `detect`）。**只能配 `POST /vision/detect` 与 `/vision/pipeline` 用**，不能做文字识别 |
 
 `/vision/detect` 额外接受 `conf`（置信度下限，默认 0.25）、`iou`（NMS 阈值，默认 0.7）、
 `class_filter`（类别 id 数组，缺省全部）。后处理与 ultralytics 逐框对齐
 （实测 IoU=1.0 / conf 差=0，见 docs/ENGINES.md 6.2）。
 
-`/vision/pipeline` 额外接受 `detect_engine`（缺省 `yolo:v8`）。注意：COCO 类别与
+`/vision/pipeline` 额外接受 `detect_engine`（缺省 `yolo`）。注意：COCO 类别与
 文本区域不对齐，yolov8n+coco 检出的是人/车不是文字块——**pipeline 面向自训检测模型**。
 
 DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文档很差），
 行检测**复用 PP-OCR 的 det 模型**，所以用 ddddocr 时 `models/small/det.onnx` 必须在。
 
+### 目标检测不指定版本
+
+只有一个引擎 `yolo`（别名 `detect`）。模型结构在加载时从 ONNX 的输入输出形状**自动识别**：
+输出是 `[1,C,N]` 还是 `[1,N,C]`、有没有 objectness、输入边长多少、类别数多少。
+所以 `yolov5u / yolov8 / yolo11 / yolo12 / yolo26` 这类单输出导出直接放进去就能跑，
+换模型不用改配置。
+
+模型放 `models\detect\yolo\model.onnx`（配套 `labels.txt`，一行一个类名）。
+旧的 `models\detect\yolo\v8\` 分层结构仍然认（会自动下探一层），但建议拍平。
+
+不支持的两种情况会**明确报错**而不是给出垃圾框：
+v3/v4 原始多输出 head（3 个输出张量），以及自带 NMS 的端到端导出（如 YOLOv10 的 `[1,300,6]`）。
+
 ## 验证
 
 ```powershell
-cargo test                    # 63 个单元测试
-cargo test -- --ignored       # 21 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
+cargo test                    # 73 个单元测试
+cargo test -- --ignored       # 22 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
-python scripts/ref_yolo.py models/detect/yolo/v8/model.onnx assets/bus.png out.json   # yolo 官方实现参照
+python scripts/ref_yolo.py models/detect/yolo/model.onnx assets/bus.png out.json   # yolo 官方实现参照
 python scripts/ref_ddddocr.py --image models/small/dump/box_0_src.png   # ddddocr 官方实现参照
 ```
 

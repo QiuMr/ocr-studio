@@ -1,67 +1,65 @@
-﻿# 取 YOLO 检测模型：官方权重 -> ultralytics 导出 ONNX(opset12, 640) + labels.txt
+﻿# 取一个目标检测模型：ultralytics 权重 -> ONNX(opset12, 固定 imgsz) + labels.txt
+#
+# 2026-10-22 起**不再按版本分目录**：引擎只有「目标检测」一类，模型结构
+# （输出布局 / objectness / 输入边长）在加载时按 ONNX 形状自动识别。
+# 所以这里也只需要一个扁平目录：models\detect\yolo\{model.onnx, labels.txt}
 #
 # 前提：本机 Python 已装 ultralytics（含 torch）。
 #   C:\...\Python312\python.exe -m pip install ultralytics
 #
 # 用法（在仓库根目录）：
-#   powershell -File scripts\fetch_yolo.ps1              # 默认 v8n
-#   powershell -File scripts\fetch_yolo.ps1 -Version v8  # 等价
-# 产物：models\detect\yolo\v8\{model.onnx, labels.txt}
-#   labels.txt 与权重同源（从模型元数据读 COCO 80 类），不手工维护。
+#   powershell -File scripts\fetch_yolo.ps1                       # 默认 yolov8n
+#   powershell -File scripts\fetch_yolo.ps1 -Model yolo11n.pt     # 换模型
+#   powershell -File scripts\fetch_yolo.ps1 -Model yolo12n.pt -Imgsz 960
+#   powershell -File scripts\fetch_yolo.ps1 -Model D:\my\trained.pt
+#
+# 支持的输入：任何 ultralytics 能导出成**单输出** ONNX 的检测权重
+# （yolov5u / yolov8 / yolo11 / yolo12 / yolo26 等）。
+# v3/v4 的多输出 head 需要按 anchor 逐层解码，本引擎不支持，脚本会直接报错。
+#
+# labels.txt 与权重同源（读模型元数据），不手工维护。
 
 param(
-    [string]$Version = 'v8',
+    [string]$Model = 'yolov8n.pt',
+    [int]$Imgsz = 640,
     [string]$Python = 'C:\Users\13114\AppData\Local\Programs\Python\Python312\python.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# 仓库根 = 本脚本的上两级
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$dir = Join-Path $root "models\detect\yolo\$Version"
+$dir = Join-Path $root 'models\detect\yolo'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
-# 目前只有 v8 有现成导出流程；v5/v7/v11 的导出源与目录留给后续版本
-if ($Version -ne 'v8') {
-    Write-Host "[SKIP] 目前只支持 v8（yolov8n.pt -> ONNX）；$Version 请自行导出后放入 $dir" -ForegroundColor Yellow
-    exit 0
-}
-
-$pt = Join-Path $dir 'yolov8n.pt'
-if (-not (Test-Path $pt)) {
-    Write-Host "[INFO] 下载 yolov8n.pt ..."
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest `
-        -Uri 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt' `
-        -OutFile $pt -UseBasicParsing
-}
+Write-Host "[INFO] 模型: $Model / imgsz=$Imgsz -> $dir"
 
 $code = @'
 import os, sys
 from ultralytics import YOLO
 
-d = sys.argv[1]
-m = YOLO(os.path.join(d, 'yolov8n.pt'))
-p = m.export(format='onnx', opset=12, imgsz=640, dynamic=False, simplify=True)
+d, weight, imgsz = sys.argv[1], sys.argv[2], int(sys.argv[3])
+m = YOLO(weight)
+p = m.export(format='onnx', opset=12, imgsz=imgsz, dynamic=False, simplify=True)
 onnx_tmp = p if os.path.isabs(p) else os.path.abspath(p)
 dst = os.path.join(d, 'model.onnx')
 if onnx_tmp != dst:
     os.replace(onnx_tmp, dst)
 
 names = m.model.names
-assert len(names) == 80 and set(names) == set(range(80)), names
+# 类别名必须连续 0..N-1，否则 labels.txt 的行号与 class_id 会错位
+assert sorted(names) == list(range(len(names))), names
 with open(os.path.join(d, 'labels.txt'), 'w', encoding='utf-8') as f:
-    for i in range(80):
-        f.write(names[i] + '\n')
-print('OK ->', dst, '+ labels.txt (80)')
+    for i in range(len(names)):
+        f.write(str(names[i]) + '\n')
+print('OK ->', dst, '+ labels.txt (%d 类)' % len(names))
 '@
 
 $tmp = Join-Path $env:TEMP "fetch_yolo_$PID.py"
 [System.IO.File]::WriteAllText($tmp, $code, [System.Text.UTF8Encoding]::new($false))
 try {
-    & $Python $tmp $dir
-    if ($LASTEXITCODE -ne 0) { throw "导出失败（exit $LASTEXITCODE）" }
+    & $Python $tmp $dir $Model $Imgsz
+    if ($LASTEXITCODE -ne 0) { throw "导出失败（exit $LASTEXITCODE）。v3/v4 的多输出 head 不受支持，请用 ultralytics 单输出导出。" }
 } finally {
     Remove-Item $tmp -ErrorAction SilentlyContinue
 }

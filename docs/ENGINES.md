@@ -29,8 +29,8 @@ HTTP/Tauri 层
   └── EngineHandle（运行期句柄：Mutex<Box<dyn VisionEngine>>）
         └── trait VisionEngine（统一入口）
               ├── trait OcrPipeline     文本行 + 字框
-              └── trait ObjectDetector  类别框（YOLO 用）
-                    └── 具体实现：PpOcr / DdddOcr / YoloV8 ...
+              └── trait ObjectDetector  类别框（目标检测用）
+                    └── 具体实现：PpOcr / DdddOcr / Yolo ...
 ```
 
 ## 2. 核心类型
@@ -39,8 +39,8 @@ HTTP/Tauri 层
 
 | 类型 | 含义 |
 |---|---|
-| `EngineKind` | `PpOcr` / `DdddOcr` / `Yolo(YoloVersion)`，决定目录与加载方式 |
-| `YoloVersion` | `V5` / `V7` / `V8` / `V11`，把「有无 objectness」「letterbox 填 0 还是 114」编码成方法，后处理不再散落 `if version` |
+| `EngineKind` | `PpOcr` / `DdddOcr` / `Yolo`，决定目录与加载方式 |
+| `yolo::YoloLayout` | **加载时探测**的模型结构：输出布局（`C×N` / `N×C`）、有无 objectness、输入边长、候选数、通道数。取代了早期的 `YoloVersion` 白名单 |
 | `EngineSpec` | `<family>[:<variant>]` 的解析与规范化，`key()` 兼作缓存键 |
 | `Capabilities` | 能力声明：`line_boxes` / `char_boxes` / `rotation_cls` / `detect` / `classes` / `batch` |
 | `TextLine` | 一行文本：四点框 + 文本 + score + det_score + rotated + 可选逐字 |
@@ -81,9 +81,8 @@ models/
       old/{det.onnx,rec.onnx,charset.txt}
   detect/
     yolo/
-      v5/{model.onnx,labels.txt}
-      v8/{model.onnx,labels.txt}
-      v11/{model.onnx,labels.txt}
+      {model.onnx,labels.txt}          ← 唯一约定的位置（不分版本）
+      <任意名>/{model.onnx,labels.txt}  ← 兼容旧的 v8/ v11/ 分层，自动下探一层
 ```
 
 兼容规则：**旧路径 `models/{tiny,small,medium}/` 继续有效**——`catalog::ppocr_dir`
@@ -115,7 +114,8 @@ YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `cla
 ```
 
 缺省 = 当前配置里的默认引擎，行为与今天完全一致。`engine` 的语法：
-`<family>[:<variant>]`，例如 `ppocr:tiny`、`ddddocr:common`、`yolo:v8`。
+`<family>[:<variant>]`，例如 `ppocr:tiny`、`ddddocr:common`、`yolo`（别名 `detect`）。
+目标检测没有 variant 这一层——模型结构在加载时探测。
 
 ### 4.2 新增端点
 
@@ -227,7 +227,8 @@ ONNX（`opset=12, imgsz=640, dynamic=False, simplify=True`）→ 重命名 `mode
    `f64::round()` 会在 .5 边界差一个像素；
 2. 缩放用 `cv2.resize(INTER_LINEAR)`——直接复用 `ocr::preprocess::resize_bilinear`
    （PP-OCR 精度基线验证过的 OpenCV 11bit 定点逐位复刻）；
-3. 填充值按 `YoloVersion::pad_value()`（v8=114），上下 `round(dh±0.1)` 均分；
+3. 填充值统一 **114**（ultralytics 全系与 yolov5 官方 letterbox 默认色都是 114），
+   上下 `round(dh±0.1)` 均分；早期写成「v5 用 0」是错的，已纠正；
 4. 输入 RGB `/255`（ultralytics 是 BGR 读入、letterbox 后 `[...,::-1]` 转 RGB，等效）。
 
 **后处理**：v8 输出 `[1, 4+C, 8400]`（导出图已带 sigmoid，值就是概率，不要再次
@@ -244,8 +245,9 @@ conf 差 0.001~0.011，一度以为是 NMS/还原坐标写错；实际是 **JPEG
 IoU=1.0000、conf 差=0.0000，证明整条链路（letterbox/解码/NMS/坐标还原）与
 ultralytics 逐位一致。真实场景的 jpg 输入自带这点解码噪声，属正常现象。
 
-**v5/v7**：`decode()` 的 `[1,N,5+C]` obj×cls 路径已实现并有合成张量单测，
+**v5/v7 系**：`decode()` 的 `[1,N,5+C]` obj×cls 路径已实现，结构探测也有合成单测，
 但**没有真模型实测**——哪天拿到 v5/v7 的 onnx，先跑一遍 parity 再宣布可用。
+（2026-10-22 之后引擎不再区分版本，放进去就自动按 `N×C` + objectness 解码。）
 
 **本机环境坑（复现时必看）**：本机装的是 `onnxruntime-directml`，而 ultralytics
 按发行版名找 `onnxruntime`，找不到就**自动用 uv 装最新版**——装到一半 dll 被锁
@@ -256,7 +258,7 @@ ultralytics 逐位一致。真实场景的 jpg 输入自带这点解码噪声，
 
 ### 6.3 M3.3 实现实录（/vision/pipeline）
 
-- 流程：`detect_engine`（默认 yolo:v8）找区域 → 轴对齐裁剪 → PP-OCR 逐区域认字 →
+- 流程：`detect_engine`（默认 `yolo`）找区域 → 轴对齐裁剪 → PP-OCR 逐区域认字 →
   行坐标加框偏移平移回原图。两把引擎锁**顺序持有、绝不嵌套**（detect 用 alt 锁、
   识别用 engine 锁，各自独立的 spawn_blocking）。
 - **验收口径要写清**：COCO 类别与文本区域基本不对齐，yolov8n+coco 跑文档截图
@@ -268,13 +270,43 @@ ultralytics 逐位一致。真实场景的 jpg 输入自带这点解码噪声，
   的手误，0 高图 infer 静默返回空。**裁剪后必须断言宽高 > 0**（现已在测试里锁）。
 
 
-### YOLO 的已知坑（提前记）
-1. **输出布局**：v5 是 `[1, N, 5+C]`（xywh+obj+cls），v8/v11 是 `[1, 4+C, N]`（无 obj，
-   需转置）。两者不能共用一套后处理，必须按 `EngineKind` 分开。
+### 目标检测的已知坑
+
+1. **输出布局**：v5/v7 是 `[1, N, 5+C]`（xywh+obj+cls），v8/v10/v11/v12/v26 是 `[1, 4+C, N]`
+   （无 obj，需转置）。两者不能共用一套后处理——现在由 [`YoloLayout`] 决定，**不再靠版本号**。
 2. **NMS**：ultralytics 默认 `conf=0.25, iou=0.7, class-agnostic=False`。要和它逐框对齐，
    就必须复刻同样的排序（按 score 降序）+ 同类内抑制。
-3. **letterbox**：v8 用 114 灰边 padding，v5 用 0。像素值错了，置信度整体偏移 0.05+。
-4. **anchors**：v5/v7 有 anchor，v8+ 无锚。模型目录里要标出 `version`，不能靠猜。
+3. **letterbox**：全系统一 114 灰边。填错会让置信度整体偏移 0.05+，肉眼看不出来但阈值一改就翻。
+4. **怎么判断有没有 objectness**：`C == 4 + 类别数` 是没有，`C == 5 + 类别数` 是有。
+   类别数来自 `labels.txt`；没有 labels 时用候选数对锚点网格兜底（8400 = anchor-free，
+   25200 = 3 anchors × 8400）。
+5. **两类导出不受支持**，必须明确报错而不是硬跑：v3/v4 的多输出 head（3 个输出张量）、
+   自带 NMS 的端到端导出（`[1,300,6]`，候选数远小于锚点网格）。
+
+
+### 6.4 目标检测去版本化（2026-10-22，用户要求）
+
+**动机**：让用户去选 `v5/v7/v8/v11` 是错的责任划分——他手上只有一个 `model.onnx`，
+版本号既不是他填的、也决定不了怎么后处理；真正决定后处理的是那个文件的输出形状。
+白名单还必然落后（v10/v12/v26 已经在用，v3 的多 head 又是另一套）。
+
+**做法**：删除 `YoloVersion`，`EngineKind::Yolo` 变成无参数；加载时从 ONNX 读
+`inputs[0].dims`（定输入边长）与 `outputs[0].dims`（定布局与通道数），再用 `labels.txt`
+的类别数定有无 objectness，得到 `YoloLayout`。`decode()` 直接吃 `YoloLayout`。
+
+**兼容**：`yolo:v8` / `detect` 这类写法继续解析，版本部分被忽略（但会校验「像不像版本号」，
+`yolo:abc` 直接报错，不把拼写错误咽下去）。目录 `detect/yolo/v8/` 仍能扫到。
+
+**验收**：v8n 重跑 `tests/yolo_parity.rs`，**8/8 框 IoU=1.0000、conf 差=0.0000 不变**；
+日志打出探测结果：`输出 [1,84,8400] / C×N 布局 / 无 objectness / 640x640 输入 · 类别 80 个`。
+
+**顺带修正的假象**：`SessionBuilder::with_execution_providers` 对单个 EP 注册失败**只打
+ERROR 日志然后跳过**，整体仍返回 Ok。所以「会话建成功」不代表 DirectML 生效——
+本轮发现界面写着 GPU/DirectML、日志里四条 `DirectML is not supported in this build`，
+实际一直在 CPU 上跑。现在 `ort_util::directml_available()` 先查
+`ep::directml::api()`，不可用就直接走 CPU 并如实上报 `actual_device = Cpu`。
+同时把 `runtime/onnxruntime.dll` 换回 1.24.3 的 **DirectML 构建**（20.1MB，
+之前那份是 1.31.0 的 CPU 构建），日志里那条 ERROR 消失。
 
 ## 7. 不做的事（已评估，记录原因）
 

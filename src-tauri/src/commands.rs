@@ -301,7 +301,7 @@ pub async fn vision_pipeline(
             .detect_engine
             .clone()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "yolo:v8".to_string()),
+            .unwrap_or_else(|| "yolo".to_string()),
         ocr_engine: crate::engine::EngineSpec::ppocr(ocr_level).key(),
         count: text_count,
         regions: region_out,

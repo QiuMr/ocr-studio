@@ -36,17 +36,39 @@ pub fn ort_env() -> OrtResult<&'static Environment> {
     Ok(ORT_ENV.get().expect("ORT_ENV 刚被设置"))
 }
 
-/// 按设备偏好建会话。DirectML 注册失败时由调用方决定是否降级。
+/// 当前 `onnxruntime.dll` 是否真的带 DirectML 执行提供器。
+///
+/// 为什么必须显式查：`SessionBuilder::with_execution_providers` 对**单个** EP
+/// 注册失败只打一条 `ERROR ort::ep` 日志然后跳过，整体仍返回 `Ok`。
+/// 于是「建会话成功」完全不能证明 DML 生效——2026-10-22 就踩到这个坑：
+/// 界面上写着 GPU/DirectML，日志里四条 "DirectML is not supported in this
+/// build of ONNX Runtime"，实际一直在 CPU 上跑。
+///
+/// 判据用 ort 自己的 `directml::api()`（内部是 `GetExecutionProviderApi("DML")`），
+/// 返回 `None` 就是这份 DLL 没编 DML。
+pub fn directml_available() -> bool {
+    ort::ep::directml::api().is_some()
+}
+
+/// 按设备偏好建会话。DirectML 不可用时**直接走 CPU**，不再注册必然失败的 EP。
 pub fn build_session(env: &Environment, path: &Path, device: Device) -> OrtResult<Session> {
     let mut builder = Session::builder(env)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?;
-    builder = match device {
-        Device::Directml => builder.with_execution_providers([
+    let use_dml = device == Device::Directml;
+    if use_dml && !directml_available() {
+        tracing::warn!(
+            "{} 请求 DirectML，但当前 onnxruntime.dll 不带 DML 执行提供器，改用 CPU",
+            path.display()
+        );
+    }
+    if use_dml && directml_available() {
+        builder = builder.with_execution_providers([
             DirectML::default().build(),
             CPU::default().build(),
-        ])?,
-        Device::Cpu => builder.with_execution_providers([CPU::default().build()])?,
-    };
+        ])?;
+    } else {
+        builder = builder.with_execution_providers([CPU::default().build()])?;
+    }
     builder.commit_from_file(path)
 }
 
@@ -80,7 +102,7 @@ pub fn build_session_with_fallback(
     device: Device,
     warmup_shape: [usize; 4],
 ) -> OrtResult<(Session, Device)> {
-    if device == Device::Directml {
+    if device == Device::Directml && directml_available() {
         match build_session(env, path, Device::Directml) {
             Ok(mut s) => {
                 let name = input_name(&s);

@@ -1,19 +1,23 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（M3.3 pipeline 串联落地，M3 全部完成）
+> 最后更新：2026-10-22（目标检测去版本化 + 界面三项修复 + DirectML 假象纠正）
 
 ---
 
 ## 0. 一句话现状
 
-**M3 全部完成**（抽象层 / DDDDOCR / YOLO 检测 / pipeline 串联）：
-`POST /vision/pipeline` = 检测引擎找区域 → PP-OCR 框内认字，`detect_engine`
-缺省 yolo:v8；测试台检测模式新增「框内识字」开关。bus.png 实测 5 区域 8 行
-（bus 框内 7 行）。63 单测 + 22 重量级全绿，PP-OCR 精度**零变化**。
+**M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），并做了一轮
+用户反馈驱动的改造：**目标检测不再指定版本**（结构在加载时按 ONNX 形状自动识别）、
+**标题栏拖动与窗口按钮修好**（根因是 Tauri 2 缺 ACL 权限）、**侧栏去蓝去竖条**、
+**全局垂直对齐统一**。73 单测 + 22 重量级全绿，PP-OCR 精度**零变化**。
+
+顺带纠正一个长期假象：`onnxruntime.dll` 一直是**不带 DirectML 的 CPU 构建**，
+界面却显示 GPU/DirectML（`with_execution_providers` 对单个 EP 失败只打日志、整体返回 Ok）。
+已换回 1.24.3 DirectML 构建，并让 `actual_device` 如实上报。
 
 M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）、M3.0 抽象层、
-M3.1 DDDDOCR、M3.2 YOLO 检测均已完成。
+M3.1 DDDDOCR、M3.2 目标检测、M3.3 pipeline 串联均已完成。
 
 **分发方式改为免安装 zip**（用户明确要求：不再出 MSI/NSIS）：
 `tauri.conf.json` 设 `bundle.active = false`，改用 `scripts/pack_exe.ps1` 打
@@ -23,25 +27,22 @@ M3.1 DDDDOCR、M3.2 YOLO 检测均已完成。
 
 已完成里程碑：M0（环境基线）、M1（推理核心与 Python 逐位对齐 + HTTP/命令/前端全套）、
 M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）、
-M3.2（YOLO 检测）、M3.3（pipeline 串联）。
+M3.2（目标检测）、M3.3（pipeline 串联）、M4 界面反馈修复。
 
-下一步候选（见 0.0 末尾的待办）。
-
-### 0.0 本轮（M3.3 pipeline 串联）做了什么
+### 0.0 本轮（用户反馈四项）做了什么
 
 | 项 | 结果 |
 |---|---|
-| 后端 | `AppState::run_pipeline`：detect（alt 锁）→ 裁剪 → PP-OCR 逐区域（engine 锁），两把锁顺序持有不嵌套；单区域识别失败只记日志不拖垮整图；`OcrOptions` 增 `detect_engine`（缺省 yolo:v8） |
-| 接口 | `POST /vision/pipeline` + Tauri `vision_pipeline`；出参含每区域的 class/置信度/框内文本/行框（已平移回原图坐标） |
-| 前端 | 检测模式新增「框内识字」开关；开则走 pipeline，右侧「检测 + 识别结果」列表显示区域类别 + 框内文字，无文字区域明说「（框内没识别出文字）」 |
-| 踩坑 | **`crop_imm(x0,y0,x1-x0,y1-y1)` 高度手误算成 0**——0 高图 infer 静默返回空，一度以为链路断了（直接对同一裁剪跑 /ocr/shibie 有 7 行字）。靠集成测试打印每区域 crop 尺寸定位。教训：**裁剪后必须断言宽高** |
-| 环境事故 | D 盘 0 空闲 + **C 盘 0 字节**（回收站积了 81.5GB 构建产物 + Temp 7.9GB）。清了回收站中的构建类文件（.lib/.o/.pdb/.rlib 等 ≈75GB，保留 .onnx/.exe/.bin）和 npm/pip 缓存，D 恢复 38GB、C 恢复 1.4GB。**Rust 构建曾因此大面积 os error 5 / LNK1108**，与本轮代码无关 |
-| 验收 | 集成测试 `tests/pipeline_vision.rs`（bus.png 5 区域 8 行断言）；HTTP 实测同数；UI 实测「5 区域 · 8 行 · 2410ms」；63 lib + 22 ignored 全绿，pipeline_match（PP-OCR 基线）仍逐字全对 |
+| 目标检测去版本化 | 删 `YoloVersion`；`EngineKind::Yolo` 无参数，`key()` = `yolo`（别名 `detect`）；加载时读 ONNX `inputs[0].dims` / `outputs[0].dims` + labels 类别数，探测出 `YoloLayout { 布局, 有无 objectness, 输入边长, 候选数, 通道数 }`，`decode()` 直接吃它。覆盖 v5/v6/v7/v8/v10/v11/v12/v26 这类单输出 head |
+| 目录扁平化 | 约定 `models/detect/yolo/{model.onnx,labels.txt}`；旧的 `detect/yolo/v8/` 自动下探一层仍能扫到。实盘已把模型搬到扁平目录 |
+| 明确拒绝 | v3/v4 多输出 head、自带 NMS 的端到端导出（`[1,300,6]`）→ 返回可读的 `NotReady`，不给垃圾框 |
+| 窗口按钮/拖动（真 bug） | 根因：`core:default` 的 window 权限只有只读命令，**没有** `allow-start-dragging` / `allow-minimize` / `allow-toggle-maximize` / `allow-close`，前端 `catch` 把 rejection 吞了 → 「点了没反应」。已在 `capabilities/default.json` 补齐；标题栏中段占位 div 补 `data-tauri-drag-region`（Tauri 只认事件目标自身）；最大化时图标切「还原」 |
+| 侧栏 | 删除左侧选中竖条；选中态 `bg-neutral-100 + text-neutral-900`，去掉全部 blue；底部版本圆点改中性色 |
+| 垂直对齐 | 全站卡片头第一行统一 `h-8 items-center`（原来「有按钮的卡片标题比没按钮的低 7px」）；PageHeader 改 `items-center`；工具条 Label 统一 `leading-none`；测试台左右卡片标题基线对齐 |
+| DirectML 假象 | `ort_util::directml_available()` 先查 `ep::directml::api()`，不可用直接走 CPU 并如实上报；`runtime/onnxruntime.dll` 从 1.31.0 **CPU** 构建换成 1.24.3 **DirectML** 构建（20.1MB）。日志里 4 条 `DirectML is not supported` 消失 |
+| 验收 | `cargo test --lib` 73 通过；`--ignored` 22 项全绿（含 pipeline_match 逐字全对、yolo_parity 8/8 IoU=1.0000 conf 差=0）；拖动/最大化/还原/最小化/关闭五项实测通过；HTTP `/vision/detect` 实测 5 框，旧写法 `yolo:v8` 兼容 |
 
-待办：v5/v7 onnx 到手后跑 parity；pack_exe.ps1 复验（含新模型后 zip 体积）；
-C 盘长期只剩 1~2GB，建议用户自己清理（Temp 7.9GB 未动）。
-
-### 0.0.1 上轮（M3.2 YOLO 检测）做了什么
+### 0.0.1 上轮（M3.3 pipeline 串联）做了什么
 
 | 项 | 结果 |
 |---|---|
@@ -71,13 +72,13 @@ C 盘长期只剩 1~2GB，建议用户自己清理（Temp 7.9GB 未动）。
 
 | 项 | 结果 |
 |---|---|
-| 抽象层 | 新增 `src-tauri/src/engine/{mod.rs,catalog.rs}`：`EngineKind`/`EngineSpec`/`YoloVersion`/`Capabilities`/`TextLine`/`Detection`/`VisionEngine`/`VisionError` |
+| 抽象层 | 新增 `src-tauri/src/engine/{mod.rs,catalog.rs}`：`EngineKind`/`EngineSpec`/`Capabilities`/`TextLine`/`Detection`/`VisionEngine`/`VisionError`（`YoloVersion` 已于 10-22 移除，见 6.4） |
 | 首个实现 | `impl VisionEngine for OcrEngine`——只做「包一层」，`recognize_detailed` 内部一字节没动，这是精度零变化的结构性保证 |
 | 命名避让 | trait 用 `infer`/`status` 而非 `recognize`/`health`，避免「具体类型走 inherent、`dyn` 走 trait」的双份行为（详见 ENGINES.md 2.1） |
 | 目录发现 | `catalog::discover()` 只读文件系统、不加载模型；9 个候选（ppocr×3 + ddddocr×2 + yolo×4），缺文件时明说缺哪个 |
 | 新旧路径 | `ppocr_dir` 新路径 `ocr/ppocr/<lvl>/` 优先，回退旧路径 `models/<lvl>/`，老用户模型不用搬家 |
 | 接口 | 新增 `GET /engine/list` 与 `list_engines` 命令（同源逻辑），已加载实例会回填 `actual_device` |
-| YOLO 坑位固化 | `YoloVersion::has_objectness()` / `pad_value()` 把「v5 有 obj、填 0；v8 无 obj、填 114」写进类型，后处理不再散落 `if version` |
+| YOLO 坑位固化 | 早期用 `YoloVersion` 枚举把「有无 obj / 填充值」写进类型；10-22 改为加载时按 ONNX 形状探测（`YoloLayout`），版本枚举已删除 |
 | 前端 | 设置页新增「识别引擎」卡片：名字 + 可用/未安装 + GPU/CPU + 能力标签 + 缺失文件路径 |
 | 测试 | 新增 8 个用例（spec 解析/歧义拒绝/key 往返/YOLO 版本语义×4 + 目录发现×4）；`/engine/list` 冒烟测试不需模型即可跑 |
 
