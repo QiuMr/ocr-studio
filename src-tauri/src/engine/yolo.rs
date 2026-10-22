@@ -8,9 +8,15 @@
 //! - **输出布局**：`[1, C, N]`（anchor-free，v8 系）还是 `[1, N, C]`（anchor-based，v5 系）。
 //!   判据是哪一维更小——通道数（几十到几百）永远远小于候选数（几千到几万）；
 //! - **有无 objectness**：`C == 5 + 类别数` 则有（`score = obj × cls`），
-//!   `C == 4 + 类别数` 则无（`score = cls`）。类别数来自 `labels.txt`；
-//!   拿不到 labels 时用候选数对锚点网格（`8400` vs `25200`）兜底判断；
-//! - **输入边长**：读模型的静态输入维度，动态维度回落到 640。
+//!   `C == 4 + 类别数` 则无（`score = cls`）。类别数优先取模型 metadata 的 `names`，
+//!   其次 labels.txt；两个都没有时用候选数对锚点网格（`8400` vs `25200`）兜底判断；
+//! - **输入边长**：读模型的静态输入维度，动态维度回落到 metadata 的 `imgsz`，再回落 640。
+//!
+//! **类名由模型自己带**（[`ModelMeta`]）：ultralytics 导出 ONNX 时会把
+//! `names` / `task` / `imgsz` 写进 model metadata，这里直接读——用户换自己的模型
+//! 不用再手写 labels.txt。labels.txt 只是给非 ultralytics 导出的兜底。
+//! 反过来，`task != detect` 的模型（segment / pose / obb / classify）必须**明确拒绝**：
+//! 它们的输出多出 mask 系数或关键点通道，按检测语义解码不会崩，只会给出一堆错类别的框。
 //!
 //! 不支持的（会**明确报错**，不静默给垃圾框）：
 //! - v3 / v4 原始三尺度多输出 head（需要按 anchor 解码三个 feature map，另一套逻辑）；
@@ -216,22 +222,20 @@ pub fn infer_layout(
     })
 }
 
-/// 读模型第一个输入的边长（静态维度）。读不到就用 [`DEFAULT_SIZE`]。
-fn probe_input_size(sess: &ort::session::Session) -> u32 {
-    let Some(outlet) = sess.inputs().first() else {
-        return DEFAULT_SIZE;
-    };
+/// 读模型第一个输入的边长（静态维度）。动态维度返回 `None`，交调用方兜底。
+fn probe_input_size(sess: &ort::session::Session) -> Option<u32> {
+    let outlet = sess.inputs().first()?;
     if let ValueType::Tensor { shape, .. } = outlet.dtype() {
         let dims: Vec<i64> = shape.iter().copied().collect();
         if dims.len() == 4 {
             let (h, w) = (dims[2], dims[3]);
             if h > 0 && w > 0 {
                 // 非方形导出取长边，letterbox 的边长取它
-                return h.max(w) as u32;
+                return Some(h.max(w) as u32);
             }
         }
     }
-    DEFAULT_SIZE
+    None
 }
 
 /// 读第一个输出的形状。多输出时由调用方先拦掉。
@@ -243,13 +247,204 @@ fn probe_output_dims(sess: &ort::session::Session) -> Vec<i64> {
 }
 
 // ---------------------------------------------------------------------------
+// 模型自带的信息（类名 / 任务 / 输入尺寸）
+// ---------------------------------------------------------------------------
+
+/// 类名从哪来的——状态页要如实说，别让用户以为 labels.txt 生效了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamesSource {
+    /// 模型 metadata 的 `names`（ultralytics 导出会写）
+    Onnx,
+    /// 同目录的 labels.txt
+    Labels,
+    /// 都没有 → 显示 `class_{id}`
+    None,
+}
+
+impl NamesSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NamesSource::Onnx => "模型内置",
+            NamesSource::Labels => "labels.txt",
+            NamesSource::None => "无（显示 class_id）",
+        }
+    }
+}
+
+/// 从 ONNX 里读出来的模型信息。
+#[derive(Debug, Clone)]
+pub struct ModelMeta {
+    /// 类名，下标即 class_id
+    pub names: Vec<String>,
+    pub names_source: NamesSource,
+    /// ultralytics 的 task：detect / segment / pose / obb / classify。非 ultralytics 导出为 `None`
+    pub task: Option<String>,
+    /// metadata 里的导出尺寸（`imgsz = [640, 640]`），输入维度是动态时用它
+    pub imgsz: Option<u32>,
+    /// 模型描述（`Ultralytics YOLOv8n model trained on coco.yaml`），给状态页看
+    pub description: Option<String>,
+}
+
+impl Default for ModelMeta {
+    fn default() -> Self {
+        Self {
+            names: Vec::new(),
+            names_source: NamesSource::None,
+            task: None,
+            imgsz: None,
+            description: None,
+        }
+    }
+}
+
+impl ModelMeta {
+    /// 读模型 metadata；再用同目录的 labels.txt 兜底补类名。
+    pub fn read(sess: &ort::session::Session, model_path: &Path) -> Self {
+        let mut meta = ModelMeta::default();
+        if let Ok(md) = sess.metadata() {
+            if let Some(raw) = md.custom("names") {
+                let names = parse_names(&raw);
+                if !names.is_empty() {
+                    meta.names = names;
+                    meta.names_source = NamesSource::Onnx;
+                }
+            }
+            meta.task = md.custom("task").map(|t| t.trim().to_ascii_lowercase());
+            meta.imgsz = md.custom("imgsz").and_then(|v| parse_imgsz(&v));
+            meta.description = md.description().filter(|d| !d.trim().is_empty());
+        }
+        if meta.names.is_empty() {
+            // 非 ultralytics 导出：模型里没有 names，看同目录有没有 labels.txt
+            for p in [
+                model_path.with_file_name("labels.txt"),
+                model_path.with_extension("txt"),
+            ] {
+                let names = load_labels(&p);
+                if !names.is_empty() {
+                    tracing::info!("类名取 {}", p.display());
+                    meta.names = names;
+                    meta.names_source = NamesSource::Labels;
+                    break;
+                }
+            }
+        }
+        meta
+    }
+}
+
+/// 解析 metadata 里 `names` 的值。
+///
+/// ultralytics 写的是 Python dict 的 repr：`{0: 'person', 1: 'bicycle'}`；
+/// 也有导出器写 JSON 风格 `{"0": "person"}`。两种都能吃：
+/// 数字 key、单/双引号值、`\'` 转义、乱序 key、值里带冒号或数字。
+/// 缺号的位置留空串（后面按 class_id 取值时会回落 `class_{id}`）。
+pub fn parse_names(raw: &str) -> Vec<String> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut items: Vec<(usize, String)> = Vec::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        // key
+        let start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        let Ok(key) = chars[start..i].iter().collect::<String>().parse::<usize>() else {
+            continue;
+        };
+        // 冒号（key 与值之间可能还有引号，JSON 风格）
+        while i < chars.len() && chars[i] != ':' {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        i += 1;
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+
+        let quote = chars[i];
+        let value = if quote == '\'' || quote == '"' {
+            i += 1;
+            let mut s = String::new();
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' && i + 1 < chars.len() {
+                    let next = chars[i + 1];
+                    s.push(match next {
+                        'n' => '\n',
+                        't' => '\t',
+                        other => other,
+                    });
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                s.push(c);
+                i += 1;
+            }
+            s
+        } else {
+            // 不带引号的值（少见），取到 , 或 } 为止
+            let start = i;
+            while i < chars.len() && chars[i] != ',' && chars[i] != '}' {
+                i += 1;
+            }
+            chars[start..i].iter().collect::<String>().trim().to_string()
+        };
+        items.push((key, value));
+    }
+
+    if items.is_empty() {
+        return Vec::new();
+    }
+    items.sort_by_key(|(k, _)| *k);
+    let len = items.last().map(|(k, _)| k + 1).unwrap_or(0);
+    let mut out = vec![String::new(); len];
+    for (k, v) in items {
+        if k < len {
+            out[k] = v;
+        }
+    }
+    // 尾部空号不算类（有的导出器会留空位）
+    while out.last().is_some_and(|s| s.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// 解析 `imgsz`：`[640, 640]` / `640` / `[320, 320]`，取长边。
+fn parse_imgsz(raw: &str) -> Option<u32> {
+    let nums: Vec<u32> = raw
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    nums.into_iter().max().filter(|v| *v >= 32)
+}
+
+// ---------------------------------------------------------------------------
 // 引擎
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct YoloConfig {
-    /// 实际放 `model.onnx` 的目录（`detect/yolo/` 或兼容的 `detect/yolo/<任意名>/`）
-    pub dir: PathBuf,
+    /// onnx 文件的完整路径。既可以是 `models/detect/yolo/model.onnx`，
+    /// 也可以是用户从任意目录加进来的模型（不复制文件）。
+    pub path: PathBuf,
+    /// 模型 id（`yolo:<id>` 的后半段）；`None` = 默认模型
+    pub id: Option<String>,
     pub device: Device,
 }
 
@@ -257,33 +452,24 @@ pub struct YoloEngine {
     sess: ort::session::Session,
     input: String,
     layout: YoloLayout,
-    /// 类别名，行号即 class_id；缺失时为空、名字回落 `class_{id}`
+    /// 类别名，下标即 class_id；缺失时为空、名字回落 `class_{id}`
     classes: Vec<String>,
-    dir: PathBuf,
+    meta: ModelMeta,
+    id: Option<String>,
+    path: PathBuf,
     actual_device: Device,
 }
 
 impl YoloEngine {
     pub fn load(cfg: YoloConfig) -> Result<Self, VisionError> {
-        let model_path = cfg.dir.join("model.onnx");
-        if !model_path.exists() {
+        let model_path = cfg.path;
+        if !model_path.is_file() {
             return Err(VisionError::NotReady(format!(
-                "缺少检测模型 {}（用 scripts/fetch_yolo.ps1 导出，或自己放一个 model.onnx）",
+                "检测模型不存在：{}（用设置里的「添加模型」重新选一次，\
+                 或把 onnx 放到 models/detect/yolo/）",
                 model_path.display()
             )));
         }
-        let classes = {
-            let p = cfg.dir.join("labels.txt");
-            if p.exists() {
-                load_labels(&p)
-            } else {
-                tracing::warn!(
-                    "{} 缺少 labels.txt，类别名将显示为 class_{{id}}（结构探测也会少一条判据）",
-                    cfg.dir.display()
-                );
-                Vec::new()
-            }
-        };
 
         let env = crate::ocr::ort_util::ort_env()
             .map_err(|e| VisionError::NotReady(format!("ORT 环境初始化失败: {e}")))?;
@@ -292,13 +478,35 @@ impl YoloEngine {
         let mut sess = crate::ocr::ort_util::build_session(env, &model_path, cfg.device)
             .map_err(|e| VisionError::NotReady(format!("检测模型加载失败: {e}")))?;
         let input = crate::ocr::ort_util::input_name(&sess);
-        let size = probe_input_size(&sess);
+
+        // 先读 metadata：类名 / task / imgsz 都在里面
+        let meta = ModelMeta::read(&sess, &model_path);
+        if let Some(task) = meta.task.as_deref() {
+            if task != "detect" {
+                let why = match task {
+                    "segment" => "分割模型的输出多 32 个 mask 系数通道，按检测解会整体错位",
+                    "pose" => "姿态模型的输出多关键点通道",
+                    "obb" => "旋转框模型的输出多角度通道，框也不是轴对齐的",
+                    "classify" => "分类模型输出的是整图类别，根本没有检测框",
+                    _ => "不是目标检测模型",
+                };
+                return Err(VisionError::NotReady(format!(
+                    "{} 的模型任务是 `{task}`：{why}。\
+                     请用 ultralytics 的 `yolo export model=xxx.pt format=onnx`（检测权重）重新导出",
+                    model_path.display()
+                )));
+            }
+        }
+
+        let size = probe_input_size(&sess).or(meta.imgsz).unwrap_or(DEFAULT_SIZE);
         let shape = [1, 3, size as usize, size as usize];
 
         // 注意 `directml_available()`：这份 DLL 不带 DML 时，就算请求了 DirectML
         // 也必须按 CPU 处理，否则会把「跑在 CPU 上」标成 GPU（见 ort_util 的说明）
         let dml_ok = cfg.device == Device::Directml && crate::ocr::ort_util::directml_available();
-        let (mut sess, actual_device) = if dml_ok {
+        // 注意 `&mut sess` 指的是上面那个还没被阴影的会话：这里重新绑定出的新
+        // `sess` 之后只被读，所以不需要 `mut`（编译器会提醒，别加 return mut）
+        let (sess, actual_device) = if dml_ok {
             match crate::ocr::ort_util::warmup(&mut sess, &input, shape) {
                 Ok(()) => (sess, Device::Directml),
                 Err(e) => {
@@ -329,23 +537,31 @@ impl YoloEngine {
             )));
         }
 
-        let layout = infer_layout(&probe_output_dims(&sess), classes.len(), size)
-            .map_err(|why| VisionError::NotReady(format!("{} 不是可用的检测模型：{why}", model_path.display())))?;
+        let layout = infer_layout(&probe_output_dims(&sess), meta.names.len(), size).map_err(
+            |why| VisionError::NotReady(format!("{} 不是可用的检测模型：{why}", model_path.display())),
+        )?;
 
+        let classes = meta.names.clone();
         tracing::info!(
-            "检测模型已加载: {} · {} · 类别 {} 个 · 设备 {:?}",
+            "检测模型已加载: {} · {} · 类别 {} 个（{}）· 设备 {:?}",
             model_path.display(),
             layout.describe(),
             classes.len(),
+            meta.names_source.as_str(),
             actual_device
         );
+        if let Some(desc) = meta.description.as_deref() {
+            tracing::info!("  模型描述: {desc}");
+        }
 
         Ok(Self {
             sess,
             input,
             layout,
             classes,
-            dir: cfg.dir,
+            meta,
+            id: cfg.id,
+            path: model_path,
             actual_device,
         })
     }
@@ -354,9 +570,19 @@ impl YoloEngine {
         self.layout
     }
 
+    /// 模型自身的描述信息（类名来源、task、导出尺寸），给状态页看。
+    pub fn meta(&self) -> &ModelMeta {
+        &self.meta
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn class_name(&self, id: usize) -> String {
         self.classes
             .get(id)
+            .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| format!("class_{id}"))
     }
@@ -420,7 +646,10 @@ impl YoloEngine {
 
 impl VisionEngine for YoloEngine {
     fn spec(&self) -> EngineSpec {
-        EngineSpec::yolo()
+        match &self.id {
+            Some(id) => EngineSpec::yolo_model(id),
+            None => EngineSpec::yolo(),
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -441,9 +670,12 @@ impl VisionEngine for YoloEngine {
             available: true,
             actual_device: Some(self.actual_device),
             note: Some(format!(
-                "自动识别 {} · 类别 {} 个 · 后处理对齐 ultralytics（conf=0.25/iou=0.7 缺省）",
-                self.layout.describe(),
-                self.classes.len()
+                "{} · {} · 类别 {} 个（{}）· 自动识别 {} · 后处理对齐 ultralytics（conf=0.25/iou=0.7 缺省）",
+                self.path.display(),
+                self.meta.task.as_deref().unwrap_or("detect"),
+                self.classes.len(),
+                self.meta.names_source.as_str(),
+                self.layout.describe()
             )),
         }
     }
@@ -701,18 +933,40 @@ pub fn load_labels(path: &Path) -> Vec<String> {
     labels
 }
 
-/// 便捷构造：在 `models_root` 下找检测模型并加载。
+/// 便捷构造：在「目录扫描 + 配置里的外部路径」合并后的清单里找模型并加载。
 ///
-/// 目录下探逻辑在 [`catalog::yolo_model_dir`]，兼容旧的 `detect/yolo/v8/` 结构。
-pub fn engine_from_root(models_root: &Path, device: Device) -> Result<YoloEngine, VisionError> {
-    let dir = catalog::yolo_model_dir(models_root).ok_or_else(|| {
-        VisionError::NotReady(format!(
-            "没有找到检测模型。把 ONNX 放到 {}\\model.onnx（配套 labels.txt 放在同目录），\
-             或者跑 scripts/fetch_yolo.ps1",
-            catalog::yolo_dir(models_root).display()
-        ))
-    })?;
-    YoloEngine::load(YoloConfig { dir, device })
+/// `model_id = None` 取默认模型（`detect/yolo/model.onnx` 优先）。
+pub fn engine_from_root(
+    models_root: &Path,
+    external: &[String],
+    model_id: Option<&str>,
+    device: Device,
+) -> Result<YoloEngine, VisionError> {
+    let Some(model) = catalog::find_yolo_model(models_root, external, model_id) else {
+        let avail = catalog::list_yolo_models(models_root, external);
+        let msg = if avail.is_empty() {
+            format!(
+                "没有找到检测模型：{} 是空的。把一个 ultralytics 导出的 onnx 放进去，\
+                 或在设置里「添加模型」直接指向任意位置的 onnx",
+                catalog::yolo_dir(models_root).display()
+            )
+        } else {
+            let names: Vec<&str> = avail.iter().map(|m| m.id.as_str()).collect();
+            format!(
+                "没有 id 为 `{}` 的检测模型。可用的有：{}",
+                model_id.unwrap_or("(默认)"),
+                names.join(" / ")
+            )
+        };
+        return Err(VisionError::NotReady(msg));
+    };
+    YoloEngine::load(YoloConfig {
+        path: model.path,
+        // 保持 None 而不是填默认模型的名字：`/engine/list` 用 spec.key() 回填
+        // 实际设备，键必须和列表里的那条一致
+        id: model_id.map(str::to_string),
+        device,
+    })
 }
 
 #[cfg(test)]
@@ -937,5 +1191,55 @@ mod tests {
         std::fs::write(&p, "\u{feff}person\n\ncar\n\n").unwrap();
         assert_eq!(load_labels(&p), vec!["person", "", "car"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------- 模型自带的类名（metadata）
+
+    #[test]
+    fn parse_names_reads_ultralytics_python_dict() {
+        // ultralytics 写的是 Python dict repr
+        let raw = "{0: 'person', 1: 'bicycle', 2: 'traffic light'}";
+        assert_eq!(
+            parse_names(raw),
+            vec!["person", "bicycle", "traffic light"],
+            "带空格的类名不能被拆开"
+        );
+    }
+
+    #[test]
+    fn parse_names_handles_json_style_and_quoted_keys() {
+        // 别的导出器可能写 JSON 风格：key 带引号、值用双引号
+        let raw = r#"{"0": "person", "1": "dog"}"#;
+        assert_eq!(parse_names(raw), vec!["person", "dog"]);
+    }
+
+    #[test]
+    fn parse_names_handles_escapes_and_digits_inside_values() {
+        // 值里有数字和转义引号，不能把数字当 key
+        let raw = r"{0: 'person 2', 1: 'it\'s a car'}";
+        assert_eq!(parse_names(raw), vec!["person 2", "it's a car"]);
+    }
+
+    #[test]
+    fn parse_names_fills_gaps_by_class_id() {
+        // 乱序 + 缺号：位置必须按 id 对齐，不能按出现顺序
+        let raw = "{2: 'bus', 0: 'person'}";
+        assert_eq!(parse_names(raw), vec!["person", "", "bus"]);
+    }
+
+    #[test]
+    fn parse_names_rejects_garbage() {
+        assert!(parse_names("").is_empty());
+        assert!(parse_names("no classes here").is_empty());
+    }
+
+    #[test]
+    fn parse_imgsz_takes_long_side() {
+        assert_eq!(parse_imgsz("[640, 640]"), Some(640));
+        assert_eq!(parse_imgsz("[320, 416]"), Some(416));
+        assert_eq!(parse_imgsz("640"), Some(640));
+        assert_eq!(parse_imgsz(""), None);
+        // 太小的数不是尺寸（多半是别的字段）
+        assert_eq!(parse_imgsz("[1, 3]"), None);
     }
 }

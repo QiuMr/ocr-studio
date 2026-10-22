@@ -38,15 +38,21 @@ fn ensure_dylib_path() {
 
 fn load_engine(device: Device) -> YoloEngine {
     let root = workspace_root();
-    // 走目录发现（而不是硬编码路径）：顺便验证「旧的 detect/yolo/v8/ 仍能被找到」
-    let dir = ocr_studio_lib::engine::catalog::yolo_model_dir(&root.join("models")).unwrap_or_else(|| {
-        panic!(
-            "没有找到检测模型（{}），用 scripts/fetch_yolo.ps1 导出，或 \
-             ultralytics export format=onnx opset=12 imgsz=640 后放到 detect/yolo/model.onnx",
-            root.join("models/detect/yolo").display()
-        )
-    });
-    YoloEngine::load(YoloConfig { dir, device }).expect("加载 yolo 引擎失败")
+    // 走目录发现（而不是硬编码路径）：顺便验证「多个模型 / 旧的 detect/yolo/v8/」都能找到
+    let model = ocr_studio_lib::engine::catalog::default_yolo_model(&root.join("models"), &[])
+        .unwrap_or_else(|| {
+            panic!(
+                "没有找到检测模型（{}），用 scripts/fetch_yolo.ps1 导出，或 \
+                 ultralytics export format=onnx opset=12 imgsz=640 后放到 detect/yolo/model.onnx",
+                root.join("models/detect/yolo").display()
+            )
+        });
+    YoloEngine::load(YoloConfig {
+        path: model.path,
+        id: Some(model.id),
+        device,
+    })
+    .expect("加载 yolo 引擎失败")
 }
 
 /// 参考 JSON 的结构（scripts/ref_yolo.py 的输出）。
@@ -88,9 +94,7 @@ fn iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
 fn check_reference(file: &str, image: &str) {
     ensure_dylib_path();
     let root = workspace_root();
-    let ref_path = ocr_studio_lib::engine::catalog::yolo_model_dir(&root.join("models"))
-        .expect("没有找到检测模型目录")
-        .join(file);
+    let ref_path = ocr_studio_lib::engine::catalog::yolo_model_dir(&root.join("models")).join(file);
     let payload: RefPayload = serde_json::from_str(
         &std::fs::read_to_string(&ref_path).expect("读参考 JSON 失败"),
     )

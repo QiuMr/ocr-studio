@@ -74,6 +74,13 @@ pub struct AppConfig {
     /// 合成，界面恢复正常（OCR 推理不受影响，仍在 DirectML/CPU 上跑）。
     /// 首次崩溃后会自动置为 true 并持久化，无需用户手动处理。
     pub webview_compat: bool,
+    /// 用户自己加的检测模型：onnx 的**绝对路径**，可以是任意目录。
+    ///
+    /// 目标检测模型天然是「用户自己的」——不同人训的模型放在哪都有可能，
+    /// 要求他们把文件搬进 `models/` 不现实，所以这里只记路径、不复制文件
+    /// （模型动辄几十上百 MB，复制一份纯属浪费磁盘）。
+    /// 目录 `models/detect/yolo/` 下扫到的模型不需要记在这里。
+    pub detect_models: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -84,6 +91,7 @@ impl Default for AppConfig {
             port: 8848,
             template_threshold: 0.9,
             webview_compat: false,
+            detect_models: Vec::new(),
         }
     }
 }

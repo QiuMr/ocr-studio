@@ -101,7 +101,8 @@ models/                  模型（缺了会提示「引擎未加载」）
 | 不传 / `ppocr:*` | PP-OCR（默认）。成段文字、扫描件、截图用这个 |
 | `ddddocr:common` | DDDDOCR 54MB 版。验证码、短英文数字更快，长文本会丢空格与标点 |
 | `ddddocr:old` | DDDDOCR 13.6MB 版。同上，精度略低但体积小 |
-| `yolo` | 目标检测（别名 `detect`）。**只能配 `POST /vision/detect` 与 `/vision/pipeline` 用**，不能做文字识别 |
+| `yolo` | **默认**检测模型。目标检测（别名 `detect`），**只能配 `POST /vision/detect` 与 `/vision/pipeline` 用**，不能做文字识别 |
+| `yolo:<模型名>` | 选另一个检测模型（`model.onnx` 之外的，或设置里加的外部路径）；模型名就是 onnx 文件名去掉扩展名 |
 
 `/vision/detect` 额外接受 `conf`（置信度下限，默认 0.25）、`iou`（NMS 阈值，默认 0.7）、
 `class_filter`（类别 id 数组，缺省全部）。后处理与 ultralytics 逐框对齐
@@ -113,23 +114,35 @@ models/                  模型（缺了会提示「引擎未加载」）
 DDDDOCR 自己不做行检测（它自带的 det 是 YOLOX 目标检测，切文档很差），
 行检测**复用 PP-OCR 的 det 模型**，所以用 ddddocr 时 `models/small/det.onnx` 必须在。
 
-### 目标检测不指定版本
+### 目标检测：模型是你自己的
 
-只有一个引擎 `yolo`（别名 `detect`）。模型结构在加载时从 ONNX 的输入输出形状**自动识别**：
-输出是 `[1,C,N]` 还是 `[1,N,C]`、有没有 objectness、输入边长多少、类别数多少。
-所以 `yolov5u / yolov8 / yolo11 / yolo12 / yolo26` 这类单输出导出直接放进去就能跑，
-换模型不用改配置。
+只有一个引擎族 `yolo`（别名 `detect`），但**模型可以有多个、可以放在任意位置**：
 
-模型放 `models\detect\yolo\model.onnx`（配套 `labels.txt`，一行一个类名）。
-旧的 `models\detect\yolo\v8\` 分层结构仍然认（会自动下探一层），但建议拍平。
+- 往 `models\detect\yolo\` 丢 onnx —— 每个 `*.onnx` 都是一个可选项，`model.onnx` 是默认；
+- 或者去「设置 → 目标检测模型 → 添加模型」直接指向任意目录的 onnx（**不复制文件**，
+  配置里只记路径）。`.pt` 请先用 `yolo export format=onnx` 导出。
 
-不支持的两种情况会**明确报错**而不是给出垃圾框：
-v3/v4 原始多输出 head（3 个输出张量），以及自带 NMS 的端到端导出（如 YOLOv10 的 `[1,300,6]`）。
+模型结构在加载时从 ONNX 的输入输出形状**自动识别**：输出是 `[1,C,N]` 还是 `[1,N,C]`、
+有没有 objectness、输入边长多少。所以 `yolov5u / yolov8 / yolo11 / yolo12 / yolo26`
+这类单输出导出直接放进去就能跑，换模型不用改配置。
+
+**类名自动从模型里读**（ultralytics 导出会写进 ONNX metadata 的 `names`），
+不用手写 `labels.txt`。`labels.txt` 只是给非 ultralytics 导出的兜底。
+
+`models\detect\yolo\v8\model.onnx` 这种旧的分层结构仍然认（`v8` 会作为模型名）。
+
+不支持的三种情况会**明确报错**而不是给出垃圾框：
+
+| 情况 | 原因 |
+|---|---|
+| v3/v4 原始多输出 head（3 个输出张量） | 要按 anchor 逐层解码，另一套逻辑 |
+| 自带 NMS 的端到端导出（如 `[1,300,6]`） | 候选数对不上锚点网格 |
+| `task` 不是 `detect`（segment / pose / obb / classify） | 输出多 mask/关键点通道，按检测解会整体错位 |
 
 ## 验证
 
 ```powershell
-cargo test                    # 73 个单元测试
+cargo test                    # 82 个单元测试
 cargo test -- --ignored       # 22 个重量级：精度基线比对、真实截图、逐字对齐、ddddocr/yolo 跨语言对齐
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言

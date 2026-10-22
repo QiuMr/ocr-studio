@@ -50,7 +50,19 @@ Get-ChildItem $runtime -Filter *.dll | ForEach-Object {
 if (-not $SkipModels) {
   $models = Join-Path $root "models"
   if (Test-Path $models) {
-    Copy-Item $models (Join-Path $stage "models") -Recurse -Force
+    $dstModels = Join-Path $stage "models"
+    Copy-Item $models $dstModels -Recurse -Force
+    # 训练/对齐用的中间产物不进分发包：
+    #   *.pt            原始权重（6~130MB，运行时只需要 onnx）
+    #   ref_*.json      跟 ultralytics 逐框比对用的参考框（只有开发时需要）
+    #   *.bak           手工改文件留下的备份
+    $junk = Get-ChildItem $dstModels -Recurse -File | Where-Object {
+      $_.Extension -in @('.pt', '.bak') -or $_.Name -like 'ref_*.json'
+    }
+    foreach ($f in $junk) {
+      Remove-Item $f.FullName -Force
+      Write-Host ("[INFO] - {0} ({1:N1} MB)" -f $f.Name, ($f.Length / 1MB))
+    }
     Write-Host "[INFO] + models/"
   } else {
     Write-Warning "models 目录不存在，分发包将缺少模型"

@@ -1,20 +1,20 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（目标检测去版本化 + 界面三项修复 + DirectML 假象纠正）
+> 最后更新：2026-10-22（检测模型可自定义 + 类名从模型读 + 外壳改浅灰）
 
 ---
 
 ## 0. 一句话现状
 
-**M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），并做了一轮
-用户反馈驱动的改造：**目标检测不再指定版本**（结构在加载时按 ONNX 形状自动识别）、
-**标题栏拖动与窗口按钮修好**（根因是 Tauri 2 缺 ACL 权限）、**侧栏去蓝去竖条**、
-**全局垂直对齐统一**。73 单测 + 22 重量级全绿，PP-OCR 精度**零变化**。
+**M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），此后是用户反馈驱动的
+几轮改造。**本轮（10-22 晚）：检测模型变成「用户自己的」**——可以放多个、可以指向任意
+路径（不复制文件）；**类名自动从 ONNX metadata 读**，`labels.txt` 退化为兜底；
+**标题栏与左侧栏改成通用浅灰**（外壳浅灰 / 内容纯白）。
+82 单测 + 22 重量级全绿，PP-OCR 精度**零变化**，`yolo_parity` 仍 8/8 IoU=1.0000。
 
-顺带纠正一个长期假象：`onnxruntime.dll` 一直是**不带 DirectML 的 CPU 构建**，
-界面却显示 GPU/DirectML（`with_execution_providers` 对单个 EP 失败只打日志、整体返回 Ok）。
-已换回 1.24.3 DirectML 构建，并让 `actual_device` 如实上报。
+上一轮完成：目标检测去版本化（结构按 ONNX 形状探测）、标题栏 ACL 权限修复、
+侧栏去蓝、全局垂直对齐、DirectML 假象纠正。
 
 M2 收口内容（找图 7 端点、单字 JSON、实时日志页、界面精修）、M3.0 抽象层、
 M3.1 DDDDOCR、M3.2 目标检测、M3.3 pipeline 串联均已完成。
@@ -29,7 +29,25 @@ M3.1 DDDDOCR、M3.2 目标检测、M3.3 pipeline 串联均已完成。
 M2（找图 + 单字 JSON + 日志页 + 界面精修）、M3.0（多引擎抽象）、M3.1（DDDDOCR）、
 M3.2（目标检测）、M3.3（pipeline 串联）、M4 界面反馈修复。
 
-### 0.0 本轮（用户反馈四项）做了什么
+### 0.0 本轮（检测模型自定义 + 外壳浅灰）做了什么
+
+| 项 | 结果 |
+|---|---|
+| 多模型 | `catalog::list_yolo_models(root, external)` 扫 `detect/yolo/` 下**所有** `*.onnx`（含一层子目录，兼容旧的 `v8/`），每个文件一条引擎；`id` = 文件名（撞名退到「父目录/文件名」再撞加序号）。**列表第一个 = 默认模型**，它的 spec 是不带 id 的 `yolo`；其余是 `yolo:<id>` |
+| 任意路径 | `config.json` 增 `detect_models: Vec<String>`；设置页「添加模型」用 Win32 **`GetOpenFileNameW`** 弹系统选择框（不为一个场景引 tauri-plugin-dialog），选中只记路径**不复制文件**；`remove_detect_model` 只删记录不动磁盘。外部文件被挪走只 warn 跳过 |
+| 类名从模型读 | `yolo::ModelMeta::read()` 读 metadata 的 `names`（解析 Python dict repr，兼容 JSON 风格 / 转义 / 乱序 / 带数字的类名）、`task`、`imgsz`、`description`。优先级 **metadata > labels.txt > `class_{id}`** |
+| 明确拒绝非检测模型 | `task != detect`（segment/pose/obb/classify）直接报错并说明原因：这些模型的输出多 mask 系数 / 关键点通道，按检测解码不会崩、只会给出错类别的框 |
+| 类名回填 | `/engine/list` 扫描阶段不加载模型 → 读不到类名。新增 `AppState::engine_status_list()`（HTTP 与 IPC **共用**），在引擎加载过后把 classes 回填进列表，并把 note 里「类名在加载时读取」换成「已加载 N 类」 |
+| 引擎名回显 | `/vision/detect` 出参的 `engine` 改成**规范化后的 key**（传 `yolo:v8` 也回 `yolo`，不再让人以为版本号还有意义） |
+| 外壳配色 | `styles.css` 增 `--color-chrome: #f7f7f8`；标题栏与左侧栏用它，主区保持纯白——靠**底色差**分层不加线（VS Code / Notion 的做法）。侧栏选中态从「浅灰块」改成**纯白浮起**（+ 极淡描边 + 微阴影），hover 用黑 4~7% 叠加；标题栏按钮 hover 同步改黑叠加 |
+| 前端 | 设置页新增「目标检测模型」卡片（模型列表 + 默认标记 + 来源 + 类别数 + 路径 + 添加/移除/打开目录）；测试台引擎下拉显示「目标检测（默认模型）」/「目标检测 · <模型名>」，并把上次选中的引擎记进 localStorage |
+| 打包 | `pack_exe.ps1` 拷贝 models 后清掉 `*.pt` / `ref_*.json` / `*.bak`（`.pt` 是训练权重，运行时只要 onnx；`ref_*.json` 只是开发期比对参考） |
+| 验收 | 把 `labels.txt` 整个移走后重跑：类名仍是 `person / bus`（证明来自 metadata）；`model.onnx`+`plate.onnx` 并存 → 下拉两条、各自可加载；UI 实测「5 目标 · 876ms」，设置页显示「80 类」；`cargo test --lib` 82 通过、`--ignored` 22 项全绿（`yolo_parity` 8/8 IoU=1.0000 conf 差=0） |
+
+待办：`api_smoke` 这次被沙箱规则拦住写入 exe（既存环境问题，不是代码问题），下次换目标目录再跑；
+v5/v7 onnx 到手后跑 parity；C 盘长期只剩 1~2GB。
+
+### 0.0.1 上轮（用户反馈四项）做了什么
 
 | 项 | 结果 |
 |---|---|
@@ -42,7 +60,7 @@ M3.2（目标检测）、M3.3（pipeline 串联）、M4 界面反馈修复。
 | DirectML 假象 | `ort_util::directml_available()` 先查 `ep::directml::api()`，不可用直接走 CPU 并如实上报；`runtime/onnxruntime.dll` 从 1.31.0 **CPU** 构建换成 1.24.3 **DirectML** 构建（20.1MB）。日志里 4 条 `DirectML is not supported` 消失 |
 | 验收 | `cargo test --lib` 73 通过；`--ignored` 22 项全绿（含 pipeline_match 逐字全对、yolo_parity 8/8 IoU=1.0000 conf 差=0）；拖动/最大化/还原/最小化/关闭五项实测通过；HTTP `/vision/detect` 实测 5 框，旧写法 `yolo:v8` 兼容 |
 
-### 0.0.1 上轮（M3.3 pipeline 串联）做了什么
+### 0.0.2 再上轮（M3.3 pipeline 串联）做了什么
 
 | 项 | 结果 |
 |---|---|

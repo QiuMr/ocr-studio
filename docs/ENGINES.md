@@ -81,16 +81,18 @@ models/
       old/{det.onnx,rec.onnx,charset.txt}
   detect/
     yolo/
-      {model.onnx,labels.txt}          ← 唯一约定的位置（不分版本）
-      <任意名>/{model.onnx,labels.txt}  ← 兼容旧的 v8/ v11/ 分层，自动下探一层
+      model.onnx                        ← 约定位置，「默认模型」就是它
+      <任意名>.onnx                     ← 同目录多模型，id = 文件名
+      <子目录>/<任意名>.onnx             ← 兼容旧的 v8/ 分层，id = 子目录名
 ```
 
 兼容规则：**旧路径 `models/{tiny,small,medium}/` 继续有效**——`catalog::ppocr_dir`
 先看新路径下有没有 `det.onnx`，没有再回退旧路径。这样老用户的模型不用搬家
 （30MB 文件让人手动挪目录是没必要的摩擦）。
 
-YOLO 的 `labels.txt` 每行一个类名，行号即 `class_id`；缺失时 `classes` 为空、
-类名回落 `class_{id}` 并打 warn——**没有 labels 只是名字不可读，不该判定引擎不可用**。
+YOLO 的类名**首选从 ONNX metadata 读**（ultralytics 导出会写 `names`，见 6.5）；
+同目录的 `labels.txt`（每行一个类名，行号即 `class_id`）只作兜底，两者都没有时
+`classes` 为空、类名回落 `class_{id}` —— **名字不可读不该判定引擎不可用**。
 字典名各家打包不一致，ddddocr 的字典认 `charset.txt` / `keys.txt` / `dict.txt` 三个名字。
 
 ### 3.1 探测与加载必须分开
@@ -307,6 +309,42 @@ ERROR 日志然后跳过**，整体仍返回 Ok。所以「会话建成功」不
 `ep::directml::api()`，不可用就直接走 CPU 并如实上报 `actual_device = Cpu`。
 同时把 `runtime/onnxruntime.dll` 换回 1.24.3 的 **DirectML 构建**（20.1MB，
 之前那份是 1.31.0 的 CPU 构建），日志里那条 ERROR 消失。
+
+### 6.5 检测模型可自定义 + 类名来自模型（2026-10-22，用户要求）
+
+**动机**：目标检测模型天然是「用户自己的」——他自己标注、自己训、文件放在自己找得到
+的地方。只认 `models/detect/yolo/model.onnx` 等于逼他搬文件、还只能有一个模型。
+同类问题还有 `labels.txt`：ultralytics 导出时**已经把类名写进 ONNX metadata 了**
+（`names = "{0: 'person', 1: 'bicycle', ...}"`），再要求手写一遍纯属多余，
+而且写错一位就整张表错位（不会报错，只会显示错类名）。
+
+**做法**（三条独立但配套的改动）：
+
+1. **多模型**：`catalog::list_yolo_models(root, external)` 扫 `detect/yolo/` 下**所有**
+   `*.onnx`（含一层子目录，兼容旧的 `v8/`），再并上配置里的外部路径。每个文件一个
+   `EngineSpec::yolo_model(id)`，`id` = 文件名去扩展名；撞名时退到「父目录/文件名」
+   再撞加序号。**第一个永远是默认模型**，它的 spec 是不带 id 的 `yolo`
+   （前端下拉缺省值、`/vision/pipeline` 的 `detect_engine` 缺省值都是它）。
+2. **任意路径**：`config.json` 的 `detect_models: Vec<String>` 记绝对路径，加载时与目录
+   扫描结果合并。不复制文件（模型几十上百 MB）；`pick_detect_model` 用 Win32
+   `GetOpenFileNameW` 弹系统选择框（不为一个场景引 tauri-plugin-dialog）。
+   外部路径失效只 warn 跳过，不影响其它引擎。
+3. **类名从模型读**：`yolo::ModelMeta::read()` 读 metadata 的 `names`（解析 Python dict
+   repr，兼容 JSON 风格与转义）、`task`、`imgsz`、`description`。优先级
+   **metadata > labels.txt > `class_{id}`**。`labels.txt` 退化为兜底。
+   `task != detect` **明确拒绝**：segment/pose/obb 的输出多 mask 系数或关键点通道，
+   按检测语义解码不会崩，只会给出一堆错类别的框（比报错难查得多）。
+
+**副作用与处理**：`/engine/list` 在扫描阶段不加载模型（几秒 + 吃显存），所以那时读不到
+类名。`AppState::engine_status_list()` 在引擎**加载过之后**把 classes 回填进列表，
+并把 note 里「类名在加载时读取」的说法替换成「已加载 N 类」。`/engine/list` 与
+`list_engines` 共用这一个方法，避免两份实现漂移。
+
+**验收**：
+- 把 `labels.txt` 整个移走后重跑检测，类名仍是 `person / bus`（证明来自 metadata）；
+- `model.onnx` + `plate.onnx` 同时在目录里 → 下拉出现两条，`yolo` / `yolo:plate`
+  各自可加载，`/vision/detect` 回显规范化后的引擎名（不再回显旧写法 `yolo:v8`）；
+- `yolo_parity` 仍 **8/8 框 IoU=1.0000、conf 差=0.0000**（类名来源变了，框没变）。
 
 ## 7. 不做的事（已评估，记录原因）
 

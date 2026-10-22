@@ -479,17 +479,7 @@ pub fn list_engines(state: State<'_, Arc<AppState>>) -> EngineListOut {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let mut engines = crate::engine::catalog::discover(&state.models_root);
-
-    // 回填已加载实例的真实设备，前端才能看出「GPU 到底生效没有」
-    if let Some(info) = state.health() {
-        let key = crate::engine::EngineSpec::ppocr(info.level).key();
-        for e in engines.iter_mut() {
-            if e.spec.key() == key {
-                e.actual_device = Some(info.actual_device);
-            }
-        }
-    }
+    let engines = state.engine_status_list();
 
     EngineListOut {
         models_root: state.models_root.display().to_string(),
@@ -499,6 +489,193 @@ pub fn list_engines(state: State<'_, Arc<AppState>>) -> EngineListOut {
             .map(crate::api::dto::EngineItemDto::from)
             .collect(),
     }
+}
+
+// ---------------------------------------------------------------- 检测模型
+
+/// 设置页「目标检测模型」卡片的一条记录。
+#[derive(Debug, Serialize)]
+pub struct DetectModelOut {
+    /// 模型 id（`yolo:<id>` 的后半段，也是下拉里显示的名字）
+    pub id: String,
+    /// 下拉/接口里用的完整引擎名
+    pub engine: String,
+    /// onnx 完整路径
+    pub path: String,
+    /// 文件名（界面上短一点好显示）
+    pub file_name: String,
+    /// true = 用户从任意目录加进来的（配置里记着路径），false = 在 models 目录里
+    pub external: bool,
+}
+
+fn detect_models_out(state: &AppState) -> Vec<DetectModelOut> {
+    let cfg = state.cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    crate::engine::catalog::list_yolo_models(&state.models_root, &cfg.detect_models)
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| DetectModelOut {
+            // 第一项 = 默认模型，引擎名与 /engine/list 对齐成 `yolo`（不带 id）
+            engine: if i == 0 {
+                crate::engine::EngineSpec::yolo().key()
+            } else {
+                crate::engine::EngineSpec::yolo_model(&m.id).key()
+            },
+            file_name: m
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            path: m.path.display().to_string(),
+            id: m.id,
+            external: m.external,
+        })
+        .collect()
+}
+
+/// 列出所有可用的检测模型（models 目录里的 + 用户自己加的）。
+///
+/// 与 `/engine/list` 里 `family == "yolo"` 的条目是同一批，但这里带**路径**，
+/// 设置页要显示「这个模型到底加载的是哪个文件」。
+#[tauri::command]
+pub fn detect_models(state: State<'_, Arc<AppState>>) -> Vec<DetectModelOut> {
+    detect_models_out(&state)
+}
+
+/// 弹系统文件选择框挑一个 onnx；选中就记进配置（**不复制文件**）。
+///
+/// 取消选择时静默返回当前列表，前端不需要区分「取消」和「成功」。
+#[tauri::command]
+pub async fn pick_detect_model(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<DetectModelOut>, String> {
+    // 模态对话框会阻塞线程，必须离开 async 线程池
+    let picked = tauri::async_runtime::spawn_blocking(pick_onnx_dialog)
+        .await
+        .map_err(|e| format!("文件选择框异常: {e}"))?;
+    if let Some(path) = picked {
+        add_detect_model_path(&state, &path)?;
+    }
+    Ok(detect_models_out(&state))
+}
+
+/// 直接按路径加一个模型（拖拽进来的文件也走这里）。
+#[tauri::command]
+pub fn add_detect_model(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<Vec<DetectModelOut>, String> {
+    add_detect_model_path(&state, &path)?;
+    Ok(detect_models_out(&state))
+}
+
+/// 从配置里移除一个外部模型（只删记录，不动磁盘上的文件）。
+#[tauri::command]
+pub fn remove_detect_model(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<Vec<DetectModelOut>, String> {
+    let want = canonical_or_raw(&path);
+    let snapshot = {
+        let mut guard = state.cfg.write().unwrap_or_else(|e| e.into_inner());
+        guard
+            .detect_models
+            .retain(|p| canonical_or_raw(p) != want);
+        guard.clone()
+    };
+    snapshot
+        .save(&state.data_dir)
+        .map_err(|e| format!("保存配置失败: {e}"))?;
+    Ok(detect_models_out(&state))
+}
+
+fn canonical_or_raw(p: &str) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p))
+}
+
+fn add_detect_model_path(state: &AppState, path: &str) -> Result<(), String> {
+    let p = std::fs::canonicalize(path).map_err(|e| format!("打不开这个文件：{path}（{e}）"))?;
+    if !p.is_file() {
+        return Err(format!("不是一个文件：{}", p.display()));
+    }
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext != "onnx" {
+        return Err(format!(
+            "只支持 .onnx 模型文件，选到的是 .{ext}（.pt 请先用 yolo export 导出）"
+        ));
+    }
+    let snapshot = {
+        let mut guard = state.cfg.write().unwrap_or_else(|e| e.into_inner());
+        // 同一份文件不重复加（用户可能既放在 models 目录又手动选过一次）
+        if guard
+            .detect_models
+            .iter()
+            .any(|x| canonical_or_raw(x) == p)
+        {
+            return Ok(());
+        }
+        guard.detect_models.push(p.display().to_string());
+        guard.clone()
+    };
+    snapshot
+        .save(&state.data_dir)
+        .map_err(|e| format!("保存配置失败: {e}"))
+}
+
+/// 系统文件选择框（只挑 .onnx）。
+///
+/// 用 `GetOpenFileNameW` 而不是引入 tauri-plugin-dialog：这台机器上只要一个
+/// 「选模型」的场景，多一个插件（前端依赖 + 权限声明 + 打包体积）不划算。
+/// owner 取前台窗口——按钮是用户点的，此刻前台就是主窗口。
+#[cfg(windows)]
+fn pick_onnx_dialog() -> Option<String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        OPEN_FILENAME_FLAGS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    // 过滤器是「名称\0通配\0名称\0通配\0\0」，末尾两个 0 结束
+    let filter: Vec<u16> = "ONNX 模型 (*.onnx)\0*.onnx\0所有文件 (*.*)\0*.*\0"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let title = wide("选择目标检测模型");
+    let def_ext = wide("onnx");
+    let mut file = vec![0u16; 2048];
+
+    let mut ofn = OPENFILENAMEW::default();
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = unsafe { GetForegroundWindow() };
+    ofn.lpstrFilter = PCWSTR::from_raw(filter.as_ptr());
+    ofn.lpstrFile = PWSTR::from_raw(file.as_mut_ptr());
+    ofn.nMaxFile = file.len() as u32;
+    ofn.lpstrTitle = PCWSTR::from_raw(title.as_ptr());
+    ofn.lpstrDefExt = PCWSTR::from_raw(def_ext.as_ptr());
+    ofn.Flags = OPEN_FILENAME_FLAGS(
+        OFN_FILEMUSTEXIST.0 | OFN_PATHMUSTEXIST.0 | OFN_NOCHANGEDIR.0,
+    );
+
+    let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+    if !ok.as_bool() {
+        return None; // 用户取消
+    }
+    let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    Some(String::from_utf16_lossy(&file[..len]))
+}
+
+#[cfg(not(windows))]
+fn pick_onnx_dialog() -> Option<String> {
+    None
 }
 
 /// 当前配置。
@@ -521,11 +698,13 @@ pub async fn save_config(
         return err("端口不能为 0".to_string());
     }
     // webview_compat 由后端自己维护（白屏看门狗自动置位），前端不感知也不该覆盖它
-    cfg.webview_compat = state
-        .cfg
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .webview_compat;
+    // detect_models 同理：设置页用专用命令增删，前端保存配置时带的是旧快照，
+    // 若让它覆盖，刚「添加模型」的记录会被下一次保存冲掉
+    {
+        let cur = state.cfg.read().unwrap_or_else(|e| e.into_inner());
+        cfg.webview_compat = cur.webview_compat;
+        cfg.detect_models = cur.detect_models.clone();
+    }
     cfg.save(&state.data_dir).map_err(|e| format!("保存配置失败: {e}"))?;
 
     let old = state

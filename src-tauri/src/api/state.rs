@@ -14,8 +14,8 @@ use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
 use crate::engine::{
-    load_engine, DetectOptions, Detection, EngineKind, EngineSpec, RecognizeOptions, TextLine,
-    VisionEngine, VisionError,
+    load_engine, Capabilities, DetectOptions, Detection, EngineKind, EngineSpec, RecognizeOptions,
+    TextLine, VisionEngine, VisionError,
 };
 use crate::ocr::{
     engine_from_dir_with, Device, HealthInfo, LineDetail, ModelLevel, OcrEngine,
@@ -260,8 +260,15 @@ impl AppState {
     ) -> Result<(), String> {
         let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         let device = device.unwrap_or(cfg.device);
-        let eng = load_engine(&spec, &self.models_root, cfg.level, device, true)
-            .map_err(|e| format!("加载 {spec} 失败: {e}"))?;
+        let eng = load_engine(
+            &spec,
+            &self.models_root,
+            cfg.level,
+            device,
+            true,
+            &cfg.detect_models,
+        )
+        .map_err(|e| format!("加载 {spec} 失败: {e}"))?;
         let mut guard = self.alt.lock().unwrap_or_else(|e| e.into_inner());
         // 先赋新值再让旧的 drop：旧引擎的释放（几十 MB）在锁内完成，
         // 但这是单槽设计下唯一安全的位置——放到锁外可能出现两个实例同时活着。
@@ -354,12 +361,67 @@ impl AppState {
         Ok(lines.into_iter().map(LineDetail::from).collect())
     }
 
-    /// 当前额外引擎的标识与真实设备（`/engine/list` 回填用）。
-    pub fn alt_loaded(&self) -> Option<(EngineSpec, Option<Device>)> {
+    /// 当前额外引擎的标识、真实设备与**加载后才知道的能力**。
+    ///
+    /// 带 capabilities 是为了让 `/engine/list` 能回填类名：检测模型的类别名写在
+    /// ONNX metadata 里，扫描阶段不加载模型（几秒 + 吃显存）就读不到，
+    /// 所以「加载过一次」的引擎要把类名补回列表，前端才能显示「共几类」。
+    pub fn alt_loaded(&self) -> Option<(EngineSpec, Option<Device>, Capabilities)> {
         let guard = self.alt.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .as_ref()
-            .map(|a| (a.spec.clone(), a.engine.status().actual_device))
+        guard.as_ref().map(|a| {
+            let st = a.engine.status();
+            (a.spec.clone(), st.actual_device, st.capabilities)
+        })
+    }
+
+    /// 扫描引擎 + 回填「已加载」信息（真实设备、加载后才知道的类名）。
+    ///
+    /// `/engine/list` 与 Tauri `list_engines` **共用这一份**：两份实现很容易
+    /// 只改一处，前端就会出现「HTTP 说有 GPU、IPC 说没有」这类难查的不一致。
+    pub fn engine_status_list(&self) -> Vec<crate::engine::EngineStatus> {
+        let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut engines =
+            crate::engine::catalog::discover(&self.models_root, &cfg.detect_models);
+
+        // PP-OCR：设备从已加载实例读
+        if let Some(info) = self.health() {
+            let key = EngineSpec::ppocr(info.level).key();
+            for e in engines.iter_mut() {
+                if e.spec.key() == key {
+                    e.actual_device = Some(info.actual_device);
+                }
+            }
+        }
+        // 额外引擎（ddddocr / yolo）：设备 + 类名
+        if let Some((spec, device, caps)) = self.alt_loaded() {
+            for e in engines.iter_mut() {
+                if e.spec != spec {
+                    continue;
+                }
+                e.actual_device = device;
+                if caps.classes.is_empty() {
+                    continue;
+                }
+                // 类名写在 ONNX metadata 里，扫描阶段（不加载模型）读不到；
+                // 加载过一次就把结果补进列表并改掉 note 里的「待读取」说法
+                e.capabilities.classes = caps.classes.clone();
+                e.capabilities.detect = caps.detect;
+                if let Some(note) = e.note.as_mut() {
+                    if !note.contains("已加载") {
+                        // 把「类名要等加载才知道」的说法换掉——现在知道了。
+                        // 留着会和后面的「已加载 N 类」互相打脸。
+                        let cleaned = note
+                            .replace("（类名在加载时从模型元数据读取）", "")
+                            .replace(
+                                &format!("（类名取自 labels.txt，共 {} 个）", caps.classes.len()),
+                                "",
+                            );
+                        *note = format!("{cleaned} · 已加载 {} 类", caps.classes.len());
+                    }
+                }
+            }
+        }
+        engines
     }
 
     /// 通用目标检测入口（`/vision/detect`）。

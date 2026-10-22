@@ -339,7 +339,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         }))
         .into_response(),
         None => {
-            if let Some((spec, dev)) = state.alt_loaded() {
+            if let Some((spec, dev, _caps)) = state.alt_loaded() {
                 let dev = dev.unwrap_or(Device::Cpu);
                 return Json(ApiResp::ok(HealthDto {
                     status: "ok".to_string(),
@@ -383,25 +383,7 @@ async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    let mut engines = crate::engine::catalog::discover(&state.models_root);
-
-    // 回填当前实例的真实设备
-    if let Some(info) = state.health() {
-        let key = crate::engine::EngineSpec::ppocr(info.level).key();
-        for e in engines.iter_mut() {
-            if e.spec.key() == key {
-                e.actual_device = Some(info.actual_device);
-            }
-        }
-    }
-    // 额外引擎（ddddocr 等）同理：已经加载过才填设备
-    if let Some((spec, device)) = state.alt_loaded() {
-        for e in engines.iter_mut() {
-            if e.spec == spec {
-                e.actual_device = device;
-            }
-        }
-    }
+    let engines = state.engine_status_list();
 
     Json(ApiResp::ok(EngineListData {
         models_root: state.models_root.display().to_string(),
@@ -441,9 +423,13 @@ async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Resp
         iou_thresh: iou,
         class_filter: opts.class_filter.clone().unwrap_or_default(),
     };
-    // 出参里的 engine 标识：请求带了就原样回，缺省按当前配置的 PP-OCR 档位
+    // 出参里的 engine 标识：**回显规范化后的引擎名**，不是原请求串。
+    // 否则调用方传 `yolo:v8`（旧写法）时，响应里也写 `yolo:v8`，看起来像
+    // 版本号还有意义；实际生效的是默认模型。解析失败时原样回，交给下游报 1003。
     let engine_label = match opts.engine.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(e) => e.to_string(),
+        Some(e) => crate::engine::EngineSpec::parse(e)
+            .map(|s| s.key())
+            .unwrap_or_else(|_| e.to_string()),
         None => {
             let level = state
                 .cfg
