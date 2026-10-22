@@ -17,7 +17,8 @@ const TooltipContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        "z-50 overflow-hidden rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs text-white shadow-md",
+        // 提示框里是解释术语的整句话，字号不能跟着 badge 掉到 11px，取正文档 12px
+        "z-50 overflow-hidden rounded-md bg-neutral-900 px-2.5 py-1.5 text-[12px] text-white shadow-md",
         className,
       )}
       {...props}

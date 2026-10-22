@@ -19,6 +19,7 @@
 
 pub mod catalog;
 pub mod ddddocr;
+pub mod prompt;
 pub mod yolo;
 
 use std::fmt;

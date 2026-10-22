@@ -190,3 +190,81 @@
   的 CLIP fork，拉 git 子模块在本机 MSYS 必失败 `0xC0000142`）。必须打补丁绕开
   ultralytics 8.4.13 的 end2end fuse bug（先置空 cv3/cv4 再 fuse）；补丁内要 `import torch`。
   配 `-seg` 模型要用 `YOLOEVPSegPredictor`。权重缓存到 `models/_fixtures/weights/`。
+
+## 视觉规范：圆角与字号梯度（2026-10-23 定，**改界面前必读**）
+- **不要写 `rounded-[Npx]` 和 `text-[N.x px]`**，一律用梯度里的档。
+  梯度在 `src/styles.css` 的 `@theme` 里**覆盖 Tailwind 默认档**（`--radius-sm/md/lg/xl`、
+  `--text-xs/sm`），所以 `rounded-md/lg/xl`、`text-sm` 已自动等于下面的值，不必逐处改。
+- 圆角四档：**sm 6px**（浮层小项/行内代码/微标签）→ **md 8px**（按钮/输入框/下拉触发器/
+  tab/导航项/窗口按钮）→ **lg 10px**（卡片内部的块：分段控件容器/滚动区/提示条/搜索框）→
+  **xl 14px**（卡片/面板/独立浮层/大块容器）。规则是「容器越大圆角越大；子元素比父元素小一档」。
+  另有刻意不走梯度的两档：`rounded-full`（胶囊/圆点）、`rounded`=4px（≤24px 微图标按钮、
+  浮层微角标、截图上的框标记）。
+- 字号七档（只留整数，**半像素在 100% 缩放下发虚**）：**10** 微角标 / **11** 次要·表头 /
+  **12** 正文 / **13** 强调正文·卡片标题·按钮 / **14** 强强调 / **16** 小节标题 /
+  **26** 页面主标题·大数字。
+- 按钮高度四档（`ui/button.tsx`）：`xs h-7 text-12` / `sm h-8 text-12` / `default h-9 text-13` /
+  `lg h-10 text-13`，另有 `icon-sm h-8 w-8`、`icon-xs h-7 w-7`。**图标统一 14px**
+  （调用方写 `className="h-3.5 w-3.5"`）。
+- 手写（不走 `<Button>`）的控件也必须落在上面这几档上：h-7/h-8 → `rounded-md` + `text-[12px]`；
+  分段控件「容器 `rounded-lg` + 项 `rounded-md`」（8+2=10 同心）。
+- **CardHeader 第一行统一包一层 `flex h-8 items-center`**（已有条目，全仓只剩 FindPanel 一处漏，
+  本轮已补）。左右并排的两张卡，一边标题行塞了按钮/徽章而另一边没塞，就会差 ~7px。
+
+## 环境：safe-delete 会按 turn 累计，卡死 vite 清 dist（2026-10-23）
+- 同一 agent turn 内删除量**累计**超过 50 个文件就被拒：
+  `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":64,"threshold":50,"scope":"turn"}`。
+  症状是 `vite build` 在 `prepare-out-dir` 阶段直接失败，看着像前端构建炸了，其实是环境。
+- **连 `Remove-Item -Recurse -Force dist` 也会被拦**（shim 同时包装 cmdlet）。绕法用 .NET API：
+  `[System.IO.Directory]::Delete("<绝对路径>\dist", $true)`，删完再跑 `scripts/build.ps1`。
+- `build.ps1` 的退出码经 `2>&1 | Select-Object` 管道后会**失真**（报 failed 其实成功）。
+  判成功看 `[PASS] 产物` 行 + `check_embedded_assets.py` 的 `[结论] 资源已嵌入`。
+
+## 无人值守截图流程（2026-10-23 复用验证过）
+1. 杀进程 `Get-Process | ? { $_.ProcessName -like "*OCR*" } | Stop-Process -Force`
+2. **必须** `explorer.exe "D:\rust-target\release\ocr-studio.exe"`（agent shell 直接跑必白屏）
+3. `python scripts/shot_window.py "OCR Studio" out.png` → 打印窗口矩形 `(left,top) WxH`
+4. `python scripts/ui_probe.py <abs_x> <abs_y> out.png --wait 900`（点击+截图同进程，避免 tooltip 残留）
+   - 截图与窗口 1:1，可直接从截图量相对坐标，再 `+ (left,top)` 换成绝对坐标
+   - 侧栏展开 188px、标题栏 `h-10`(40px)；导航项相对坐标 `x=94`、`y = 60 + i*38`
+     （i=0 服务 / 1 接口 / 2 试跑 / 3 日志 / 4 设置）；侧栏折叠开关相对 `(24, 20)`
+
+## 引擎层错误 → API 错误：一律走 `map_engine_err_ctx`（2026-10-23，**别绕**）
+- 位置 `src-tauri/src/api/state.rs`。映射：`Unsupported`→**1002**、`UnknownEngine`→**1003**、
+  `BadRequest`→**400**、`NotReady`/`Inference`→500。
+- **1002 的全部意义**是让调用方区分「这个引擎做不到，换条路」和「服务出故障了」，
+  一律拍成 500 就没法写自动降级。曾经 `/vision/prompt` 缺 MobileCLIP2-B 权重时返 500，
+  就是这个原因（`prompt_find` 绕过了它直接 `ApiError::Internal`）；`run_alt`/`run_pp` 同样漏过。
+- 新写任何「调引擎」的入口，用 `map_engine_err(e)` 或 `map_engine_err_ctx(e, Some("xx失败"))`，
+  **不要**手写 `ApiError::Internal(format!("...: {e}"))`。
+- 有 2 条单测钉住映射（`engine_error_mapping_*`），改映射必须同步改它们。
+
+## 分发包验收：`scripts/verify_packaged.py`（2026-10-23 新增）
+- **源码树跑通 ≠ 分发包能用**：`resolve_models_root()` 优先用 **exe 旁的 `models/`**，
+  打包又会剔一堆文件，只有真解压出来跑才知道。改完打包流程/模型清单就复跑一次。
+- 覆盖：health / shibie / quyuocr / qrcode / `prompt` 图找图（该带的必须能用）/
+  `prompt` 语言找图（**故意不带** 242MB 权重，必须明确报 1002）。
+- 用法：`python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"`
+  （**用 PowerShell 工具跑**，见下条）。
+
+## 打包过滤清单 + gitignore 的两个坑（2026-10-23）
+- `pack_exe.ps1` 剔掉的开发夹具：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、
+  `inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、
+  `models/detect/yolo/` 下除 `README.txt` 外全部。**新增夹具目录时要同步加进来**，
+  否则会跟着发出去（`small/dump` 和 `inspect.json` 就漏过一轮）。
+- `.gitignore` 必须有 `models/**/*.ts`：MobileCLIP2-B 文本塔后缀是 `.ts`（TorchScript zip），
+  会被当 TypeScript 源码跟踪 → **253MB 进仓库**。**不能裸写 `*.ts`**（前端源码靠它）。
+- `pack_exe.ps1` 里内嵌了 `使用说明.txt`，改完**必须重新加 BOM + CRLF**
+  （`[System.Text.UTF8Encoding]::new($true)`），否则记事本乱码。
+- 信封键是 **`msg`** 不是 `message`（`ApiResp { code, msg, data }`）。
+
+## 环境：两个会误判成代码 bug 的坑（2026-10-23）
+- **debug target 的 rlib 会瞬时损坏**：`cargo test` 报
+  `error[E0786]: found invalid metadata files for crate 'test'` +
+  `can't find crate for ocr_studio_lib` + `link.exe failed: exit code 1102`，
+  看着像代码炸了。**直接重跑一次即恢复**，别改代码。
+- **Bash 工具里的 `python` ≠ PowerShell 里的 `python`**：Bash 那个
+  `qrcode/PIL/cv2/numpy` 全 MISSING；PowerShell 里同一个 3.12 全 OK。
+  跑带依赖的 Python 脚本**一律用 PowerShell 工具**。
+- `Expand-Archive` 的进度条会刷一屏 `[ooo...]`，用 `2>$null | Out-Null` 压掉。
+

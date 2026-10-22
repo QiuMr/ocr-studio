@@ -1,0 +1,7 @@
+{
+  "kind": "yoloe-prompt-detector",
+  "imgsz": 640,
+  "nc_slots": 80,
+  "embed": 512,
+  "task": "segment"
+}

@@ -123,12 +123,27 @@ fn alt_spec_of(opts: &OcrOptions) -> Result<Option<EngineSpec>, ApiError> {
 
 /// 把引擎层错误映射成 API 错误（`Unsupported`/`UnknownEngine` 带专用 code）。
 fn map_engine_err(e: VisionError) -> ApiError {
+    map_engine_err_ctx(e, None)
+}
+
+/// 同上，但可以给消息加一层上下文（例如「提示找图失败」）。
+///
+/// 为什么要单独有这个：`/vision/prompt` 的两种提示方式在**运行时**才可能发现
+/// 「这套模型没带」——那时抛的是 `VisionError::Unsupported`，必须原样映射成
+/// code 1002，不能像早期那样一律拍成 `Internal`（500）。脚本靠 1002 区分
+/// 「引擎做不到，换条路」和「服务出故障了」，两者混在一起就没法自动降级。
+fn map_engine_err_ctx(e: VisionError, ctx: Option<&str>) -> ApiError {
+    let with = |m: String| match ctx {
+        Some(c) => format!("{c}: {m}"),
+        None => m,
+    };
     match e {
         VisionError::Unsupported { capability, .. } => {
-            ApiError::Unsupported(format!("该引擎不支持 {capability}"))
+            ApiError::Unsupported(with(format!("该引擎不支持 {capability}")))
         }
-        VisionError::UnknownEngine(m) => ApiError::UnknownEngine(m),
-        other => ApiError::Internal(other.to_string()),
+        VisionError::UnknownEngine(m) => ApiError::UnknownEngine(with(m)),
+        VisionError::BadRequest(m) => ApiError::BadRequest(with(m)),
+        other => ApiError::Internal(with(other.to_string())),
     }
 }
 
@@ -141,6 +156,9 @@ pub struct AppState {
     pub engine: Mutex<Option<OcrEngine>>,
     /// PP-OCR 之外的引擎（当前只会是 ddddocr），单槽。
     alt: Mutex<Option<AltEngine>>,
+    /// 运行时提示引擎（YOLOE 开放词汇的图找图/语言找图），单槽、按需加载。
+    /// 它带 250MB 级的文本塔，不能跟主引擎一起常驻。
+    prompt: Mutex<Option<crate::engine::prompt::PromptEngine>>,
     pub cfg: RwLock<AppConfig>,
     pub started_at: Instant,
     /// 停机信号发送端。`Some` 表示服务正在运行。
@@ -158,6 +176,7 @@ impl AppState {
             data_dir,
             engine: Mutex::new(None),
             alt: Mutex::new(None),
+            prompt: Mutex::new(None),
             cfg: RwLock::new(cfg),
             started_at: Instant::now(),
             shutdown: Mutex::new(None),
@@ -293,7 +312,7 @@ impl AppState {
                 .as_mut()
                 .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
             eng.infer(&img, &RecognizeOptions { want_chars })
-                .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
+                .map_err(|e| map_engine_err_ctx(e, Some("推理失败")))
         })
         .await
         .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
@@ -313,10 +332,45 @@ impl AppState {
                 .ok_or_else(|| ApiError::EngineNotReady("引擎未加载".to_string()))?;
             alt.engine
                 .infer(&img, &RecognizeOptions { want_chars })
-                .map_err(|e| ApiError::Internal(format!("推理失败: {e}")))
+                .map_err(|e| map_engine_err_ctx(e, Some("推理失败")))
         })
         .await
         .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
+    }
+
+    /// 运行时提示找图（图找图 / 语言找图）。
+    ///
+    /// 引擎按需加载、单槽常驻：文本塔是 250MB 级的权重，不能每次请求都读盘；
+    /// 但也不跟主 OCR 引擎一起加载——不用这个功能的人不该付这份内存。
+    pub async fn prompt_find(
+        self: &Arc<Self>,
+        input: crate::engine::prompt::PromptInput,
+        target: image::DynamicImage,
+        opts: DetectOptions,
+    ) -> Result<Vec<Detection>, ApiError> {
+        let st = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let device = st.cfg.read().unwrap_or_else(|e| e.into_inner()).device;
+            let mut guard = st.prompt.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                let eng = crate::engine::prompt::PromptEngine::load(&st.models_root, device)
+                    .map_err(|e| ApiError::EngineNotReady(format!("提示引擎加载失败: {e}")))?;
+                *guard = Some(eng);
+            }
+            let eng = guard.as_mut().expect("上面刚赋值过");
+            // 走 map_engine_err_ctx 而不是直接 Internal：缺 MobileCLIP2-B 权重 /
+            // 缺视觉编码器时抛的是 Unsupported，必须映射成 1002 而不是 500。
+            eng.run(&target, &input, &opts)
+                .map_err(|e| map_engine_err_ctx(e, Some("提示找图失败")))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("提示找图任务崩溃: {e}")))?
+    }
+
+    /// 已加载的提示引擎的说明（给 `/engine/list` 与状态页看能力差异）。
+    pub fn prompt_loaded_note(&self) -> Option<String> {
+        let guard = self.prompt.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|p| p.describe())
     }
 
     /// 统一识别入口：按 `opts.engine` 选引擎，返回文本行。
@@ -594,5 +648,57 @@ impl AppState {
         tokio::task::spawn_blocking(move || st.load_engine_blocking(level, device, use_cls))
             .await
             .map_err(|e| format!("模型加载任务崩溃: {e}"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 引擎层错误 → API 错误的映射，必须逐档对上，不能一律拍成 500。
+    ///
+    /// 这条曾经真的错：`/vision/prompt` 缺 MobileCLIP2-B 权重时返回的是 500
+    /// 而不是 1002，脚本没法区分「这个引擎做不到」和「服务出故障了」。
+    /// 打包验收（`scripts/verify_packaged.py`）跑出来的就是这个。
+    #[test]
+    fn engine_error_mapping_keeps_special_codes() {
+        let unsupported = map_engine_err(VisionError::Unsupported {
+            engine: "yoloe-prompt".into(),
+            capability: "text（缺 MobileCLIP2-B 权重 / 词表 / 提示头）",
+        });
+        assert_eq!(unsupported.code(), 1002);
+        assert!(unsupported.message().contains("MobileCLIP2-B"));
+
+        assert_eq!(
+            map_engine_err(VisionError::UnknownEngine("nope".into())).code(),
+            1003
+        );
+        assert_eq!(
+            map_engine_err(VisionError::BadRequest("参数不对".into())).code(),
+            400
+        );
+        assert_eq!(
+            map_engine_err(VisionError::Inference("炸了".into())).code(),
+            500
+        );
+        assert_eq!(
+            map_engine_err(VisionError::NotReady("模型没加载".into())).code(),
+            500
+        );
+    }
+
+    /// 带上下文的版本：code 不变，消息前面多一层「提示找图失败」。
+    #[test]
+    fn engine_error_mapping_ctx_prefixes_message_only() {
+        let e = map_engine_err_ctx(
+            VisionError::Unsupported {
+                engine: "yoloe-prompt".into(),
+                capability: "visual（缺 *_vpe.onnx）",
+            },
+            Some("提示找图失败"),
+        );
+        assert_eq!(e.code(), 1002);
+        assert!(e.message().starts_with("提示找图失败: "), "{}", e.message());
+        assert!(e.message().contains("visual"), "{}", e.message());
     }
 }

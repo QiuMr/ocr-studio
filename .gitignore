@@ -41,6 +41,15 @@ models/**/*.txt
 # pack_exe.ps1 也会把它们从分发包里剔掉）
 *.pt
 
+# MobileCLIP2-B 文本塔权重（253MB，语言找图 /vision/prompt mode=text 才用得到；
+# 图找图不需要它）。后缀是 .ts（TorchScript zip）或 .safetensors，
+# 注意别把前端的 TypeScript 源码一起忽略掉，所以只按 models/ 前缀限定。
+models/**/*.ts
+models/**/*.safetensors
+
+# torch 导出时吐出来的诊断文件
+*.sarif
+
 # Python 与 ultralytics 的缓存（fetch_*.py 产生的）
 __pycache__/
 *.pyc

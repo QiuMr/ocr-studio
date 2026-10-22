@@ -46,6 +46,10 @@ async fn pipeline_reads_text_inside_detected_regions() {
         iou: None,
         class_filter: None,
         detect_engine: None,
+        // 区域 OCR / 扫码是后加的字段，这条 pipeline 测试用不到
+        region: None,
+        barcode_formats: None,
+        try_harder: None,
     };
     let detect = DetectOptions::default();
 
@@ -90,6 +94,9 @@ async fn pipeline_reads_text_inside_detected_regions() {
             iou: None,
             class_filter: None,
             detect_engine: None,
+            region: None,
+            barcode_formats: None,
+            try_harder: None,
         };
         state
             .detect_objects(&det_opts, img.clone(), detect)

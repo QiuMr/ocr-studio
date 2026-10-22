@@ -199,7 +199,7 @@ export function ScanPanel() {
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[14px] bg-blue-50/85 backdrop-blur-[1px]">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-blue-50/85 backdrop-blur-[1px]">
           <div className="flex flex-col items-center gap-2 text-blue-700">
             <ImagePlus className="h-8 w-8" />
             <span className="text-[14px] font-bold">松手就开始扫码</span>
@@ -226,7 +226,7 @@ export function ScanPanel() {
         />
 
         <div className="flex items-center gap-1.5">
-          <Label className="text-[11.5px] text-neutral-500">找什么码</Label>
+          <Label className="text-[12px] text-neutral-500">找什么码</Label>
           <Select
             value={preset}
             onValueChange={(v) => {
@@ -234,7 +234,7 @@ export function ScanPanel() {
               setResult(null);
             }}
           >
-            <SelectTrigger className="h-8 w-[150px] text-[12.5px]">
+            <SelectTrigger className="h-8 w-[150px] text-[12px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -282,7 +282,7 @@ export function ScanPanel() {
               {result.elapsed_ms} ms
             </Badge>
           )}
-          <span className="hidden items-center gap-1 text-[11.5px] text-neutral-400 sm:flex">
+          <span className="hidden items-center gap-1 text-[12px] text-neutral-400 sm:flex">
             <Keyboard className="h-3 w-3" />
             Ctrl+V
           </span>
@@ -300,7 +300,7 @@ export function ScanPanel() {
         <Card className="flex min-h-[360px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
             <div className="flex h-8 items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+              <CardTitle className="flex items-center gap-2 text-[13px] font-medium leading-none text-neutral-500">
                 <FileImage className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 {src ? "原图" : "待扫描的图片"}
                 {size.width > 0 && (
@@ -315,7 +315,7 @@ export function ScanPanel() {
                   <Switch id="scan-boxes" checked={showBoxes} onCheckedChange={setShowBoxes} />
                   <Label
                     htmlFor="scan-boxes"
-                    className="cursor-pointer text-[11.5px] font-normal text-neutral-500"
+                    className="cursor-pointer text-[12px] font-normal text-neutral-500"
                   >
                     显示位置
                   </Label>
@@ -333,16 +333,16 @@ export function ScanPanel() {
                 showBoxes={showBoxes}
               />
             ) : (
-              <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[14px] border-2 border-dashed border-neutral-200 bg-neutral-50/50 px-6 py-8 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-[16px] bg-white text-blue-500 shadow-card">
+              <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-xl border-2 border-dashed border-neutral-200 bg-neutral-50/50 px-6 py-8 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-white text-blue-500 shadow-card">
                   <QrCode className="h-6 w-6" strokeWidth={1.8} />
                 </div>
-                <p className="mt-4 text-[15px] font-bold text-neutral-800">把图片拖到这里</p>
-                <p className="mt-1 text-[12.5px] text-neutral-500">
+                <p className="mt-4 text-[16px] font-bold text-neutral-800">把图片拖到这里</p>
+                <p className="mt-1 text-[13px] text-neutral-500">
                   二维码、条形码都行，放进来就开始扫
                 </p>
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-                  <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11.5px] text-neutral-600 ring-1 ring-neutral-200/80">
+                  <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] text-neutral-600 ring-1 ring-neutral-200/80">
                     <Clipboard className="h-3.5 w-3.5 text-neutral-400" />
                     按 Ctrl+V 粘贴截图
                   </span>
@@ -364,7 +364,7 @@ export function ScanPanel() {
         <Card className="flex min-h-[360px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
             <div className="flex h-8 items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+              <CardTitle className="flex items-center gap-2 text-[13px] font-medium leading-none text-neutral-500">
                 <ScanLine className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 扫出来的内容
               </CardTitle>
@@ -384,14 +384,14 @@ export function ScanPanel() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10.5px] font-medium text-neutral-600">
+                          <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium text-neutral-600">
                             {formatLabel(c.format)}
                           </span>
-                          <span className="font-mono text-[10.5px] text-neutral-400">
+                          <span className="font-mono text-[11px] text-neutral-400">
                             {c.width}×{c.height} @({c.x}, {c.y})
                           </span>
                         </div>
-                        <div className="selectable mt-1 break-all font-mono text-[12.5px] leading-5 text-neutral-900">
+                        <div className="selectable mt-1 break-all font-mono text-[13px] leading-5 text-neutral-900">
                           {c.text || "（空内容）"}
                         </div>
                       </div>
@@ -428,7 +428,7 @@ export function ScanPanel() {
       </div>
 
       {codes.length > 0 && (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+        <div className="flex items-center gap-1.5 text-[12px] text-neutral-400">
           图上的蓝框是每个码的位置，编号与右侧列表一一对应。点右侧的复制按钮拿走内容。
         </div>
       )}

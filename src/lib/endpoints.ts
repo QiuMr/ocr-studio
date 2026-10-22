@@ -32,8 +32,8 @@ export const GROUP_LABEL: Record<EndpointGroup, string> = {
 
 export const GROUP_DESC: Record<EndpointGroup, string> = {
   ocr: "把图片里的文字提取成字符串或坐标",
-  find: "在一张大图里找东西的位置，返回坐标。模板找图比像素，语义找图靠模型认目标",
-  vision: "识别物体类别，或者先框出区域再认字",
+  find: "在一张大图里找东西的位置，返回坐标。模板找图比像素，语义找图靠模型认目标，提示找图当场给参考图或提示词",
+  vision: "目标检测、先框区域再认字、扫码",
   status: "查服务和引擎当前状态，脚本启动时先探一下",
 };
 
@@ -187,6 +187,37 @@ export const ENDPOINTS: Endpoint[] = [
     returns:
       "与模板找图同构：found、x、y、center_x、center_y、score、matched、matches[]、origin_x/origin_y；额外多 engine 和命中里的 class_id/class_name",
   },
+  {
+    method: "POST",
+    path: "/vision/prompt",
+    title: "提示找图：目标当场给，换目标不用换模型",
+    note: "上面那条「语义找图」的提示在导出时就烘焙进权重了，换目标得重新导 ONNX；这条把提示当**额外输入**——给一张参考图 + 一个框（`mode=visual`），或者给几个词（`mode=text`），当场就能换。代价是首次调用要多加载两个编码器（视觉 12MB / 文本 250MB 级）。返回结构与模板找图完全一样，脚本换个路径就能用。",
+    params: [
+      { name: "mode", desc: "visual（图找图，默认）/ text（语言找图）" },
+      { name: "source", desc: "去哪找：image（默认）/ screen / window" },
+      { name: "image", desc: "source=image 时的搜索图 base64" },
+      {
+        name: "ref_image",
+        desc: "mode=visual 必填。参考图 base64（multipart 时可改用 ref_image 文件字段）",
+      },
+      {
+        name: "ref_boxes",
+        desc: "mode=visual 必填。参考框 \"x1,y1,x2,y2\"，多个用 ; 分隔",
+      },
+      {
+        name: "ref_classes",
+        desc: "可选。每个框归属的「槽」，同槽的框取并集当一个提示；缺省全 0",
+      },
+      { name: "ref_names", desc: "可选。槽的名字，只用于回显（如 \"确认按钮\"）" },
+      { name: "words", desc: "mode=text 必填。提示词，逗号分隔，如 \"person,bus\"" },
+      { name: "conf", desc: "置信度阈值 0~1，默认 0.25" },
+      { name: "class_filter", desc: "只保留这些提示槽；不传 = 全部" },
+      { name: "hwnd", desc: "source=window 时的窗口句柄，或改用 title" },
+      { name: "max_results", desc: "最多返回几个，默认 8" },
+    ],
+    returns:
+      "与模板找图同构（found / x / y / center_x / center_y / score / matched / matches[] / origin_x / origin_y）；额外多 engine（固定 yoloe-prompt）与命中里的 class_id/class_name（语言找图时类名就是提示词本身）",
+  },
 
   // ------------------------------------------------------------------ 看图
   {
@@ -254,6 +285,10 @@ export function endpointsOf(group: EndpointGroup): Endpoint[] {
 }
 
 export function groupOf(path: string): EndpointGroup {
+  // `/vision/prompt`（提示找图）虽然挂在 /vision 前缀下，但它是一条**找图**能力：
+  // 出参与模板找图同构，在 ENDPOINTS 里也写在「找图」那一段。不特判的话它会被
+  // 前缀规则划进「看图」，接口页上就跑到别组去了（注释和实际分组对不上）。
+  if (path === "/vision/prompt") return "find";
   if (path.startsWith("/vision")) return "vision";
   if (path.includes("zhaotu")) return "find";
   if (path.startsWith("/ocr/") && path !== "/ocr/health") return "ocr";

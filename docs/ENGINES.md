@@ -399,6 +399,113 @@ v5/v6/v7 的 raw head 是 `[1, N, 5+cls]`，类别数少（1 类 → 6 通道）
 与 COCO 参考框 `(31.5,230.7,801.4,775.8)` 几乎重合。
 `cargo test --test yoloe_smoke -- --ignored` 通过；`cargo test --lib` 92 通过。
 
+### 6.7 运行时提示找图（图找图 / 语言找图，2026-10-22 深夜，用户要求）
+
+**动机**：6.6 的「语义找图」是**烘焙**提示——`head.fuse(pe)` 把提示向量融进分类头权重，
+换目标必须重新导 ONNX。用户要的是**运行时**：给一张参考图 + 一个框，或者给几个词，
+当场换目标，不换模型。
+
+**核心机制**：提示向量 `pe` 作为检测器的**第二张图输入**。
+
+```
+图找图：参考图 + 框 → 掩码 → savpe → vpe ─┐
+                                          ├→ pe [1,80,512] ─┐
+语言找图：词 → CLIP 分词 → MobileCLIP2-B → reprta+归一化 ────┤
+                                                             ↓
+                            目标图 → letterbox → 检测器(images + pe) → [1,300,38]
+```
+
+**为什么 `pe` 走 `vpe` 形参**：`YOLOEModel.predict` 里 `get_vpe` 对 `ndim == 3` 的 vpe
+**直接透传**，而 `get_cls_pe(tpe=None, vpe=pe)` 恰好等于 `pe`。所以 `model(x, vpe=pe)`
+就是「用 pe 当类别提示」，ultralytics 一行都不用改。
+
+**绝不能 fuse**：`exporter.py:524` 会把 `model.pe` 融进 cv3/cv4 并把 `reprta` 换成
+Identity，那样 `pe` 就不再是输入了。
+
+**`pe` 固定 80 槽**（= yoloe-26 原生 nc）。补零槽在 head 内部走 `F.normalize(0) = 0`，
+分数恒等于 bias(-10) → `sigmoid ≈ 4.5e-5`，天然低于任何阈值。好处是**输出形状与烘焙版
+完全一致**（`[1,300,38]`），`yolo.rs` 的解码器一行都不用改。
+
+**三件套**（`models/yoloe/`，由 `scripts/export_yoloe_prompt.py` 产出）：
+
+| 文件 | 输入 → 输出 |
+|---|---|
+| `yoloe26n_prompt.onnx` | `images[1,3,640,640]` + `pe[1,80,512]` → `output0[1,300,38]` + `proto` |
+| `yoloe26n_vpe.onnx` | `ref[1,3,640,640]` + `vp[1,Q,80,80]` → `vpe[1,Q,512]`（Q 动态） |
+| `yoloe26n_texthead.onnx` | `feat[N,512]` → `pe[1,N,512]`（N 动态） |
+| `tokenizer.min.json` | CLIP BPE 词表（HF 格式），给 `mobileclip2-b-rs` 用 |
+
+**端点**：`POST /vision/prompt`，`mode=visual|text`，出参与模板找图**完全同构**
+（`found`/`x`/`y`/`center_x`/`center_y`/`score`/`matches`/`origin_x`/`origin_y`），
+额外多 `engine`（固定 `yoloe-prompt`）与命中的 `class_id`/`class_name`。
+语言找图的 `class_name` 就是提示词本身——这是它对脚本最重要的可读性来源。
+
+#### 踩过的坑（都是「不报错但结果不对」那一类）
+
+1. **`get_topk_index` 的高级索引必须补丁**。`idx = ori_index[torch.arange(B)[..., None],
+   index // nc]` 是**两个索引张量**的高级索引，torch.onnx 警告后会**错误地** trace 成
+   Gather（每行取到同一个 anchor，框全一样）。改成
+   `torch.gather(ori_index.squeeze(-1), 1, index // nc).unsqueeze(-1)` 即忠实。
+2. **`export` 标志要铺到所有子模块**。head 的 forward 读的是 head **自己**的
+   `self.export`；只设顶层会返回 `(y, preds)` 元组并拖出一堆中间张量当输出。
+3. **图输出里的符号维度必须冻结成实测值**。end2end 的 topk 形状 torch 推不出来，
+   导出后 `output0` 的 batch 维和候选数维都是符号维度（`Concatoutput0_dim_0/1`）。
+   Rust 侧是**靠输出形状**判断「端到端头还是 `[1,C,N]`」的，遇到符号维度只能拒绝加载
+   ——它不能猜。解法是 `_freeze_outputs()`：跑一遍实测、把真实数字写回 `graph.output`。
+   症状是加载时报「输出 batch 维不是 1（[-1, -1, 38]）」。
+4. **端到端输出是 `x1,y1,x2,y2`，不是 `cx,cy,w,h`**。当成后者去解，分数一模一样、
+   框整体偏掉（实测 IoU 只有 0.39），极容易误判成「解码没问题，只是框有偏差」。
+5. **`letterbox` 之前必须 BGR→RGB**。`cv2.imread` 给 BGR，而 ultralytics
+   `BasePredictor.preprocess` 里有 `im = im[..., ::-1]`。少了这一步，导出的 ONNX
+   照样能用（torch 与 ort 用同一份张量），但**参考值会整体偏掉**——视觉提示编码器是
+   浅层卷积网，通道顺序反了 `pe` 的最大差能到 4e-2。
+6. **框从原图搬进 640 空间要用未取整的 `src*gain`**：
+   `round((dst - src*gain)/2 - 0.1)`，**不是** letterbox 里取整后的 `new_w`，
+   两者在边缘情况差 1 像素。Python 的 `round()` 是银行家舍入 → Rust 用
+   `round_ties_even()`。
+7. **掩码轴序容易写反**：`make_mask` 里 `r = arange(w)`、`c = arange(h)`，判据是
+   `(r >= x1) * (r < x2) * (c >= y1) * (c < y2)`——**r 比 x、c 比 y**。
+   `visuals[idx] |= mask` 是同类多框取并集。
+
+#### 文本塔为什么不导 ONNX
+
+`mobileclip2_b.ts` 里嵌的 TorchScript 图**缺张量秩信息**，legacy 导出器在
+multi_head_attention 的 `unflatten(-1, [3, size])` 上抛
+"transpose for tensor of unknown rank"；torch 2.4 的 dynamo 导出器（需 onnxscript
+**0.1.0**，0.7.2 的 `onnxscript.values.ParamSchema` 已被删）同样失败，batch 改静态也没用。
+
+**解法**：文本塔不导 ONNX，Python 侧只导 `reprta` 提示头；Rust 侧用
+`mobileclip2-b-rs`（crates.io，MIT，基于 candle）直接读 `.ts` 权重自己算。
+它自带 CLIP BPE 分词器，文档里明写「used by the YOLOE text path」，且已对官方
+Python/OpenCLIP 参考做过数值对齐。
+
+**分词器要自己配**：crate 的 `Tokenizer::from_file` 吃 HF 格式的 `tokenizer.json`，
+而 `mobileclip2_b.ts` 里没有词表。用 `openai/clip-vit-base-patch32` 的
+`tokenizer.json` 存成 `models/yoloe/tokenizer.min.json`。**必须逐 id 核对**
+（`scripts/_probe_tokenizer.py`）——两处分词差一个 id，`pe` 就变，而 pe 变了对用户
+就是「同样的词找不到东西」，不会有任何报错。
+
+> 核对时的坑：**不能把 id 0 当 padding 过滤掉**。CLIP 字节级词表里 id 0 就是字符
+> `!` 的合法 token，过滤会把真实 token 删掉，反而把「一致」判成「不一致」。
+> 正确做法是把 HF 输出右补 0 到 77，与 `clip.tokenize` 的整条序列逐位比。
+
+#### 验收（都是逐值比对，不是「看着对」）
+
+- `scripts/export_yoloe_prompt.py all`：视觉编码器 1.5e-7、提示头 1.8e-7、
+  端到端 IoU 1.0000。
+- `scripts/ref_yoloe_prompt.py` 生成 `models/yoloe/reference_prompt.json`（中间量
+  `feat`/`vpe`/`pe` + 端到端框）。
+- `cargo test --test yoloe_prompt_parity -- --ignored`：
+  - 文本 `pe` 与官方 TorchScript 文本塔最大差 **4.99e-7**（验的是第三方 crate）
+  - 视觉 `pe` 最大差 **1.64e-7**（验的是掩码栅格化 + letterbox 搬运）
+  - 端到端 3 框 **IoU 1.0000、置信度差 0.0000**
+- `cargo test --test api_smoke -- vision_prompt`：参数校验 7 条；ignored 那条真跑
+  HTTP 全链路（bus.png + `person,bus` → 6 框，最高 0.913）。
+
+**为什么必须比中间量而不只比最终框**：导出脚本只证明了 ONNX 与 torch 一致；
+但「分词」「补零」「掩码」「坐标搬运」这四段是 Rust 独有的，任何一处差一点 `pe` 就变，
+而一个错的 `pe` 也可能碰巧检出相似的东西，只看框会把问题盖住。
+
 ## 7. 不做的事（已评估，记录原因）
 
 - **不做动态插件（加载任意 .dll / .so）**：安全面太大，而实际需求只是有限几种引擎。

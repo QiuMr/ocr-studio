@@ -37,9 +37,9 @@ export function EmptyState({ icon, title, description, steps, action, className 
           {icon}
         </div>
       )}
-      <div className="text-[13.5px] font-medium text-neutral-700">{title}</div>
+      <div className="text-[13px] font-medium text-neutral-700">{title}</div>
       {description && (
-        <p className="mt-1 max-w-[420px] text-[12.5px] leading-5 text-neutral-500">{description}</p>
+        <p className="mt-1 max-w-[420px] text-[13px] leading-5 text-neutral-500">{description}</p>
       )}
 
       {steps && steps.length > 0 && (
@@ -47,7 +47,7 @@ export function EmptyState({ icon, title, description, steps, action, className 
           {steps.map((s, i) => (
             <li
               key={i}
-              className="flex items-start gap-2.5 rounded-lg bg-white/80 px-3 py-2 text-[12.5px] text-neutral-600 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+              className="flex items-start gap-2.5 rounded-lg bg-white/80 px-3 py-2 text-[13px] text-neutral-600 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
             >
               <span
                 className={cn(
@@ -66,7 +66,7 @@ export function EmptyState({ icon, title, description, steps, action, className 
                   <span>{s.text}</span>
                 </span>
                 {s.detail && (
-                  <span className="mt-0.5 block text-[11.5px] text-neutral-400">{s.detail}</span>
+                  <span className="mt-0.5 block text-[12px] text-neutral-400">{s.detail}</span>
                 )}
               </span>
             </li>

@@ -1,0 +1,9 @@
+{
+  "kind": "yoloe-text-head",
+  "embed": 512,
+  "tower": {
+    "crate": "mobileclip2-b-rs",
+    "weights": "mobileclip2_b.safetensors",
+    "tokenizer": "tokenizer.min.json"
+  }
+}

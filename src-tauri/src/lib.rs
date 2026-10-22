@@ -421,6 +421,7 @@ pub fn run() {
             commands::models_root,
             commands::find_image,
             commands::find_semantic,
+            commands::find_prompt,
             commands::screen_preview,
             commands::list_windows,
             commands::get_logs,

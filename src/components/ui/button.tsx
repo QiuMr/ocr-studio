@@ -6,6 +6,17 @@ import { cn } from "../../lib/utils";
 /**
  * shadcn/ui 风格按钮。规范：**每个按钮都必须带图标**（lucide-react），
  * 因此默认变体预留了图标插槽，调用方用 `<Button><Icon /> 文字</Button>`。
+ *
+ * 2026-10-22 尺寸统一（界面精修）：高度只有四档，字号跟着档位走，
+ * 圆角一律取 `rounded-md`（=8px，见 styles.css 的圆角梯度）。
+ *
+ *   xs      h-7 (28px)  text-12  密集行内动作（工具条、卡片角上的小按钮）
+ *   sm      h-8 (32px)  text-12  次级按钮（表单旁、卡片头）
+ *   default h-9 (36px)  text-13  主按钮
+ *   lg      h-10 (40px) text-13  强调按钮（落地页/空状态）
+ *   icon*   正方形，跟同档位按钮等高
+ *
+ * 图标统一 14px（调用方写 `className="h-3.5 w-3.5"`），与 12~13px 文字对齐。
  */
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
@@ -23,10 +34,13 @@ const buttonVariants = cva(
         link: "text-blue-600 underline-offset-4 hover:underline",
       },
       size: {
+        xs: "h-7 px-2.5 text-[12px]",
+        sm: "h-8 px-3 text-[12px]",
         default: "h-9 px-4 py-2",
-        sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-10 rounded-md px-6",
+        lg: "h-10 px-6",
         icon: "h-9 w-9",
+        "icon-sm": "h-8 w-8",
+        "icon-xs": "h-7 w-7",
       },
     },
     defaultVariants: {

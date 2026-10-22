@@ -46,15 +46,15 @@ export function ApiPage() {
           </h1>
           <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">
             共 {ENDPOINTS.length} 个端点，全部走本机。返回统一是{" "}
-            <code className="selectable rounded bg-neutral-100 px-1 py-0.5 font-mono text-[11.5px] text-neutral-700">
+            <code className="selectable rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-700">
               {"{ code, msg, data }"}
             </code>
           </p>
         </div>
 
         {/* 地址可改：换了端口之后，下面的示例要能跟着变 */}
-        <label className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 shadow-card">
-          <span className="text-[11.5px] font-semibold text-neutral-500">地址</span>
+        <label className="flex items-center gap-2 rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 shadow-card">
+          <span className="text-[12px] font-semibold text-neutral-500">地址</span>
           <input
             value={host}
             onChange={(e) => setHost(e.target.value)}
@@ -66,33 +66,33 @@ export function ApiPage() {
 
       {/* ------------------------------------------------------------ 约定 */}
       <section className="mt-5 grid gap-3 lg:grid-cols-2">
-        <div className="rounded-[14px] border border-neutral-200 bg-white p-4 shadow-card">
+        <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-card">
           <h2 className="text-[13px] font-bold text-neutral-900">请求怎么传</h2>
           <ul className="mt-2.5 flex flex-col gap-1.5 text-[12px] font-medium leading-5 text-neutral-600">
             <li>
               <b className="text-neutral-800">JSON</b>：{" "}
-              <code className="font-mono text-[11.5px]">{"{\"image\":\"<base64>\"}"}</code>
+              <code className="font-mono text-[12px]">{"{\"image\":\"<base64>\"}"}</code>
               ，加{" "}
-              <code className="font-mono text-[11.5px]">Content-Type: application/json</code>
+              <code className="font-mono text-[12px]">Content-Type: application/json</code>
             </li>
             <li>
               <b className="text-neutral-800">表单上传</b>：{" "}
-              <code className="font-mono text-[11.5px]">multipart/form-data</code>，图片字段叫{" "}
-              <code className="font-mono text-[11.5px]">image</code> 或{" "}
-              <code className="font-mono text-[11.5px]">file</code>
+              <code className="font-mono text-[12px]">multipart/form-data</code>，图片字段叫{" "}
+              <code className="font-mono text-[12px]">image</code> 或{" "}
+              <code className="font-mono text-[12px]">file</code>
             </li>
             <li>
               请求体上限 <b className="text-neutral-800">32 MB</b>，字段里的图片去掉{" "}
-              <code className="font-mono text-[11.5px]">data:image/png;base64,</code> 前缀也能用
+              <code className="font-mono text-[12px]">data:image/png;base64,</code> 前缀也能用
             </li>
           </ul>
         </div>
 
-        <div className="rounded-[14px] border border-neutral-200 bg-white p-4 shadow-card">
+        <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-card">
           <h2 className="text-[13px] font-bold text-neutral-900">错误码</h2>
           <ul className="mt-2.5 flex flex-col gap-1">
             {ERRORS.map((e) => (
-              <li key={e.code} className="flex items-baseline gap-2 text-[11.5px] font-medium">
+              <li key={e.code} className="flex items-baseline gap-2 text-[12px] font-medium">
                 <code
                   className={cn(
                     "w-9 shrink-0 rounded px-1 text-center font-mono font-bold",
@@ -120,7 +120,7 @@ export function ApiPage() {
               <h2 className="text-[16px] font-bold tracking-tight text-neutral-900">
                 {GROUP_LABEL[g]}
               </h2>
-              <span className="text-[11.5px] font-semibold text-neutral-400">{list.length} 个</span>
+              <span className="text-[12px] font-semibold text-neutral-400">{list.length} 个</span>
               <span className="text-[12px] font-medium text-neutral-500">{GROUP_DESC[g]}</span>
             </div>
 
@@ -133,7 +133,7 @@ export function ApiPage() {
         );
       })}
 
-      <p className="mt-8 text-[11.5px] font-medium leading-5 text-neutral-400">
+      <p className="mt-8 text-[12px] font-medium leading-5 text-neutral-400">
         所有端点只在本机监听，端口改了这里跟着改。想先确认服务通不通，先调{" "}
         <code className="font-mono">GET /ocr/health</code>。
       </p>
@@ -162,7 +162,7 @@ function EndpointCard({ ep, host }: { ep: Endpoint; host: string }) {
   };
 
   return (
-    <div className="group overflow-hidden rounded-[13px] border border-neutral-200 bg-white shadow-card transition-colors hover:border-neutral-300">
+    <div className="group overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-card transition-colors hover:border-neutral-300">
       {/* 头行：整行可点展开，只有两个复制按钮单独拦事件 */}
       <div className="flex items-center gap-2.5 px-4 py-3">
         <span
@@ -182,7 +182,7 @@ function EndpointCard({ ep, host }: { ep: Endpoint; host: string }) {
           className="flex min-w-0 flex-1 items-baseline gap-2.5 text-left"
           aria-expanded={open}
         >
-          <code className="selectable shrink-0 font-mono text-[12.5px] font-bold text-neutral-900">
+          <code className="selectable shrink-0 font-mono text-[13px] font-bold text-neutral-900">
             {ep.path}
           </code>
           <span className="truncate text-[12px] font-medium text-neutral-500">{ep.title}</span>
@@ -226,7 +226,7 @@ function EndpointCard({ ep, host }: { ep: Endpoint; host: string }) {
                   <div
                     key={p.name}
                     className={cn(
-                      "flex items-baseline gap-3 px-3 py-1.5 text-[11.5px]",
+                      "flex items-baseline gap-3 px-3 py-1.5 text-[12px]",
                       i > 0 && "border-t border-neutral-100",
                     )}
                   >
@@ -246,7 +246,7 @@ function EndpointCard({ ep, host }: { ep: Endpoint; host: string }) {
               <p className="mb-1 text-[11px] font-bold uppercase tracking-wider text-neutral-400">
                 返回
               </p>
-              <p className="font-mono text-[11.5px] font-medium leading-5 text-neutral-600">
+              <p className="font-mono text-[12px] font-medium leading-5 text-neutral-600">
                 {ep.returns}
               </p>
             </div>

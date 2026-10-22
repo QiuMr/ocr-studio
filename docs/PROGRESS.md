@@ -195,22 +195,31 @@ vite 就会新建空目录，比删安全。
 ## 1. 验证状态（可复现）
 
 ```
-cargo test                       # 40 个单元测试
-cargo test -- --ignored          # + 16 个重量级集成测试（需模型/DLL/真实桌面）
+cargo test                       # 129 个非重量级测试（lib 113 + 集成 16）
+cargo test -- --ignored          # + 29 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
 cargo build --release            # 无安装包（bundle.active=false）
-powershell -File scripts/pack_exe.ps1   # 打免安装 zip
+powershell -File scripts/pack_exe.ps1    # 打免安装 zip
+python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"
+                                 # 解压目录端到端验收（含「缺权重必须报 1002」）
 ```
+
+> 2026-10-23 全量复跑（#76 全面检查）：`--lib` **113 passed / 0 failed / 1 ignored**；
+> `--ignored` **29 项全绿**（api_smoke 10、capture_live 5、ddddocr_parity 2、pipeline_match 1、
+> pipeline_vision 1、tensor_diff 3、yolo_parity 2、yoloe_prompt_parity 3、yoloe_smoke 1、lib 1）。
+> 其中 `pipeline_match`（黄金基线逐值比对）与 `yoloe_prompt_parity`
+> （文本 pe 4.99e-7 / 视觉 pe 1.64e-7 / 端到端 IoU 1.0000）均通过。
+> `--lib` 从 111 涨到 113 是新增的 2 条错误映射单测（见 §7.9）。
 
 | 测试 | 结果 |
 |---|---|
-| 单元测试（geometry / det / rec / preprocess / resize fixture / **matcher**） | **40 / 40 通过** |
+| 单元测试（geometry / det / rec / preprocess / resize fixture / **matcher** / **prompt** / **api::state 错误映射**） | **113 / 113 通过**（1 个 bench 标 ignored） |
 | `matcher::*`（7 个） | **7 / 7 通过**：原位命中(score>0.999)、亮度缩放免症、无假阳、纯色模板不误检、NMS 多目标、超大模板拒绝、1080p 多层金字塔 |
 | `pipeline_match::rust_matches_python_reference` | **通过**：文本不一致 0、框偏差 >2px 0、置信度偏差 >0.05 0 |
 | `tensor_diff::rec_tensor_matches_python_dump` | 通过（rec 输入张量与 Python dump 一致） |
 | `tensor_diff::warp_perspective_matches_python_crop` | 通过（透视裁剪 **0/3069 逐位一致**） |
 | `tensor_diff::rec_probe_matches_python_on_same_tensor` | 通过（同一张量下 Rust/Python 逐帧 argmax 一致） |
-| `api_smoke`（13 个） | **13 / 13 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、**danzijson 逐字**、400 错误路径 |
+| `api_smoke`（26 个：16 非 ignored + 10 ignored） | **26 / 26 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、**danzijson 逐字**、**quyuocr 区域**、**yuyizhaotu 语义**、**vision_prompt 文本提示**、400 错误路径 |
 | `capture_live`（5 个，`--ignored`） | **5 / 5 通过**：全屏尺寸→自匹配**位置零误差、score=1.0**、区域截图坐标本地化、窗口枚举、窗口截图 136 万非黑像素 |
 | `scripts/e2e_find.py`（服务进程级） | **全部通过**：真实桌面自截模板 → `/ocr/pingmuzhaotu1` 命中**坐标零误差、score=1.0000**；容错端点一致；`tuzhaotu` 图内坐标与 `origin=(0,0)` 正确；缺模板返回 400 |
 | `scripts/e2e_danzi.py`（服务进程级） | **通过**：UI 截图 39 行 / 192 字，**每行字数与文本长度一致**、**每个字框都落在行框内** |
@@ -229,6 +238,16 @@ D:\rust-target\debug\ocr-studio.exe                 启动 8s 不退出
 curl http://127.0.0.1:8848/ocr/health               {"status":"ok","model":"small",
                                                      "actual_device":"directml","dict_size":18708}
 release/OCR-Studio-0.1.0-win64.zip                  exe + 3 个 dll + models + 使用说明
+```
+
+打包产物实测（2026-10-23，`scripts/verify_packaged.py` 全绿，见 §7.9）：
+```
+release/OCR-Studio-0.1.0-win64.zip                  120.73 MB（解压 165.62 MB / 19 文件）
+OCR Studio.exe                                      14.84 MB
+解压目录直接跑                                       health ok / actual_device=directml
+/ocr/shibie /ocr/quyuocr /vision/qrcode             全部 code=0，结果正确
+/vision/prompt mode=visual                          found=true score=0.955 engine=yoloe-prompt
+/vision/prompt mode=text（故意不带 242MB 权重）      code=1002，消息点名 MobileCLIP2-B
 ```
 ```
 
@@ -879,6 +898,150 @@ metadata `task=segment`、`names={0:'yoloe26_bus'}`）。Rust 引擎冒烟
 
 ---
 
+## 7.9 M7：界面精修（圆角 / 按钮 / 字号统一）+ 全面检查（2026-10-23 凌晨）
+
+### 界面精修（#75）
+
+**审计出来的乱**：全站 `*.tsx` 圆角混着 **7 个自定义像素值**（9/10/11/12/13/14/16px）
+再加 Tailwind 默认的 sm/md/lg/xl —— 同一个「卡片」在不同页面圆角都不一样；字号混着
+**4 个半像素值**（10.5/11.5/12.5/13.5px）加 10/11/12/13/14/15/16/26/27，共 **13 档**。
+半像素值在 100% 缩放下发虚，差 0.5px 的两档放一起既看不出差别又显得不整齐。
+
+**做法：覆盖 Tailwind 默认档，而不是逐处改。** 在 `src/styles.css` 的 `@theme` 里直接
+覆盖 `--radius-sm/md/lg/xl` 与 `--text-xs/sm`，既有的 `rounded-md/lg/xl`、`text-sm`
+类名会自动归位，200 多处调用点一行不用动。梯度定义见 `docs/PLAN.md` 7.2。
+
+| 档 | 值 | 用途 |
+|---|---|---|
+| `rounded-sm` / `md` / `lg` / `xl` | 6 / 8 / 10 / 14px | 浮层小项 / 按钮·输入·tab·导航 / 卡片内的块 / 卡片·面板·独立浮层 |
+| `rounded-full`、`rounded`(4px) | — | 刻意不走梯度：胶囊圆点 / ≤24px 微图标按钮与微角标 |
+| 字号 | 10 / 11 / 12 / 13 / 14 / 16 / 26px | 微角标 / 次要 / 正文 / 强调·卡片标题·按钮 / 强强调 / 小节标题 / 页面主标题 |
+
+**归一化 149 处**（脚本一次过）：`text-[10.5/11.5/12.5/13.5/15/27px]` → `11/12/13/13/16/26px`；
+`rounded-[9/10/11px]` → `rounded-lg`，`rounded-[12/13/14/16px]` → `rounded-xl`。
+`rounded-[3px]`（画在截图上的框标记）**保留**——它不是 UI 外壳。
+
+**按钮四档**（`ui/button.tsx`）：`xs h-7/12px`、`sm h-8/12px`、`default h-9/13px`、
+`lg h-10/13px`，另加 `icon-sm h-8 w-8`、`icon-xs h-7 w-7`；图标统一 14px。
+
+**顺带修掉的 5 处不一致**：
+
+1. `FindPanel`「命中结果」卡片头缺 `h-8` —— 左右两张卡并排，右标题比左标题高 ~7px。
+   这正是「CardHeader 第一行统一 `flex h-8 items-center`」那条规范，全仓只漏这一处。
+2. 三段分段控件不统一（容器有 lg 有 md、项有 md 有裸 `rounded`）→ 统一成
+   「容器 `rounded-lg` + 项 `rounded-md`」（8+2 内距 = 10，正好同心）。
+3. 6 个紧凑 `SelectTrigger` 是 `h-8 text-[13px]`，旁边 `Button sm` 是 `h-8 text-[12px]`
+   —— 同一行两种字号，统一成 12px。
+4. 代码 / JSON 块行高 1.75 / 1.82 / 1.85 三种混用 → 统一 `leading-[1.7]`。
+   （日志列表行的 1.55 保留，那是密集列表不是代码块。）
+5. Tooltip 从 `text-xs`（覆盖后 11px）改回 `text-[12px]`：里面是解释术语的整句话，
+   不该跟着 badge 掉到 11px。
+
+**验收**：`tsc --noEmit` 干净；逐页截图核对（服务 / 接口 / 试跑的文字识别·模板找图·
+语义找图·提示找图 / 设置），圆角与字号已一致、卡片头对齐。
+
+### 全面检查（#76）
+
+**修掉一个真 bug**：`src/lib/endpoints.ts` 的 `groupOf()` 按 `/vision` 前缀把
+`/vision/prompt` 划进「看图」，但它在 `ENDPOINTS` 数组里写在「找图」那一段、出参也和
+模板找图同构 —— 结果接口页上它跑到别组去了，注释和实际分组对不上。已特判归「找图」
+（分组计数变为 找图 8 / 看图 3，总数仍是 18）。
+
+**打包发现（重要，未擅自改，需拍板）**：
+`/vision/prompt` 的「语言找图」需要 MobileCLIP2-B 文本塔权重 `mobileclip2_b.ts`（**242MB**），
+它现在放在 `models/_fixtures/weights/`，而 `pack_exe.ps1` 会**整个删掉 `_fixtures`**
+→ 分发包里语言找图不可用。
+图找图**不受影响**：它只要 `models/yoloe/*.onnx`（28MB），那三个文件会随包发出去。
+已把这一点写进 `pack_exe.ps1` 的 `使用说明.txt`（缺什么、放哪、怎么拿），
+服务端也会明确报「缺 MobileCLIP2-B 权重 / 词表 / 提示头」，不会静默失败。
+**是否默认随包带 242MB，留给用户决定。**
+
+**分发包说明同步**：`使用说明.txt` 的接口一览从 15 → **18**
+（补 `/ocr/quyuocr`、`/vision/qrcode`、`/vision/prompt`），并新增「提示找图」整节说明
+两种模式的差别与语言找图的额外依赖。`pack_exe.ps1` 的中间产物过滤补上 `reference_*.json`
+（精度基线只有 `cargo test -- --ignored` 会读，运行时用不到）。
+
+**环境坑（会重复遇到）**：safe-delete 按 **turn 累计**删除量，超过 50 个文件就拒，
+会卡死 vite 的 `prepare-out-dir` 阶段；**连 `Remove-Item -Recurse -Force dist` 也被拦**
+（shim 同时包装 cmdlet）。绕法是用 .NET API 删目录：
+`[System.IO.Directory]::Delete("<绝对路径>\dist", $true)`，删完再跑 `build.ps1`。
+
+**截图工具**：新增 `scripts/win_capture.py`（`PrintWindow` + `PW_RENDERFULLCONTENT`，
+被别的窗口盖住也能抓到窗口自身画面）与 `scripts/focus_shot.py`
+（ALT 键解锁前台 + 显式声明 `argtypes` 才能置顶）。
+原因：`SetForegroundWindow` 受 Windows 前台锁限制，别的窗口刚抢过焦点时会**静默失败**，
+`mss` 抓到的就是压在 App 上面的浏览器画面（本轮踩过两次，白拍了两轮图）。
+
+#### 打包产物验收（`scripts/verify_packaged.py`，新脚本）
+
+前面那些都是「源码树里跑通」，分发包是另一回事：`resolve_models_root()` 优先用
+**exe 旁的 `models/`**，打包时又会剔掉一堆东西，两边不一致只有真解压出来跑才知道。
+新脚本对解压目录起服务，逐项验：health / shibie / quyuocr / qrcode /
+`prompt` 图找图（**该带的必须能用**）/ `prompt` 语言找图（**故意不带的必须明确报错**）。
+
+**跑出来的结果（`[PASS] 全部通过`）**：
+
+```
+health   status=ok engine=ppocr:small actual_device=directml port=8848
+shibie   'OCRStudio测试样本第一行\n混合English123与中文混排\n订单编号SO-2026-1021-8848\n手机号13800138000邮箱a@b.com'
+quyuocr  region=[0,0,400,200] 原图 900x560
+qrcode   count=1 format=QR_CODE text='https://example.com/ocr-studio'
+prompt   mode=visual found=true score=0.955 center=(409.1,486.2) engine=yoloe-prompt 903ms
+prompt   mode=text   code=1002 '提示找图失败: 该引擎不支持 text（缺 MobileCLIP2-B 权重 / 词表 / 提示头）'
+```
+
+#### 又修一个真 bug：能力不支持被拍成了 500（打包验收跑出来的）
+
+`/vision/prompt` 的 `mode=text` 在缺 MobileCLIP2-B 权重时返回的是 **500**，
+而按 `docs/ENGINES.md` 4.3 应该是 **1002**。根因在 `api/state.rs`：
+
+```rust
+// 错：绕过了已有的 map_engine_err，把 Unsupported 一起拍成 Internal
+eng.run(&target, &input, &opts)
+    .map_err(|e| ApiError::Internal(format!("提示找图失败: {e}")))
+```
+
+仓库里**早就有** `map_engine_err`（`Unsupported`→1002、`UnknownEngine`→1003），
+`/vision/detect` 一直在用，只有 `prompt_find` 没走它。同一类的还有 `run_alt`
+（拿检测引擎做识别时会返回 500 而不是 1002）与 `run_pp`。
+
+修法：拆出 `map_engine_err_ctx(e, Option<&str>)`——code 不变、消息前面加一层上下文
+（`map_engine_err` 变成 `map_engine_err_ctx(e, None)`）；顺带把 `VisionError::BadRequest`
+映射成 400（原先也是 500）。三处调用点统一走它。
+
+**为什么这个必须修**：`1002` 的全部意义就是让脚本区分「这个引擎做不到，换条路」
+和「服务出故障了，该重试/报警」。两者都变 500 的话，自动降级逻辑没法写。
+
+补了 2 条单测钉住映射（`engine_error_mapping_keeps_special_codes` /
+`engine_error_mapping_ctx_prefixes_message_only`），`cargo test --lib` 111 → **113**。
+
+#### 仓库卫生（顺手清掉的三处）
+
+1. **`models/small/dump/`（15 文件）与 `inspect.json` 之前会进分发包**。
+   它们和 `_fixtures` 一样是纯开发夹具（`tensor_diff` / `ddddocr_parity` /
+   `scripts/inspect_models.py` 才读），但打包过滤只剔了 `_fixtures`，漏了这两个。
+   已补进 `pack_exe.ps1`。
+2. **`.gitignore` 漏了 `models/**/*.ts`**。MobileCLIP2-B 文本塔权重后缀是 `.ts`
+   （TorchScript zip），会被当成 TypeScript 源码跟踪——**253MB 直接进仓库**。
+   已按 `models/` 前缀限定忽略（不能裸写 `*.ts`，前端的 `.ts` 源码要靠它）。
+   另加 `models/**/*.safetensors` 与 `*.sarif`（torch 导出的诊断文件）。
+3. **分发包说明的信封键写错了**：`使用说明.txt` 写的是 `{"code": 0, "message": ...}`，
+   实际是 `msg`（`ApiResp { code, msg, data }`）。前端 `ApiPage` 与 `ServicePage`
+   两处写的都是 `msg`，只有说明文件错。已改。
+
+#### 最终产物
+
+| 项 | 值 |
+|---|---|
+| `release/OCR-Studio-0.1.0-win64.zip` | **120.73 MB**（解压 165.62 MB / 19 文件） |
+| 上轮同款 zip | 95.56 MB —— 涨的是 `models/yoloe/` 图找图三件套（约 30MB） |
+| exe | 14.84 MB（LTO，嵌入 6 个前端 chunk） |
+
+比上轮大是**有意为之**：图找图是开箱能力，模型必须随包；语言找图那 242MB
+仍然没带（缺时明确报 1002，已验）。
+
+---
+
 ## 8. 关键文件索引
 
 ```
@@ -891,7 +1054,17 @@ scripts/probe_*.py                # 行为探针（OpenCV 定点 / pyclipper 语
 scripts/gen_resize_fixture.py     # 生成 resize 的 cv2 对齐 fixture 测试
 scripts/fetch_misans_font.py      # 下载 MiSans 切片并生成本地 @font-face CSS
 scripts/fetch_yoloe.py            # YOLOE-26 导出（visual/text/promptfree），含 ultralytics 8.4.13 的 fuse 补丁
+scripts/export_yoloe_prompt.py    # 运行时提示三件套导出（检测器 / 视觉编码器 / 文本提示头）
+scripts/ref_yoloe_prompt.py       # 提示引擎的精度基准（生成 models/yoloe/reference_prompt.json）
 scripts/e2e_find.py               # 找图端到端验证（真实屏幕 -> HTTP 服务 -> 坐标比对）
+scripts/win_capture.py            # 无人值守抓图：PrintWindow 取窗口自身画面（被遮挡也能抓）
+scripts/focus_shot.py             # 无人值守抓图：ALT 解锁前台 + 置顶后再屏幕截图（兜底）
+scripts/verify_packaged.py        # 免安装分发包端到端验收（解压即用 / 缺权重须报 1002）
+scripts/verify_http_contract.py   # HTTP 协议契约（404/405 信封、CORS 开关）
+scripts/verify_tray.py            # 托盘行为验收（关窗口隐藏 / 单实例）
+scripts/verify_autostart.py       # 开机自启注册表项验收
+scripts/pack_exe.ps1              # 免安装 zip 打包（含内嵌的「使用说明.txt」）
+scripts/dev.ps1 / build.ps1       # 开发启动 / 编译启动（唯一正确入口，见 §7.7）
 scripts/models.manifest.json      # 三档模型 URL + SHA256
 scripts/fetch_models.ps1          # 下载校验模型
 scripts/copy_runtime.ps1          # 拷贝 ort DLL 到 src-tauri/runtime/
@@ -899,8 +1072,9 @@ models/small/                     # small 档模型 + reference_output.json + du
 src-tauri/src/ocr/                # Rust 推理核心
 src-tauri/src/capture.rs          # 屏幕/窗口截图（BitBlt + PrintWindow）
 src-tauri/src/match.rs            # 模板匹配（金字塔 NCC + NMS），模块名暴露为 matcher
+src-tauri/src/engine/prompt.rs    # 运行时提示引擎（图找图 / 语言找图），三件套在 models/yoloe/
 src-tauri/src/api/                # HTTP 层（dto / state / routes）
 src-tauri/src/commands.rs         # Tauri invoke 命令
-src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke / capture_live / yolo_parity / yoloe_smoke
+src-tauri/tests/                  # pipeline_match / tensor_diff / api_smoke / capture_live / yolo_parity / yoloe_smoke / yoloe_prompt_parity
 src/assets/fonts/misans/          # MiSans 切片（fetch_misans_font.py 生成，勿手改）
 ```

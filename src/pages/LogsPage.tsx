@@ -213,7 +213,7 @@ export function LogsPage() {
               type="button"
               onClick={() => setMinLevel(lv)}
               className={cn(
-                "rounded-md px-2.5 py-1 text-[11.5px] font-medium uppercase tracking-wide",
+                "rounded-md px-2.5 py-1 text-[12px] font-medium uppercase tracking-wide",
                 minLevel === lv
                   ? "bg-white text-neutral-900 shadow-sm"
                   : "text-neutral-500 hover:text-neutral-800",
@@ -234,7 +234,7 @@ export function LogsPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索内容或模块，例如 find / 找图 / 8848"
-            className="h-8 pl-8 text-[12.5px]"
+            className="h-8 pl-8 text-[13px]"
           />
         </div>
 
@@ -253,7 +253,7 @@ export function LogsPage() {
           {follow ? "跟随最新" : "已固定"}
         </button>
 
-        <span className="text-[11.5px] text-neutral-400">
+        <span className="text-[12px] text-neutral-400">
           共 {filtered.length} 条 / 缓冲 {logs.length}
         </span>
       </div>
@@ -280,7 +280,7 @@ export function LogsPage() {
             {filtered.map((l, i) => (
               <li
                 key={`${l.ts_ms}-${i}`}
-                className="group flex items-start gap-2 rounded-md px-2 py-[3px] font-mono text-[11.5px] leading-[1.55] hover:bg-white"
+                className="group flex items-start gap-2 rounded-md px-2 py-[3px] font-mono text-[12px] leading-[1.55] hover:bg-white"
               >
                 <span className="shrink-0 tabular-nums text-neutral-400">{fmtTime(l.ts_ms)}</span>
                 <span

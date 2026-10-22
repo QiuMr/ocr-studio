@@ -344,7 +344,7 @@ export function SettingsPage() {
                   onClick={() => void onLevel(it.v)}
                   disabled={!isTauri()}
                   className={cn(
-                    "flex flex-col items-start rounded-[10px] border-2 px-3 py-2 text-left transition-colors",
+                    "flex flex-col items-start rounded-md border-2 px-3 py-2 text-left transition-colors",
                     cfg.level === it.v
                       ? "border-[#2563EB] bg-[#EFF4FF]"
                       : "border-neutral-200 bg-white hover:border-neutral-300",
@@ -359,12 +359,12 @@ export function SettingsPage() {
                     {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
                     {it.title}
                   </span>
-                  <span className="mt-0.5 text-[11.5px] text-neutral-500">{it.desc}</span>
+                  <span className="mt-0.5 text-[12px] text-neutral-500">{it.desc}</span>
                 </button>
               ))}
             </div>
             {health && (
-              <p className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+              <p className="flex items-center gap-1.5 text-[12px] text-neutral-400">
                 <Cpu className="h-3 w-3" />
                 当前实际使用：{health.model} · {health.actual_device === "directml" ? "显卡" : "处理器"}
               </p>
@@ -372,11 +372,11 @@ export function SettingsPage() {
           </div>
 
           {/* 显卡加速 */}
-          <div className="flex items-start justify-between gap-4 rounded-[10px] bg-neutral-50 px-3.5 py-3">
+          <div className="flex items-start justify-between gap-4 rounded-lg bg-neutral-50 px-3.5 py-3">
             <div className="min-w-0">
               <Label
                 htmlFor="gpu"
-                className="flex cursor-pointer items-center gap-1.5 text-[12.5px] font-medium text-neutral-800"
+                className="flex cursor-pointer items-center gap-1.5 text-[13px] font-medium text-neutral-800"
               >
                 <Zap className="h-3.5 w-3.5 text-neutral-400" />
                 用显卡加速
@@ -385,7 +385,7 @@ export function SettingsPage() {
                   关掉它退回处理器最稳（会慢，但一定能跑）。
                 </Hint>
               </Label>
-              <p className="mt-1 text-[11.5px] leading-4 text-neutral-500">
+              <p className="mt-1 text-[12px] leading-4 text-neutral-500">
                 {gpu ? "正在用显卡跑识别" : "正在用处理器跑识别，兼容性最好"}
                 {health && health.actual_device !== cfg.device && (
                   <span className="ml-1 text-amber-600">
@@ -407,7 +407,7 @@ export function SettingsPage() {
                   脚本调接口时没传阈值就用这个值。
                 </Hint>
               </Label>
-              <span className="font-mono text-[12.5px] font-semibold text-neutral-700">
+              <span className="font-mono text-[13px] font-semibold text-neutral-700">
                 {cfg.template_threshold.toFixed(2)}
               </span>
             </div>
@@ -480,7 +480,7 @@ export function SettingsPage() {
             </Button>
 
             <div className="flex flex-col gap-1">
-              <Label htmlFor="port" className="text-[11.5px] text-neutral-500">
+              <Label htmlFor="port" className="text-[12px] text-neutral-500">
                 端口
               </Label>
               <Input
@@ -495,11 +495,11 @@ export function SettingsPage() {
               />
             </div>
             {!portValid && (
-              <span className="pb-2 text-[11.5px] text-red-600">端口需在 1024~65535 之间</span>
+              <span className="pb-2 text-[12px] text-red-600">端口需在 1024~65535 之间</span>
             )}
           </div>
 
-          <p className="text-[11.5px] leading-5 text-neutral-400">
+          <p className="text-[12px] leading-5 text-neutral-400">
             服务只监听本机 127.0.0.1，不对外网开放，别人连不进来。
           </p>
 
@@ -512,7 +512,7 @@ export function SettingsPage() {
                   本地 HTML 页面、Electron 应用里用 fetch 调这些接口时，浏览器会先发 OPTIONS 预检。不开这个开关，预检过不去，页面里只会看到一个 CORS 报错。
                 </Hint>
               </Label>
-              <p className="mt-1 text-[11.5px] leading-5 text-neutral-500">
+              <p className="mt-1 text-[12px] leading-5 text-neutral-500">
                 {cfg.allow_browser
                   ? "已允许任意网页跨域调用。注意：截屏找图类接口（pingmuzhaotu / jubingzhaotu）会读你的屏幕，任何打开着的网页都能驱动它，用完建议关掉。"
                   : "默认关闭。只有在你自己的网页里调接口时才需要打开。"}
@@ -526,7 +526,7 @@ export function SettingsPage() {
             />
           </div>
           {cfg.allow_browser && (
-            <p className="text-[11.5px] leading-5 text-amber-700">
+            <p className="text-[12px] leading-5 text-amber-700">
               改动会在服务重启后生效（改端口或点一次「停止 → 启动」即可）。
             </p>
           )}
@@ -540,7 +540,7 @@ export function SettingsPage() {
                   开机后程序自动在后台跑起来，界面直接缩在托盘里，不会弹窗打扰你。脚本一开机就能调接口，不用先点一下图标。
                 </Hint>
               </Label>
-              <p className="mt-1 text-[11.5px] leading-5 text-neutral-500">
+              <p className="mt-1 text-[12px] leading-5 text-neutral-500">
                 {autostart === null
                   ? "当前状态读取失败，可稍后重试。"
                   : autostart
@@ -595,7 +595,7 @@ export function SettingsPage() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="truncate text-[12.5px] font-medium text-neutral-800">
+                      <span className="truncate text-[13px] font-medium text-neutral-800">
                         {m.id}
                       </span>
                       {i === 0 && <Badge variant="default">默认</Badge>}
@@ -641,7 +641,7 @@ export function SettingsPage() {
               <FolderOpen className="h-3.5 w-3.5" />
               打开模型目录
             </Button>
-            <span className="text-[11.5px] leading-4 text-neutral-400">
+            <span className="text-[12px] leading-4 text-neutral-400">
               列表第一项就是默认模型；类别名会自动从模型里读，不用手写 labels.txt
             </span>
           </div>
@@ -656,10 +656,10 @@ export function SettingsPage() {
           className="flex w-full items-center justify-between gap-2 px-5 py-3.5 text-left"
           aria-expanded={showAdvanced}
         >
-          <span className="flex items-center gap-2 text-[13.5px] font-semibold text-neutral-900">
+          <span className="flex items-center gap-2 text-[13px] font-semibold text-neutral-900">
             <SettingsIcon className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
             高级信息
-            <span className="text-[11.5px] font-normal text-neutral-400">
+            <span className="text-[12px] font-normal text-neutral-400">
               引擎清单、文件位置、渲染方式
             </span>
           </span>
@@ -680,7 +680,7 @@ export function SettingsPage() {
                   <Boxes className="h-3.5 w-3.5 text-neutral-400" />
                   本机可用的识别引擎
                 </h3>
-                <p className="text-[11.5px] leading-4 text-neutral-400">
+                <p className="text-[12px] leading-4 text-neutral-400">
                   扫描模型目录得到的结果，只看文件齐不齐、没有加载模型。「未安装」的补上对应文件就能用，不用改任何设置。
                 </p>
                 {engines.engines.map((e) => (
@@ -735,7 +735,7 @@ export function SettingsPage() {
               <Row label="版本">
                 <span className="font-mono text-[12px] text-neutral-600">0.1.0</span>
               </Row>
-              <p className="text-[11.5px] text-neutral-400">
+              <p className="text-[12px] text-neutral-400">
                 环境变量 <code className="font-mono">OCR_MODELS_ROOT</code> 可覆盖模型目录，适合把模型放到别的盘。
               </p>
             </section>
@@ -792,7 +792,7 @@ function EngineRow({ e, isDefault }: { e: EngineItem; isDefault: boolean }) {
             {caps.map((c) => (
               <span
                 key={c}
-                className="rounded bg-white px-1.5 py-0.5 text-[10.5px] text-neutral-500 ring-1 ring-neutral-200/70"
+                className="rounded bg-white px-1.5 py-0.5 text-[11px] text-neutral-500 ring-1 ring-neutral-200/70"
               >
                 {c}
               </span>

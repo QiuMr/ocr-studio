@@ -34,12 +34,12 @@ export function CodeBlock({ code, lang, className }: Props) {
   return (
     <div
       className={cn(
-        "group relative overflow-hidden rounded-[12px] bg-[#0e1016] ring-1 ring-white/[0.06]",
+        "group relative overflow-hidden rounded-xl bg-[#0e1016] ring-1 ring-white/[0.06]",
         className,
       )}
     >
       <div className="flex items-center justify-between border-b border-white/[0.06] px-3 py-1.5">
-        <span className="font-mono text-[10.5px] font-medium uppercase tracking-wider text-white/35">
+        <span className="font-mono text-[11px] font-medium uppercase tracking-wider text-white/35">
           {lang ?? "code"}
         </span>
         <button
@@ -65,7 +65,7 @@ export function CodeBlock({ code, lang, className }: Props) {
           )}
         </button>
       </div>
-      <pre className="selectable overflow-x-auto px-3.5 py-3 font-mono text-[11.5px] leading-[1.75] text-white/85">
+      <pre className="selectable overflow-x-auto px-3.5 py-3 font-mono text-[12px] leading-[1.7] text-white/85">
         {code}
       </pre>
     </div>

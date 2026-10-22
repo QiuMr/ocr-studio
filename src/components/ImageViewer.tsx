@@ -131,7 +131,7 @@ export function ImageViewer({
     return (
       <>
         {empty ?? (
-          <div className="flex h-full min-h-[280px] items-center justify-center rounded-lg bg-neutral-50/60 text-[12.5px] text-neutral-400">
+          <div className="flex h-full min-h-[280px] items-center justify-center rounded-lg bg-neutral-50/60 text-[13px] text-neutral-400">
             拖入图片，或按 Ctrl+V 粘贴
           </div>
         )}
@@ -200,7 +200,7 @@ export function ImageViewer({
         <ZoomBtn label="缩小" onClick={() => setZoom((z) => Math.max(0.25, z - 0.25))}>
           <Minus className="h-3 w-3" />
         </ZoomBtn>
-        <span className="min-w-[42px] text-center font-mono text-[10.5px] text-neutral-500">
+        <span className="min-w-[42px] text-center font-mono text-[11px] text-neutral-500">
           {fit ? "适应" : `${Math.round(zoom * 100)}%`}
         </span>
         <ZoomBtn label="放大" onClick={() => setZoom((z) => Math.min(4, z + 0.25))}>

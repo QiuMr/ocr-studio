@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
   AppWindow,
   Boxes,
@@ -8,6 +8,7 @@ import {
   Copy,
   Crosshair,
   FileImage,
+  Frame,
   Hand,
   Image as ImageIcon,
   Layers,
@@ -15,7 +16,9 @@ import {
   RefreshCw,
   ScanSearch,
   Settings2,
+  Sparkles,
   Target,
+  Type,
   Upload,
   X,
 } from "lucide-react";
@@ -41,6 +44,7 @@ import {
   detectModels,
   fileToBase64,
   findImage,
+  findPrompt,
   findSemantic,
   imageSize,
   listWindows,
@@ -55,6 +59,7 @@ import type {
   FindMode,
   FindResult,
   FindSource,
+  PromptMode,
   WindowInfo,
 } from "../types";
 
@@ -78,6 +83,21 @@ interface Template {
   name: string;
 }
 
+/**
+ * 参考框（提示找图用）。坐标是**原图像素**，不是屏幕坐标——
+ * 参考图只是「给模型看的样例」，跟搜索范围没有位置关系。
+ */
+interface RefBox {
+  id: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** 参考框的面积下限（原图像素）。小于这个基本是手抖点了一下，不算画框。 */
+const MIN_REF_BOX_AREA = 16;
+
 interface Props {
   /** 从「识别」页带过来的图片，切到找图页时可直接当模板候选 */
   inheritedImage?: string | null;
@@ -100,7 +120,28 @@ const KIND_HINT: Record<FindKind, string> = {
     "比像素：拿一张小图（模板）去大图里找长得一样的位置。换个皮肤、按下态变了就找不到，但胜在「只要长得像就认得」。",
   semantic:
     "靠模型认目标：不用准备模板，模型认得「这是个按钮」就直接框出来。代价是只认得模型见过的类别，换目标得换模型。",
+  prompt:
+    "目标当场给：圈出参考图里要的东西，或者直接写几个词，模型就去找「跟这个像的 / 是这个的」。换目标只改这里的输入，不用换模型——这是它跟「语义找图」最大的区别。",
 };
+
+/** 提示找图的两个子模式：给图 / 给词。 */
+const PROMPT_MODE_LABEL: Record<PromptMode, string> = {
+  visual: "图找图",
+  text: "语言找图",
+};
+
+/** 三种找图方式的顺序与文案（顺序 = 从「最省心」到「最灵活」）。 */
+const KIND_META: { v: FindKind; label: string; blurb: string }[] = [
+  { v: "template", label: "模板找图", blurb: "拿小图去大图里找" },
+  { v: "semantic", label: "语义找图", blurb: "让模型自己认目标" },
+  { v: "prompt", label: "提示找图", blurb: "圈一张参考图 / 写几个词" },
+];
+
+function KindIcon({ k, className }: { k: FindKind; className?: string }) {
+  if (k === "template") return <ImageIcon className={className} />;
+  if (k === "semantic") return <Brain className={className} />;
+  return <Sparkles className={className} />;
+}
 
 /** `"0, 2 5"` → `[0,2,5]`；空串或全是垃圾 → undefined（= 不过滤） */
 function parseIdList(s: string): number[] | undefined {
@@ -136,10 +177,20 @@ export function FindPanel({ inheritedImage }: Props) {
   const [modelEngine, setModelEngine] = useState("");
   const [conf, setConf] = useState("0.25");
   const [classIds, setClassIds] = useState("");
+  // ---- 提示找图专用 ----
+  const [promptMode, setPromptMode] = useState<PromptMode>("visual");
+  /** 参考图：只是「给模型看的样例」，跟搜索范围无关 */
+  const [refImg, setRefImg] = useState<Template | null>(null);
+  const [refBoxes, setRefBoxes] = useState<RefBox[]>([]);
+  const [words, setWords] = useState("");
+  /** 左侧卡片显示哪一块：参考图（要框东西）/ 搜索范围（看命中） */
+  const [leftTab, setLeftTab] = useState<"ref" | "hay">("ref");
 
   const hayInputRef = useRef<HTMLInputElement>(null);
   const tplInputRef = useRef<HTMLInputElement>(null);
   const maskInputRef = useRef<HTMLInputElement>(null);
+  const refInputRef = useRef<HTMLInputElement>(null);
+  const refBoxSeq = useRef(1);
 
   // 刷新窗口列表
   const refreshWindows = useCallback(async () => {
@@ -209,26 +260,39 @@ export function FindPanel({ inheritedImage }: Props) {
     setError(null);
   }, []);
 
-  /** 拖进来的图：模板找图时还没有模板就当模板，否则当搜索图；语义找图一律当搜索图。 */
+  /** 换参考图：框是照着旧图的尺寸画的，必须一起清掉。 */
+  const applyRefImage = useCallback(async (b64: string, url: string, name: string) => {
+    const dim = await imageSize(url);
+    setRefImg({ url, b64, width: dim.width, height: dim.height, name });
+    setRefBoxes([]);
+    setLeftTab("ref");
+    setResult(null);
+    setError(null);
+  }, []);
+
+  /** 拖进来的图：谁还缺就给谁。模板找图先补模板，图找图先补参考图，其余当搜索图。 */
   const onDrop = useCallback(
     (imgs: DroppedImage[]) => {
       const first = imgs[0];
       if (!first) return;
-      if (kind === "semantic" || tpl) void applyHaystack(first.b64, first.url);
-      else void applyTemplate(first.b64, first.url, first.name);
+      if (kind === "template" && !tpl) void applyTemplate(first.b64, first.url, first.name);
+      else if (kind === "prompt" && promptMode === "visual" && !refImg)
+        void applyRefImage(first.b64, first.url, first.name);
+      else void applyHaystack(first.b64, first.url);
     },
-    [kind, tpl, applyTemplate, applyHaystack],
+    [kind, promptMode, tpl, refImg, applyTemplate, applyRefImage, applyHaystack],
   );
 
   const { dragging } = useImageDrop(onDrop);
 
   /** 载入上传的图片（浏览器里选文件用）。 */
-  const loadFileTo = async (file: File, target: "hay" | "tpl" | "mask") => {
+  const loadFileTo = async (file: File, target: "hay" | "tpl" | "mask" | "ref") => {
     try {
       const b64 = await fileToBase64(file);
       const url = `data:${file.type || "image/png"};base64,${b64}`;
       if (target === "hay") await applyHaystack(b64, url);
       else if (target === "mask") await applyMask(b64, url, file.name);
+      else if (target === "ref") await applyRefImage(b64, url, file.name);
       else await applyTemplate(b64, url, file.name);
     } catch (e) {
       setError(`加载图片失败: ${e}`);
@@ -258,9 +322,47 @@ export function FindPanel({ inheritedImage }: Props) {
     }
   };
 
+  /** 截整个屏幕当参考图（想找的东西就在手边屏幕上时最省事）。 */
+  const shootRef = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const p = await screenPreview();
+      await applyRefImage(p.image, `data:image/png;base64,${p.image}`, "屏幕截图");
+    } catch (e) {
+      setError(`截图失败: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addRefBox = useCallback((b: Omit<RefBox, "id">) => {
+    setRefBoxes((cur) => [...cur, { ...b, id: refBoxSeq.current++ }]);
+    setResult(null);
+  }, []);
+
+  const removeRefBox = useCallback((id: number) => {
+    setRefBoxes((cur) => cur.filter((b) => b.id !== id));
+    setResult(null);
+  }, []);
+
   const onFind = async () => {
     if (kind === "template" && !tpl) {
       setError("还没选模板图。模板 = 你要找的那个小图标/小按钮的截图。");
+      return;
+    }
+    if (kind === "prompt" && promptMode === "visual") {
+      if (!refImg) {
+        setError("还没选参考图。参考图 = 一张「里面有你要找的东西」的图，随便截一张就行。");
+        return;
+      }
+      if (refBoxes.length === 0) {
+        setError("还没圈出要找的东西。在左边的参考图上按住拖一个框，把目标框住。");
+        return;
+      }
+    }
+    if (kind === "prompt" && promptMode === "text" && words.trim() === "") {
+      setError('还没写提示词。填几个词，逗号分隔，比如「确认按钮,取消」或「person,bus」。');
       return;
     }
     if (kind === "semantic" && !modelEngine) {
@@ -301,17 +403,42 @@ export function FindPanel({ inheritedImage }: Props) {
               class_filter: parseIdList(classIds),
               max_results: maxResults,
             })
-          : await findImage({
-              source,
-              mode,
-              image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
-              template: tpl!.b64,
-              mask: mask?.b64,
-              hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
-              max_results: maxResults,
-              min_score: Number.isFinite(parsed) ? parsed : undefined,
-            });
+          : kind === "prompt"
+            ? await findPrompt({
+                source,
+                mode: promptMode,
+                image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
+                hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
+                // 图找图：多个框当一个提示（同槽取并集）——用户圈几个样例时
+                // 想要的是「这些都是一样的东西」，不是「分别找三样东西」。
+                ref_image: promptMode === "visual" ? refImg?.b64 : undefined,
+                ref_boxes:
+                  promptMode === "visual"
+                    ? refBoxes.map((b) => [b.x1, b.y1, b.x2, b.y2] as [number, number, number, number])
+                    : undefined,
+                words:
+                  promptMode === "text"
+                    ? words
+                        .split(/[,，\n]+/)
+                        .map((w) => w.trim())
+                        .filter(Boolean)
+                    : undefined,
+                conf: Number.isFinite(parsedConf) ? parsedConf : undefined,
+                max_results: maxResults,
+              })
+            : await findImage({
+                source,
+                mode,
+                image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
+                template: tpl!.b64,
+                mask: mask?.b64,
+                hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
+                max_results: maxResults,
+                min_score: Number.isFinite(parsed) ? parsed : undefined,
+              });
       setResult(r);
+      // 提示找图：搜完自动翻到「搜索范围」那一页，否则用户看不到框画在哪
+      if (kind === "prompt" && promptMode === "visual") setLeftTab("hay");
       // 后端回传了它实际看到的画面：用它当背景，框与图必然对齐。
       // origin 由后端直接给出（屏幕/窗口截图的左上角），不靠前端反推。
       if (r.preview) {
@@ -325,7 +452,9 @@ export function FindPanel({ inheritedImage }: Props) {
         });
       }
     } catch (e) {
-      setError(`${kind === "semantic" ? "语义查找" : "找图"}失败: ${e}`);
+      const what =
+        kind === "semantic" ? "语义查找" : kind === "prompt" ? "提示查找" : "找图";
+      setError(`${what}失败: ${e}`);
       setResult(null);
     } finally {
       setBusy(false);
@@ -346,6 +475,32 @@ export function FindPanel({ inheritedImage }: Props) {
   /** 掩码与模板尺寸对不上时不能匹配（后端会直接报错，前端先提示） */
   const maskMismatch =
     mask != null && tpl != null && (mask.width !== tpl.width || mask.height !== tpl.height);
+  /** 「要找什么」是否已经给全了——不全就不让点，免得白截一次屏 */
+  const canRun =
+    kind === "template"
+      ? !!tpl
+      : kind === "semantic"
+        ? !!modelEngine
+        : promptMode === "visual"
+          ? !!refImg && refBoxes.length > 0
+          : words.trim() !== "";
+  /** 提示找图的图找图模式：左侧卡片显示参考图（要框东西）还是搜索范围（看命中） */
+  const showRefPicker = kind === "prompt" && promptMode === "visual";
+  /** 高级栏底部那句「当前用 X 在 Y 里找」里的 X */
+  const whatLabel =
+    kind === "template"
+      ? tpl
+        ? "模板"
+        : "未选模板"
+      : kind === "semantic"
+        ? modelEngine || "未选模型"
+        : promptMode === "visual"
+          ? refBoxes.length > 0
+            ? `参考图的 ${refBoxes.length} 个框`
+            : "未圈目标"
+          : words.trim()
+            ? `提示词「${words.trim()}」`
+            : "未写提示词";
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
@@ -364,33 +519,30 @@ export function FindPanel({ inheritedImage }: Props) {
           出参完全一样，区别只在「怎么定义要找的东西」。 */}
       <div className="flex flex-wrap items-center gap-2.5">
         <div className="flex items-center gap-0.5 rounded-lg bg-neutral-100 p-0.5">
-          {(["template", "semantic"] as const).map((k) => (
+          {KIND_META.map((m) => (
             <button
-              key={k}
+              key={m.v}
               type="button"
               onClick={() => {
-                setKind(k);
+                setKind(m.v);
                 setResult(null);
                 setError(null);
+                setLeftTab("ref");
               }}
               className={cn(
-                "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] transition-colors",
-                kind === k
+                "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] leading-none transition-colors",
+                kind === m.v
                   ? "bg-white font-medium text-neutral-900 shadow-sm"
                   : "text-neutral-500 hover:text-neutral-700",
               )}
             >
-              {k === "template" ? (
-                <ImageIcon className="h-3.5 w-3.5" />
-              ) : (
-                <Brain className="h-3.5 w-3.5" />
-              )}
-              {k === "template" ? "模板找图" : "语义找图"}
+              <KindIcon k={m.v} className="h-3.5 w-3.5" />
+              {m.label}
             </button>
           ))}
         </div>
         <span className="flex items-center gap-1 text-[12px] text-neutral-500">
-          {kind === "template" ? "拿小图去大图里找" : "让模型自己认目标"}
+          {KIND_META.find((m) => m.v === kind)?.blurb}
           <Hint>{KIND_HINT[kind]}</Hint>
         </span>
       </div>
@@ -427,7 +579,7 @@ export function FindPanel({ inheritedImage }: Props) {
                     alt="模板"
                     className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
                   />
-                  <span className="font-mono text-[10.5px] text-neutral-500">
+                  <span className="font-mono text-[11px] text-neutral-500">
                     {tpl.width}×{tpl.height}
                   </span>
                 </span>
@@ -475,7 +627,7 @@ export function FindPanel({ inheritedImage }: Props) {
                       />
                       <span
                         className={cn(
-                          "font-mono text-[10.5px]",
+                          "font-mono text-[11px]",
                           maskMismatch ? "text-red-600" : "text-blue-600",
                         )}
                       >
@@ -495,7 +647,7 @@ export function FindPanel({ inheritedImage }: Props) {
               )}
             </div>
           </div>
-        ) : (
+        ) : kind === "semantic" ? (
           <div className="flex flex-col gap-1">
             <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
               ① 用哪个模型找
@@ -513,7 +665,7 @@ export function FindPanel({ inheritedImage }: Props) {
                 </span>
               ) : (
                 <Select value={modelEngine} onValueChange={setModelEngine}>
-                  <SelectTrigger className="h-8 w-[190px] text-[12.5px]">
+                  <SelectTrigger className="h-8 w-[190px] text-[12px]">
                     <SelectValue placeholder="选择检测模型" />
                   </SelectTrigger>
                   <SelectContent>
@@ -529,6 +681,106 @@ export function FindPanel({ inheritedImage }: Props) {
               )}
             </div>
           </div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+              ① 要找什么
+              <Hint>{KIND_HINT.prompt}</Hint>
+            </Label>
+            <div className="flex items-center gap-1.5">
+              {/* 图找图 / 语言找图：同一套权重，只是提示从哪来不一样 */}
+              <div className="flex items-center gap-0.5 rounded-lg bg-neutral-100 p-0.5">
+                {(["visual", "text"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => {
+                      setPromptMode(m);
+                      setResult(null);
+                      setError(null);
+                      setLeftTab(m === "visual" ? "ref" : "hay");
+                    }}
+                    className={cn(
+                      "flex h-7 items-center gap-1 rounded-md px-2 text-[12px] leading-none transition-colors",
+                      promptMode === m
+                        ? "bg-white font-medium text-neutral-900 shadow-sm"
+                        : "text-neutral-500 hover:text-neutral-700",
+                    )}
+                  >
+                    {m === "visual" ? (
+                      <Frame className="h-3.5 w-3.5" />
+                    ) : (
+                      <Type className="h-3.5 w-3.5" />
+                    )}
+                    {PROMPT_MODE_LABEL[m]}
+                  </button>
+                ))}
+              </div>
+
+              {promptMode === "visual" ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => refInputRef.current?.click()}
+                  >
+                    <Frame className="h-3.5 w-3.5" />
+                    {refImg ? "换参考图" : "选参考图"}
+                  </Button>
+                  <input
+                    ref={refInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void loadFileTo(f, "ref");
+                      e.target.value = "";
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void shootRef()}
+                    disabled={busy}
+                    title="直接截当前屏幕当参考图（想找的东西就在屏幕上时最省事）"
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                    截一张
+                  </Button>
+                  {refImg && (
+                    <span
+                      className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
+                      title={refImg.name}
+                    >
+                      <img
+                        src={refImg.url}
+                        alt="参考图"
+                        className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
+                      />
+                      <span className="font-mono text-[11px] text-neutral-500">
+                        {refImg.width}×{refImg.height}
+                        {refBoxes.length > 0 ? ` · ${refBoxes.length} 个框` : ""}
+                      </span>
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Input
+                    className="h-8 w-[240px] text-[12px]"
+                    placeholder="确认按钮, 关闭"
+                    value={words}
+                    onChange={(e) => {
+                      setWords(e.target.value);
+                      setResult(null);
+                    }}
+                  />
+                  <span className="text-[12px] text-neutral-400">逗号分隔</span>
+                </>
+              )}
+            </div>
+          </div>
         )}
 
         {/* ② 搜索范围 */}
@@ -539,7 +791,7 @@ export function FindPanel({ inheritedImage }: Props) {
           </Label>
           <div className="flex items-center gap-1.5">
             <Select value={source} onValueChange={(v) => setSource(v as FindSource)}>
-              <SelectTrigger className="h-8 w-[122px] text-[12.5px]">
+              <SelectTrigger className="h-8 w-[122px] text-[12px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -564,7 +816,7 @@ export function FindPanel({ inheritedImage }: Props) {
                   value={hwnd == null ? "" : String(hwnd)}
                   onValueChange={(v) => setHwnd(Number(v))}
                 >
-                  <SelectTrigger className="h-8 w-[180px] text-[12.5px]">
+                  <SelectTrigger className="h-8 w-[180px] text-[12px]">
                     <SelectValue placeholder="选择窗口" />
                   </SelectTrigger>
                   <SelectContent>
@@ -629,16 +881,8 @@ export function FindPanel({ inheritedImage }: Props) {
         {/* ③ 执行 */}
         <div className="flex flex-col gap-1">
           <Label className="text-[11px] text-neutral-500">③ 开始</Label>
-          <Button
-            size="sm"
-            onClick={() => void onFind()}
-            disabled={busy || (kind === "template" ? !tpl : !modelEngine)}
-          >
-            {kind === "semantic" ? (
-              <Brain className="h-3.5 w-3.5" />
-            ) : (
-              <ScanSearch className="h-3.5 w-3.5" />
-            )}
+          <Button size="sm" onClick={() => void onFind()} disabled={busy || !canRun}>
+            <KindIcon k={kind} className="h-3.5 w-3.5" />
             {busy ? "查找中…" : kind === "semantic" ? "语义查找" : "开始找图"}
           </Button>
         </div>
@@ -681,7 +925,7 @@ export function FindPanel({ inheritedImage }: Props) {
                   </Hint>
                 </Label>
                 <Select value={mode} onValueChange={(v) => setMode(v as FindMode)}>
-                  <SelectTrigger className="h-8 w-[130px] text-[12.5px]">
+                  <SelectTrigger className="h-8 w-[130px] text-[12px]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -700,7 +944,7 @@ export function FindPanel({ inheritedImage }: Props) {
                   </Hint>
                 </Label>
                 <Input
-                  className="h-8 w-[86px] text-[12.5px]"
+                  className="h-8 w-[86px] text-[12px]"
                   placeholder="跟随预设"
                   value={minScore}
                   onChange={(e) => setMinScore(e.target.value)}
@@ -718,28 +962,30 @@ export function FindPanel({ inheritedImage }: Props) {
                   </Hint>
                 </Label>
                 <Input
-                  className="h-8 w-[86px] text-[12.5px]"
+                  className="h-8 w-[86px] text-[12px]"
                   placeholder="0.25"
                   value={conf}
                   onChange={(e) => setConf(e.target.value)}
                 />
               </div>
 
-              <div className="flex flex-col gap-1">
-                <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
-                  只保留类别 id
-                  <Hint>
-                    模型可能认得好几类东西。只想要其中几类时填类别 id，逗号分隔，如
-                    「0,2」。留空 = 全都返回。类别 id 看命中结果里每条后面的编号。
-                  </Hint>
-                </Label>
-                <Input
-                  className="h-8 w-[120px] text-[12.5px]"
-                  placeholder="留空 = 全部"
-                  value={classIds}
-                  onChange={(e) => setClassIds(e.target.value)}
-                />
-              </div>
+              {kind === "semantic" && (
+                <div className="flex flex-col gap-1">
+                  <Label className="flex items-center gap-1 text-[11px] text-neutral-500">
+                    只保留类别 id
+                    <Hint>
+                      模型可能认得好几类东西。只想要其中几类时填类别 id，逗号分隔，如
+                      「0,2」。留空 = 全都返回。类别 id 看命中结果里每条后面的编号。
+                    </Hint>
+                  </Label>
+                  <Input
+                    className="h-8 w-[120px] text-[12px]"
+                    placeholder="留空 = 全部"
+                    value={classIds}
+                    onChange={(e) => setClassIds(e.target.value)}
+                  />
+                </div>
+              )}
             </>
           )}
 
@@ -749,7 +995,7 @@ export function FindPanel({ inheritedImage }: Props) {
               <Hint>1 表示只找最像的那一个；找多个相同按钮时调大（上限 64）。</Hint>
             </Label>
             <Input
-              className="h-8 w-[70px] text-[12.5px]"
+              className="h-8 w-[70px] text-[12px]"
               type="number"
               min={1}
               max={64}
@@ -758,9 +1004,8 @@ export function FindPanel({ inheritedImage }: Props) {
             />
           </div>
 
-          <div className="pb-1 text-[11.5px] text-neutral-400">
-            当前用「{kind === "template" ? "模板" : modelEngine || "未选模型"}」在「
-            {SOURCE_LABEL[source]}」里找
+          <div className="pb-1 text-[12px] text-neutral-400">
+            当前用「{whatLabel}」在「{SOURCE_LABEL[source]}」里找
             {source === "window" && currentWindow ? ` · ${currentWindow.title.slice(0, 20)}` : ""}
           </div>
         </div>
@@ -776,20 +1021,63 @@ export function FindPanel({ inheritedImage }: Props) {
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[1.55fr_1fr]">
         <Card className="flex min-h-[340px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
-              <Crosshair className="h-3.5 w-3.5 text-blue-600" />
-              {hay ? SOURCE_LABEL[source] : "搜索范围预览"}
-              {hay && (
-                <span className="font-normal text-neutral-400">
-                  {hay.width} × {hay.height}
-                  {hay.origin.x !== 0 || hay.origin.y !== 0
-                    ? ` @(${hay.origin.x}, ${hay.origin.y})`
-                    : ""}
+            <div className="flex h-8 items-center gap-2">
+              <Crosshair className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              {showRefPicker ? (
+                // 图找图要配置的东西有两块（参考图上的框 / 去哪找），分两页免得挤在一起
+                <div className="flex items-center gap-0.5 rounded-lg bg-neutral-100 p-0.5">
+                  {(
+                    [
+                      { v: "ref" as const, label: "参考图 · 框住要找的", icon: <Frame className="h-3.5 w-3.5" /> },
+                      { v: "hay" as const, label: "搜索范围", icon: <Crosshair className="h-3.5 w-3.5" /> },
+                    ]
+                  ).map((t) => (
+                    <button
+                      key={t.v}
+                      type="button"
+                      onClick={() => setLeftTab(t.v)}
+                      className={cn(
+                        "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] leading-none transition-colors",
+                        leftTab === t.v
+                          ? "bg-white font-medium text-neutral-900 shadow-sm"
+                          : "text-neutral-500 hover:text-neutral-700",
+                      )}
+                    >
+                      {t.icon}
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <CardTitle className="flex items-center gap-2 text-[13px] font-medium text-neutral-500">
+                  {hay ? SOURCE_LABEL[source] : "搜索范围预览"}
+                  {hay && (
+                    <span className="font-normal text-neutral-400">
+                      {hay.width} × {hay.height}
+                      {hay.origin.x !== 0 || hay.origin.y !== 0
+                        ? ` @(${hay.origin.x}, ${hay.origin.y})`
+                        : ""}
+                    </span>
+                  )}
+                </CardTitle>
+              )}
+              {showRefPicker && leftTab === "ref" && refImg && (
+                <span className="ml-auto text-[12px] font-normal text-neutral-400">
+                  在图上按住拖出方框 · 已有 {refBoxes.length} 个
                 </span>
               )}
-            </CardTitle>
+            </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1">
+            {showRefPicker && leftTab === "ref" ? (
+              <RefBoxPicker
+                img={refImg}
+                boxes={refBoxes}
+                onAdd={addRefBox}
+                onRemove={removeRefBox}
+                onPick={() => refInputRef.current?.click()}
+              />
+            ) : (
             <ImageViewer
               src={hay?.url ?? null}
               width={hay?.width ?? 0}
@@ -805,7 +1093,11 @@ export function FindPanel({ inheritedImage }: Props) {
                   description={
                     kind === "template"
                       ? "模板是「要找的小图」，搜索范围是「去哪张图里找」。两个都有了才能开始。"
-                      : "语义找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
+                      : kind === "semantic"
+                        ? "语义找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
+                        : promptMode === "text"
+                          ? "语言找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
+                          : "搜索范围是「去哪张图里找」。在左边那页圈好参考图，这里选好范围，就能开始。"
                   }
                   steps={
                     kind === "template"
@@ -825,34 +1117,63 @@ export function FindPanel({ inheritedImage }: Props) {
                             detail: "命中的位置会用琥珀色框标出来",
                           },
                         ]
-                      : [
-                          {
-                            icon: <Brain className="h-3.5 w-3.5" />,
-                            text: "① 选一个检测模型（决定能找什么）",
-                            detail: "模型只认它见过的类别，没有模型先去设置页加",
-                          },
-                          {
-                            icon: <AppWindow className="h-3.5 w-3.5" />,
-                            text: "② 选一个窗口，或整个屏幕",
-                            detail: "点「语义查找」时会自动截当前画面",
-                          },
-                          {
-                            icon: <Brain className="h-3.5 w-3.5" />,
-                            text: "③ 点「语义查找」",
-                            detail: "命中的目标会连类别一起列在右边",
-                          },
-                        ]
+                      : kind === "semantic"
+                        ? [
+                            {
+                              icon: <Brain className="h-3.5 w-3.5" />,
+                              text: "① 选一个检测模型（决定能找什么）",
+                              detail: "模型只认它见过的类别，没有模型先去设置页加",
+                            },
+                            {
+                              icon: <AppWindow className="h-3.5 w-3.5" />,
+                              text: "② 选一个窗口，或整个屏幕",
+                              detail: "点「语义查找」时会自动截当前画面",
+                            },
+                            {
+                              icon: <Brain className="h-3.5 w-3.5" />,
+                              text: "③ 点「语义查找」",
+                              detail: "命中的目标会连类别一起列在右边",
+                            },
+                          ]
+                        : [
+                            {
+                              icon: promptMode === "visual" ? (
+                                <Frame className="h-3.5 w-3.5" />
+                              ) : (
+                                <Type className="h-3.5 w-3.5" />
+                              ),
+                              text:
+                                promptMode === "visual"
+                                  ? "① 选参考图，在上面拖框圈住要找的东西"
+                                  : "① 写几个提示词，逗号分隔",
+                              detail:
+                                promptMode === "visual"
+                                  ? "去左边「参考图」那页圈；多个框会当成同一个目标"
+                                  : "比如「确认按钮, 关闭」",
+                            },
+                            {
+                              icon: <AppWindow className="h-3.5 w-3.5" />,
+                              text: "② 选一个窗口，或整个屏幕",
+                              detail: "点「开始找图」时会自动截当前画面",
+                            },
+                            {
+                              icon: <Sparkles className="h-3.5 w-3.5" />,
+                              text: "③ 点「开始找图」",
+                              detail: "换目标只改①②，不用换模型",
+                            },
+                          ]
                   }
                 />
               }
             />
+            )}
           </CardContent>
         </Card>
 
         <Card className="flex min-h-[340px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium text-neutral-500">
+            <div className="flex h-8 items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-[13px] font-medium text-neutral-500">
                 <Target className="h-3.5 w-3.5 text-blue-600" />
                 命中结果
               </CardTitle>
@@ -879,20 +1200,20 @@ export function FindPanel({ inheritedImage }: Props) {
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-[12.5px] text-neutral-900">
+                            <span className="font-mono text-[13px] text-neutral-900">
                               ({h.x}, {h.y})
                             </span>
                             {h.class_name && (
-                              <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10.5px] text-neutral-600">
+                              <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600">
                                 {h.class_name}
                                 {h.class_id != null ? ` #${h.class_id}` : ""}
                               </span>
                             )}
-                            <span className="ml-auto font-mono text-[10.5px] text-neutral-400">
+                            <span className="ml-auto font-mono text-[11px] text-neutral-400">
                               {h.class_id != null ? "置信" : "相似"} {h.score.toFixed(3)}
                             </span>
                           </div>
-                          <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                          <div className="mt-0.5 font-mono text-[11px] text-neutral-400">
                             中心 ({h.center_x.toFixed(1)}, {h.center_y.toFixed(1)}) · {h.width}×
                             {h.height}
                           </div>
@@ -926,15 +1247,175 @@ export function FindPanel({ inheritedImage }: Props) {
                   result
                     ? kind === "semantic"
                       ? "模型没在这个画面里认出目标。先把「置信度下限」调小试试；还不行就是模型不认得这类目标，得换模型。"
-                      : "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
+                      : kind === "prompt"
+                        ? promptMode === "visual"
+                          ? "没找到跟参考框里那块像的东西。先把「置信度下限」调小试试；还不行就把参考框圈得更贴一点，或者换一张更清楚的参考图。"
+                          : "没找到符合这些词的东西。先把「置信度下限」调小试试；还不行就换个说法——用具体的名词，别用「按钮」这种太泛的词。"
+                        : "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
                     : kind === "semantic"
                       ? "模型和搜索范围都选好后，点「语义查找」。"
-                      : "模板和搜索范围都选好后，点「开始找图」。"
+                      : kind === "prompt"
+                        ? promptMode === "visual"
+                          ? "参考框和搜索范围都弄好后，点「开始找图」。"
+                          : "提示词和搜索范围都写好后，点「开始找图」。"
+                        : "模板和搜索范围都选好后，点「开始找图」。"
                 }
               />
             )}
           </CardContent>
         </Card>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 参考图取框器：在图上按住拖，框出「要找的东西长什么样」。
+ *
+ * 为什么让用户自己拖而不是给个固定九宫格：模型要的是「这块像素长这样」的
+ * 视觉提示，框得越贴，提示越干净。让用户自己圈是唯一能表达「我要的是这块、
+ * 不是旁边那块」的方式。
+ *
+ * 多个框 = 同一个目标的多张样例（后端把它们并成一个提示），所以这里不做
+ * 「第几号目标」的区分，只标序号方便数数。
+ */
+function RefBoxPicker({
+  img,
+  boxes,
+  onAdd,
+  onRemove,
+  onPick,
+}: {
+  img: Template | null;
+  boxes: RefBox[];
+  onAdd: (b: Omit<RefBox, "id">) => void;
+  onRemove: (id: number) => void;
+  onPick: () => void;
+}) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [draft, setDraft] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(
+    null,
+  );
+
+  if (!img) {
+    return (
+      <EmptyState
+        icon={<Frame className="h-5 w-5" />}
+        title="还没有参考图"
+        description="参考图 = 一张「里面有你要找的东西」的图。截当前屏幕最快，也可以直接拖一张图进来。"
+        steps={[
+          { icon: <Monitor className="h-3.5 w-3.5" />, text: "点上方「截一张」抓当前屏幕" },
+          { icon: <Frame className="h-3.5 w-3.5" />, text: "在图上按住拖一个框，把目标圈住" },
+          { icon: <Sparkles className="h-3.5 w-3.5" />, text: "点「开始找图」", detail: "换目标只改这个框" },
+        ]}
+        action={
+          <Button size="sm" variant="outline" onClick={onPick}>
+            <FileImage className="h-3.5 w-3.5" />
+            选参考图
+          </Button>
+        }
+      />
+    );
+  }
+
+  /** 客户端坐标 → 原图像素坐标（图片是等比缩放的，要按显示尺寸换算） */
+  const toImage = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const el = imgRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const r = el.getBoundingClientRect();
+    const sx = r.width > 0 ? img.width / r.width : 1;
+    const sy = r.height > 0 ? img.height / r.height : 1;
+    const clamp = (v: number, hi: number) => Math.min(Math.max(v, 0), hi);
+    return {
+      x: clamp((e.clientX - r.left) * sx, img.width),
+      y: clamp((e.clientY - r.top) * sy, img.height),
+    };
+  };
+
+  const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = toImage(e);
+    setDraft({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+  };
+
+  const onMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!draft) return;
+    const p = toImage(e);
+    setDraft((d) => (d ? { ...d, x2: p.x, y2: p.y } : d));
+  };
+
+  const onUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (draft) {
+      const b = {
+        x1: Math.min(draft.x1, draft.x2),
+        y1: Math.min(draft.y1, draft.y2),
+        x2: Math.max(draft.x1, draft.x2),
+        y2: Math.max(draft.y1, draft.y2),
+      };
+      if ((b.x2 - b.x1) * (b.y2 - b.y1) >= MIN_REF_BOX_AREA) onAdd(b);
+    }
+    setDraft(null);
+  };
+
+  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
+  const rectStyle = (b: { x1: number; y1: number; x2: number; y2: number }) => ({
+    left: pct(Math.min(b.x1, b.x2), img.width),
+    top: pct(Math.min(b.y1, b.y2), img.height),
+    width: pct(Math.abs(b.x2 - b.x1), img.width),
+    height: pct(Math.abs(b.y2 - b.y1), img.height),
+  });
+
+  return (
+    <div className="flex h-full min-h-[260px] w-full items-center justify-center overflow-hidden rounded-xl bg-neutral-50/70 p-2">
+      {/* inline-block 的容器会被图片撑到实际显示尺寸，覆盖层 inset-0 就精确贴着图片 */}
+      <div className="relative inline-block max-h-full max-w-full">
+        <img
+          ref={imgRef}
+          src={img.url}
+          alt="参考图"
+          draggable={false}
+          className="max-h-full max-w-full select-none rounded-lg border border-neutral-200 bg-white object-contain"
+          style={{ maxHeight: "min(52vh, 420px)" }}
+        />
+        <div
+          className="absolute inset-0 cursor-crosshair touch-none"
+          onPointerDown={onDown}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={() => setDraft(null)}
+        >
+          {boxes.map((b, i) => (
+            <div
+              key={b.id}
+              className="pointer-events-none absolute rounded-[3px] border-2 border-amber-500 bg-amber-400/20"
+              style={rectStyle(b)}
+            >
+              <span className="absolute -left-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-br bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
+                {i + 1}
+              </span>
+              <button
+                type="button"
+                title="删掉这个框"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => onRemove(b.id)}
+                className="pointer-events-auto absolute -right-2 -top-2 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-white text-neutral-500 shadow ring-1 ring-black/10 hover:text-red-600"
+                style={{ width: 18, height: 18 }}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+          {draft && (
+            <div
+              className="pointer-events-none absolute rounded-[3px] border-2 border-dashed border-blue-500 bg-blue-400/20"
+              style={rectStyle(draft)}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

@@ -123,6 +123,7 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_DETECT, post(vision_detect))
         .route(P_PIPELINE, post(vision_pipeline))
         .route(P_QRCODE, post(vision_qrcode))
+        .route(P_PROMPT, post(vision_prompt))
         // 兜底：先注册再套 layer，layer 才会把 fallback 一起包住
         .fallback(not_found);
 
@@ -159,11 +160,13 @@ const P_DETECT: &str = "/vision/detect";
 const P_PIPELINE: &str = "/vision/pipeline";
 /// 扫码：二维码 / 条码。一个端点覆盖全部码制，用 `barcode_formats` 过滤
 const P_QRCODE: &str = "/vision/qrcode";
+/// 运行时提示找图：图找图（参考图 + 框）/ 语言找图（提示词），换目标不用换模型
+const P_PROMPT: &str = "/vision/prompt";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
     P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_QUYU, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1,
-    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE,
+    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE, P_PROMPT,
 ];
 
 // ---------------------------------------------------------------- 兜底与 CORS
@@ -830,10 +833,340 @@ async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Res
     .into_response()
 }
 
+/// POST /vision/prompt —— 运行时提示找图：图找图 / 语言找图。
+///
+/// 与 `/ocr/yuyizhaotu` 的区别：那个用的是**烘焙过提示**的检测模型，换目标要重新
+/// 导出 ONNX；这个用的是把提示当**额外图输入**的模型，换目标只换输入。
+///
+/// 两种提示方式（`mode`）：
+/// - `visual`（图找图，缺省）：给参考图（`ref_image`）+ 一个框（`ref_boxes`），
+///   模型找「跟这个像的」。不挑外观——换了皮肤、按钮变按下态也照样认得。
+/// - `text`（语言找图）：给几个词（`words`），模型找「语义上是的」。
+///
+/// **出参与找图完全一致**（`found`/`x`/`y`/`center_x`/`center_y`/`score`/
+/// `matches`/`origin_x`/`origin_y`），额外多出 `engine` 与命中的
+/// `class_id`/`class_name`（语言找图时类名就是提示词本身）。已有脚本换个路径就能用。
+async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let ParsedPrompt {
+        opts,
+        image_bytes,
+        ref_bytes,
+    } = match parse_prompt(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    let mode = opts
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("visual")
+        .to_ascii_lowercase();
+
+    // 目标图来源：与找图同一套（image / screen / window）
+    let source = match opts
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => match FindSource::parse(s) {
+            Some(s) => s,
+            None => {
+                return ApiError::BadRequest(format!(
+                    "未知 source {s:?}（可选 image / screen / window）"
+                ))
+                .into_response()
+            }
+        },
+        None => FindSource::Image,
+    };
+
+    let conf = opts.conf.unwrap_or(0.25);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return ApiError::BadRequest(format!("conf 必须在 0..1，收到 {conf}")).into_response();
+    }
+
+    // 提示先组好再取目标图：提示参数错的时候不该先去截一次屏
+    let input = match mode.as_str() {
+        "visual" => {
+            let ref_img = match load_ref_image(ref_bytes.as_deref(), &opts) {
+                Ok(v) => v,
+                Err(e) => return e.into_response(),
+            };
+            let raw = opts.ref_boxes.as_deref().unwrap_or("").trim();
+            if raw.is_empty() {
+                return ApiError::BadRequest(
+                    "mode=visual 需要 ref_boxes（x1,y1,x2,y2，多个用 ; 分隔）".to_string(),
+                )
+                .into_response();
+            }
+            let boxes = match parse_boxes(raw) {
+                Ok(v) => v,
+                Err(e) => return e.into_response(),
+            };
+            let classes = match parse_slot_list(opts.ref_classes.as_deref()) {
+                Ok(v) if v.is_empty() => vec![0usize; boxes.len()],
+                Ok(v) => {
+                    if v.len() != boxes.len() {
+                        return ApiError::BadRequest(format!(
+                            "ref_classes 有 {} 项，ref_boxes 有 {} 个框，数量要一致",
+                            v.len(),
+                            boxes.len()
+                        ))
+                        .into_response();
+                    }
+                    v
+                }
+                Err(e) => return e.into_response(),
+            };
+            let names = opts
+                .ref_names
+                .as_deref()
+                .map(|s| {
+                    s.split(';')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            crate::engine::prompt::PromptInput::Visual {
+                reference: ref_img,
+                boxes,
+                classes,
+                names,
+            }
+        }
+        "text" => {
+            let words = opts
+                .words
+                .as_deref()
+                .map(|s| {
+                    s.split([',', '，'])
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if words.is_empty() {
+                return ApiError::BadRequest(
+                    "mode=text 需要 words（逗号分隔，如 \"person,bus\"）".to_string(),
+                )
+                .into_response();
+            }
+            crate::engine::prompt::PromptInput::Text { words }
+        }
+        other => {
+            return ApiError::BadRequest(format!("未知 mode {other:?}（可选 visual / text）"))
+                .into_response()
+        }
+    };
+
+    // 目标图：复用找图的取图逻辑（含截屏/截窗口的偏移回填）
+    let find_opts = FindOptions {
+        image: opts.image.clone(),
+        region: opts.region,
+        title: opts.title.clone(),
+        hwnd: opts.hwnd,
+        ..Default::default()
+    };
+    let (hay, off_x, off_y) = match acquire_haystack(source, &find_opts, image_bytes.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
+        };
+
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        // 端到端头不做 NMS，暴露 iou 只会让人以为它生效了（同语义找图）
+        iou_thresh: 0.7,
+        class_filter: opts.class_filter.clone().unwrap_or_default(),
+    };
+
+    let dets = match state
+        .prompt_find(input, DynamicImage::ImageRgb8(hay), detect)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    Json(ApiResp::ok(to_find_data_from_dets(
+        &dets,
+        (off_x, off_y),
+        source,
+        Some("yoloe-prompt".to_string()),
+        opts.max_results.unwrap_or(8),
+        t0,
+    )))
+    .into_response()
+}
+
+/// 取参考图：multipart 的文件字段优先，其次 `ref_image` 的 base64。
+fn load_ref_image(
+    ref_bytes: Option<&[u8]>,
+    opts: &crate::api::dto::PromptOptions,
+) -> Result<DynamicImage, ApiError> {
+    if let Some(b) = ref_bytes {
+        return decode_image(b).map_err(ApiError::BadRequest);
+    }
+    if let Some(b64) = opts.ref_image.as_deref().filter(|s| !s.trim().is_empty()) {
+        let raw = decode_base64_image(b64).map_err(ApiError::BadRequest)?;
+        return decode_image(&raw).map_err(ApiError::BadRequest);
+    }
+    Err(ApiError::BadRequest(
+        "mode=visual 需要参考图：multipart 传 ref_image 文件，或 JSON 里给 ref_image（base64）"
+            .to_string(),
+    ))
+}
+
+/// 解析 `x1,y1,x2,y2`（多个用 `;` 分隔）。坐标必须是有限的四个数。
+fn parse_boxes(s: &str) -> Result<Vec<[f32; 4]>, ApiError> {
+    let mut out = Vec::new();
+    for part in s.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let nums: Vec<f32> = part
+            .split([',', '，'])
+            .map(|p| p.trim().parse::<f32>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| {
+                ApiError::BadRequest(format!("ref_boxes 的 {part:?} 不是四个数（x1,y1,x2,y2）"))
+            })?;
+        if nums.len() != 4 {
+            return Err(ApiError::BadRequest(format!(
+                "ref_boxes 的 {part:?} 有 {} 个数，要 4 个",
+                nums.len()
+            )));
+        }
+        if !nums.iter().all(|v| v.is_finite()) {
+            return Err(ApiError::BadRequest(format!("ref_boxes 的 {part:?} 含非有限值")));
+        }
+        if nums[2] <= nums[0] || nums[3] <= nums[1] {
+            return Err(ApiError::BadRequest(format!(
+                "ref_boxes 的 {part:?} 宽或高不为正（要 x2>x1 且 y2>y1）"
+            )));
+        }
+        out.push([nums[0], nums[1], nums[2], nums[3]]);
+    }
+    if out.is_empty() {
+        return Err(ApiError::BadRequest("ref_boxes 是空的".to_string()));
+    }
+    Ok(out)
+}
+
+/// 解析 `;` 或 `,` 分隔的非负整数列表（`ref_classes` 用）。
+fn parse_slot_list(s: Option<&str>) -> Result<Vec<usize>, ApiError> {
+    let Some(s) = s.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    s.split([';', ',', '，'])
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            p.parse::<usize>()
+                .map_err(|_| ApiError::BadRequest(format!("{p:?} 不是非负整数")))
+        })
+        .collect()
+}
+
+struct ParsedPrompt {
+    opts: crate::api::dto::PromptOptions,
+    /// multipart 里直接传的目标图字节
+    image_bytes: Option<Vec<u8>>,
+    /// multipart 里直接传的参考图字节
+    ref_bytes: Option<Vec<u8>>,
+}
+
+async fn parse_prompt(req: Request) -> Result<ParsedPrompt, ApiError> {
+    use crate::api::dto::PromptOptions;
+
+    let is_multipart = req
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_start().starts_with("multipart/form-data"))
+        .unwrap_or(false);
+
+    if !is_multipart {
+        let bytes = to_bytes(req.into_body(), MAX_BODY)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("读取请求体失败: {e}")))?;
+        let opts: PromptOptions = serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::BadRequest(format!("JSON 解析失败: {e}")))?;
+        return Ok(ParsedPrompt {
+            opts,
+            image_bytes: None,
+            ref_bytes: None,
+        });
+    }
+
+    let mut mp = Multipart::from_request(req, &())
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("multipart 解析失败: {e}")))?;
+    let mut image_bytes: Option<Vec<u8>> = None;
+    let mut ref_bytes: Option<Vec<u8>> = None;
+    let mut fields: HashMap<String, String> = HashMap::new();
+
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("multipart 字段读取失败: {e}")))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "image" | "file" => {
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::BadRequest(format!("读取 image 失败: {e}")))?;
+                image_bytes = Some(data.to_vec());
+            }
+            "ref_image" | "ref" => {
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::BadRequest(format!("读取 ref_image 失败: {e}")))?;
+                ref_bytes = Some(data.to_vec());
+            }
+            _ => {
+                let txt = field.text().await.map_err(|e| {
+                    ApiError::BadRequest(format!("multipart 字段 {name} 读取失败: {e}"))
+                })?;
+                fields.insert(name, txt);
+            }
+        }
+    }
+
+    let opts = PromptOptions {
+        mode: fields.get("mode").cloned(),
+        image: None,
+        ref_image: None,
+        ref_boxes: fields.get("ref_boxes").cloned(),
+        ref_classes: fields.get("ref_classes").cloned(),
+        ref_names: fields.get("ref_names").cloned(),
+        words: fields.get("words").cloned(),
+        conf: fields.get("conf").and_then(|s| s.trim().parse().ok()),
+        max_results: fields.get("max_results").and_then(|s| s.trim().parse().ok()),
+        source: fields.get("source").cloned(),
+        title: fields.get("title").cloned(),
+        hwnd: fields.get("hwnd").and_then(|s| s.trim().parse().ok()),
+        region: fields.get("region").and_then(|s| parse_region_str(s)),
+        class_filter: fields.get("class_filter").and_then(|s| parse_id_list(s)),
+    };
+    Ok(ParsedPrompt {
+        opts,
+        image_bytes,
+        ref_bytes,
+    })
+}
+
 /// 用 yolov8n+coco 时检出的是人/车而不是文字块——**这是预期**，pipeline 面向
 /// 自训检测模型（见 docs/ENGINES.md 6.3）。
-async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let t0 = Instant::now();
+async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {    let t0 = Instant::now();
     let (img, opts) = match parse_recognize(req).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
@@ -1610,7 +1943,7 @@ mod tests {
     /// 那样 404 提示会指错地方。
     #[test]
     fn paths_table_covers_all_endpoints() {
-        assert_eq!(PATHS.len(), 17, "端点数量变了就要同步 PATHS");
+        assert_eq!(PATHS.len(), 18, "端点数量变了就要同步 PATHS");
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
         }

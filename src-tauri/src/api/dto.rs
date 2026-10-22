@@ -298,6 +298,57 @@ pub struct FindOptions {
     pub class_filter: Option<Vec<usize>>,
 }
 
+/// 运行时提示找图（`/vision/prompt`）的入参。
+///
+/// 与 `FindOptions` 分开是刻意的：提示找图的「提示」有两条互斥的路
+/// （图找图 / 语言找图），塞进 `FindOptions` 会让那个结构变成大杂烩，
+/// 而且模板找图的字段在这里一个都用不上。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PromptOptions {
+    /// 提示方式：`visual`（图找图，缺省）/ `text`（语言找图）
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 目标图 base64。用 `source=screen/window` 时可不传
+    #[serde(default)]
+    pub image: Option<String>,
+    /// 图找图：参考图 base64（必填）
+    #[serde(default)]
+    pub ref_image: Option<String>,
+    /// 图找图：参考框，`x1,y1,x2,y2`，多个用 `;` 分隔（**原图坐标**）
+    #[serde(default)]
+    pub ref_boxes: Option<String>,
+    /// 图找图：每个框的类号，`;` 分隔；缺省全部算 0 类（合成一个提示）
+    #[serde(default)]
+    pub ref_classes: Option<String>,
+    /// 图找图：每个类的显示名，`;` 分隔；缺省回落「参考目标」
+    #[serde(default)]
+    pub ref_names: Option<String>,
+    /// 语言找图：提示词，逗号分隔（如 `person,bus`）
+    #[serde(default)]
+    pub words: Option<String>,
+    /// 置信度下限，缺省 0.25
+    #[serde(default)]
+    pub conf: Option<f32>,
+    /// 最多返回几个命中，缺省 8
+    #[serde(default)]
+    pub max_results: Option<usize>,
+    /// 目标图来源：`image`（缺省）/ `screen` / `window`
+    #[serde(default)]
+    pub source: Option<String>,
+    /// `source=window` 时的窗口标题（精确优先，其次子串）
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `source=window` 时的窗口句柄，优先于 `title`
+    #[serde(default)]
+    pub hwnd: Option<i64>,
+    /// `source=screen` 时的截取区域 `[x, y, w, h]`
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
+    /// 只保留这些提示槽（缺省全部）
+    #[serde(default)]
+    pub class_filter: Option<Vec<usize>>,
+}
+
 /// 单个命中。
 ///
 /// 模板找图与语义找图**共用这一个结构**，脚本切模式不用改解析代码。

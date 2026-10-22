@@ -747,6 +747,138 @@ fn yuyizhaotu_route_exists_and_validates_params() {
     assert!(body.contains("conf"), "{body}");
 }
 
+/// 提示找图的参数校验。**不加载模型**——所以它验的是「路由接上了、错误提示
+/// 是人话」这两件事，而不是识别效果（那由 `yoloe_prompt_parity` 负责）。
+#[test]
+fn vision_prompt_route_exists_and_validates_params() {
+    let srv = start_server_without_engine();
+    let scene = synth_scene(120, 90, 20, 20, 30, 24);
+    let img = png_b64(&scene);
+
+    // mode 写错 → 400（不是 404，证明路由已注册），且把可选值列出来
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"magic\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(bad mode) -> {status} {body}");
+    assert_eq!(status, 400, "未知 mode 应 400 而不是 404: {body}");
+    assert!(body.contains("visual") && body.contains("text"), "{body}");
+
+    // mode=visual 缺参考图 → 400，提示里要说清「参考图」和怎么传
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"visual\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(visual no ref) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("ref_image"), "{body}");
+
+    // 有参考图但没框 → 400（框是提示的全部内容，缺了没法算 pe）
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"visual\",\"ref_image\":\"{img}\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(visual no boxes) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("ref_boxes"), "{body}");
+
+    // 框不是四个数 → 400
+    let payload = format!(
+        "{{\"image\":\"{img}\",\"mode\":\"visual\",\"ref_image\":\"{img}\",\"ref_boxes\":\"1,2,3\"}}"
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(bad boxes) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("4 个"), "{body}");
+
+    // 宽高不为正 → 400（框反了是手滑，不该走到推理）
+    let payload = format!(
+        "{{\"image\":\"{img}\",\"mode\":\"visual\",\"ref_image\":\"{img}\",\"ref_boxes\":\"10,10,5,5\"}}"
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(inverted box) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("x2>x1"), "{body}");
+
+    // mode=text 没给词 → 400
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"text\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(text no words) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("words"), "{body}");
+
+    // 走到这一步说明参数校验都放行了——真跑推理的验收在下面的 ignored 用例里。
+}
+
+/// 提示找图真跑一遍（HTTP 层全链路）：文本提示 → `pe` → 检测 → 出参。
+///
+/// 这里验的是 **HTTP 这一层**：JSON 解析、`acquire_haystack`、出参组装、
+/// `found/x/y/class_name` 这些字段是不是脚本能直接用的形状。
+/// 数值是否与 ultralytics 一致由 `yoloe_prompt_parity` 负责，两者不重复。
+///
+/// 跑：`cargo test --test api_smoke -- --ignored --nocapture vision_prompt`
+#[test]
+#[ignore = "重量级：需要 models/yoloe 三件套 + mobileclip2_b.ts + onnxruntime.dll"]
+fn vision_prompt_finds_target_with_text_prompt() {
+    let root = workspace_root();
+    let srv = start_server_for_detect();
+
+    let img = png_b64(&image::open(root.join("assets").join("bus.png")).unwrap().to_rgb8());
+    // source 缺省是 image：搜索图就是上传的这张，坐标是图内坐标（origin 为 0）
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"text\",\"words\":\"person,bus\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(text) -> {status}\n{}", &body[..body.len().min(1200)]);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json_bool(&body, "found"), Some(true), "{body}");
+    assert!(json_num(&body, "elapsed_ms").is_some(), "应回传耗时: {body}");
+    assert_eq!(
+        json_num(&body, "origin_x"),
+        Some(0.0),
+        "source=image 时原点必须是 0: {body}"
+    );
+    // 类名就是提示词本身——这是「语言找图」对脚本最重要的可读性来源
+    assert!(
+        body.contains("\"person\"") || body.contains("\"bus\""),
+        "命中的 class_name 应当是提示词: {body}"
+    );
+}
+
 /// 语义找图真跑一遍：需要 `models/detect/yolo/` 下有**认得 assets/bus.png** 的模型。
 ///
 /// 目录为空时自动跳过（出厂状态就是这个，和 `yoloe_smoke` 一个口径）。

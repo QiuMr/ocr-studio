@@ -102,14 +102,14 @@ export function Playground({
               ? "丢一张图进去，看 /ocr/shibie 返回什么。放进来就自动跑，不用点按钮。"
               : tab === "scan"
                 ? "丢一张图进去，把里面的二维码、条形码内容扫出来。放进来就自动扫。"
-                : // 两种找图模式的「要找什么」不一样（小图 vs 模型），这里别写死
-                  // 某一个端点路径——语义找图走的是 /ocr/yuyizhaotu。
-                  "给一张大图，再给一张小图或一个检测模型，看找不找得到位置。"}
+                : // 三种找图模式的「要找什么」不一样（小图 / 模型 / 参考图或提示词），
+                  // 这里别写死某一个端点路径。
+                  "给一张大图，再告诉它要找什么——一张小图、一个检测模型，或一句提示。"}
           </p>
         </div>
 
         {/* 用普通按钮而不是 Tab 条：三个功能差别很大，分开显示标题更清楚 */}
-        <div className="flex items-center gap-1 rounded-[10px] bg-neutral-100 p-1">
+        <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-1">
           {(
             [
               { v: "ocr" as OcrTab, label: "文字识别", icon: <Type className="h-3.5 w-3.5" /> },
@@ -122,7 +122,7 @@ export function Playground({
               type="button"
               onClick={() => onTabChange(it.v)}
               className={cn(
-                "flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12.5px] leading-none transition-colors",
+                "flex h-7 items-center gap-1.5 rounded-md px-3 text-[12px] leading-none transition-colors",
                 tab === it.v
                   ? "shadow-card bg-white font-semibold text-neutral-900"
                   : "font-medium text-neutral-500 hover:text-neutral-800",
@@ -474,7 +474,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
       {/* 拖拽遮罩 */}
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[14px] bg-blue-50/85 backdrop-blur-[1px]">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-blue-50/85 backdrop-blur-[1px]">
           <div className="flex flex-col items-center gap-2 text-blue-700">
             <ImagePlus className="h-8 w-8" />
             <span className="text-[14px] font-bold">松手就能识别</span>
@@ -501,7 +501,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         />
 
         {busy && (
-          <span className="flex items-center gap-1.5 text-[12.5px] text-neutral-500">
+          <span className="flex items-center gap-1.5 text-[13px] text-neutral-500">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             正在识别…
           </span>
@@ -529,7 +529,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                 if (b64Ref.current) void runRecognize();
               }}
             >
-              <SelectTrigger className="h-8 w-[176px] text-[12.5px]">
+              <SelectTrigger className="h-8 w-[176px] text-[12px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -571,7 +571,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
               {regionResult.elapsed_ms} ms
             </Badge>
           )}
-          <span className="hidden items-center gap-1 text-[11.5px] text-neutral-400 sm:flex">
+          <span className="hidden items-center gap-1 text-[12px] text-neutral-400 sm:flex">
             <Keyboard className="h-3 w-3" />
             Ctrl+V
           </span>
@@ -589,7 +589,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             </Button>
 
             {moreOpen && (
-              <div className="absolute right-0 top-full z-30 mt-1.5 w-[268px] rounded-[12px] border border-neutral-200 bg-white p-3 shadow-[0_12px_32px_rgba(16,24,40,0.14)]">
+              <div className="absolute right-0 top-full z-30 mt-1.5 w-[268px] rounded-xl border border-neutral-200 bg-white p-3 shadow-[0_12px_32px_rgba(16,24,40,0.14)]">
                 <ToggleRow
                   id="show-boxes"
                   checked={showBoxes}
@@ -681,7 +681,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             {/* h-8：与右侧卡片头（含「复制 JSON」按钮）保持同一行高，
                 否则左标题会比右标题高 7px —— 一眼就能看出的错位 */}
             <div className="flex h-8 items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+              <CardTitle className="flex items-center gap-2 text-[13px] font-medium leading-none text-neutral-500">
                 <FileImage className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 {src ? "原图" : "待识别的图片"}
                 {size.width > 0 && (
@@ -708,7 +708,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                   onSelect={onSelectRegion}
                 />
                 {regionMode && (
-                  <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-sky-600">
+                  <p className="mt-1.5 flex items-center gap-1.5 text-[12px] text-sky-600">
                     <Crosshair className="h-3.5 w-3.5" />
                     {selection
                       ? `已选 ${selection[2]}×${selection[3]} @(${selection[0]}, ${selection[1]})，重新拖可换区域`
@@ -725,7 +725,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         <Card className="flex min-h-[360px] flex-col overflow-hidden">
           <CardHeader className="pb-2">
             <div className="flex h-8 items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-[12.5px] font-medium leading-none text-neutral-500">
+              <CardTitle className="flex items-center gap-2 text-[13px] font-medium leading-none text-neutral-500">
                 <ScanText className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 {regionResult
                   ? "区域识别结果"
@@ -756,7 +756,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             {regionResult ? (
               <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
                 <div className="p-3">
-                  <pre className="selectable whitespace-pre-wrap font-sans text-[13px] leading-6 text-neutral-800">
+                  <pre className="selectable whitespace-pre-wrap font-sans text-[13px] leading-[1.7] text-neutral-800">
                     {regionResult.text || "（框里没识别到文字）"}
                   </pre>
                   {regionResult.lines.length > 0 && (
@@ -770,10 +770,10 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                             {i + 1}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <div className="selectable truncate text-[12.5px] text-neutral-900">
+                            <div className="selectable truncate text-[13px] text-neutral-900">
                               {l.text}
                             </div>
-                            <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                            <div className="mt-0.5 font-mono text-[11px] text-neutral-400">
                               置信 {l.score.toFixed(3)} · 位置 ({l.box[0][0].toFixed(0)},{" "}
                               {l.box[0][1].toFixed(0)})
                             </div>
@@ -801,19 +801,19 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="selectable truncate text-[12.5px] font-medium text-neutral-900">
+                          <span className="selectable truncate text-[13px] font-medium text-neutral-900">
                             {r.class_name}
                           </span>
-                          <span className="font-mono text-[10.5px] text-neutral-400">
+                          <span className="font-mono text-[11px] text-neutral-400">
                             置信 {r.score.toFixed(3)}
                           </span>
                         </div>
                         {r.text ? (
-                          <div className="selectable mt-0.5 whitespace-pre-wrap text-[12.5px] leading-5 text-neutral-700">
+                          <div className="selectable mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-neutral-700">
                             {r.text}
                           </div>
                         ) : (
-                          <div className="mt-0.5 text-[11.5px] text-neutral-400">
+                          <div className="mt-0.5 text-[12px] text-neutral-400">
                             （框内没识别出文字）
                           </div>
                         )}
@@ -821,7 +821,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                     </li>
                   ))}
                   {pipeResult.regions.length === 0 && (
-                    <li className="px-3 py-8 text-center text-[12.5px] text-neutral-400">
+                    <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
                       （没有检出区域）
                     </li>
                   )}
@@ -843,10 +843,10 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                         {d.class_id}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="selectable truncate text-[12.5px] text-neutral-900">
+                        <div className="selectable truncate text-[13px] text-neutral-900">
                           {d.class_name}
                         </div>
-                        <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                        <div className="mt-0.5 font-mono text-[11px] text-neutral-400">
                           置信 {d.score.toFixed(3)} · 位置 ({d.box[0][0].toFixed(0)},{" "}
                           {d.box[0][1].toFixed(0)}) - ({d.box[2][0].toFixed(0)},{" "}
                           {d.box[2][1].toFixed(0)})
@@ -855,7 +855,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                     </li>
                   ))}
                   {detResult.detections.length === 0 && (
-                    <li className="px-3 py-8 text-center text-[12.5px] text-neutral-400">
+                    <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
                       （没有检出目标，可以试着把置信度调低）
                     </li>
                   )}
@@ -884,7 +884,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
 
                 <TabsContent value="text" className="mt-2 min-h-0 flex-1">
                   <ScrollArea className="h-full rounded-lg bg-neutral-50/70 p-3">
-                    <pre className="selectable whitespace-pre-wrap font-sans text-[13px] leading-6 text-neutral-800">
+                    <pre className="selectable whitespace-pre-wrap font-sans text-[13px] leading-[1.7] text-neutral-800">
                       {result.text || "（没识别到文字）"}
                     </pre>
                   </ScrollArea>
@@ -902,10 +902,10 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                             {i + 1}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <div className="selectable truncate text-[12.5px] text-neutral-900">
+                            <div className="selectable truncate text-[13px] text-neutral-900">
                               {l.text}
                             </div>
-                            <div className="mt-0.5 font-mono text-[10.5px] text-neutral-400">
+                            <div className="mt-0.5 font-mono text-[11px] text-neutral-400">
                               置信 {l.score.toFixed(3)} · 检测 {l.det_score.toFixed(3)}
                               {l.rotated ? " · 已翻转" : ""}
                             </div>
@@ -913,7 +913,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                         </li>
                       ))}
                       {lines.length === 0 && (
-                        <li className="px-3 py-8 text-center text-[12.5px] text-neutral-400">
+                        <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
                           （没识别到文字）
                         </li>
                       )}
@@ -924,18 +924,18 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                 <TabsContent value="chars" className="mt-2 min-h-0 flex-1">
                   <ScrollArea className="h-full rounded-lg bg-neutral-50/70 p-3">
                     {charBusy && (
-                      <div className="py-6 text-center text-[12.5px] text-neutral-400">
+                      <div className="py-6 text-center text-[13px] text-neutral-400">
                         正在做逐字定位…
                       </div>
                     )}
                     {!charBusy && !detail && (
-                      <div className="py-6 text-center text-[12.5px] text-neutral-400">
+                      <div className="py-6 text-center text-[13px] text-neutral-400">
                         没有逐字数据
                       </div>
                     )}
                     {!charBusy && detail && (
                       <div className="flex flex-col gap-3">
-                        <p className="text-[11.5px] leading-5 text-neutral-500">
+                        <p className="text-[12px] leading-5 text-neutral-500">
                           共 {detail.char_count} 字。图中青色细框就是一个字的范围 ——
                           它是按识别模型的帧对齐推算出来的，字距不均时会有几像素偏差。
                         </p>
@@ -970,7 +970,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
 
                 <TabsContent value="json" className="mt-2 min-h-0 flex-1">
                   <ScrollArea className="h-full rounded-lg bg-neutral-50/70 p-3">
-                    <pre className="selectable font-mono text-[11px] leading-5 text-neutral-700">
+                    <pre className="selectable font-mono text-[11px] leading-[1.7] text-neutral-700">
                       {JSON.stringify(result.lines, null, 2)}
                     </pre>
                   </ScrollArea>
@@ -979,7 +979,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
             ) : busy ? (
               <div className="flex h-full min-h-[260px] flex-col items-center justify-center gap-2 rounded-xl bg-neutral-50/50 text-neutral-400">
                 <Loader2 className="h-6 w-6 animate-spin" />
-                <span className="text-[12.5px]">正在识别，稍等一下…</span>
+                <span className="text-[13px]">正在识别，稍等一下…</span>
               </div>
             ) : (
               <EmptyState
@@ -997,14 +997,14 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
       {(detResult || pipeResult) &&
         (detResult?.detections.length ?? 0) + (pipeResult?.regions.length ?? 0) > 0 &&
         showBoxes && (
-          <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+          <div className="flex items-center gap-1.5 text-[12px] text-neutral-400">
             {pipeResult
               ? "框上的文字是「类别 · 框内识别出的第一行」，右侧列表有完整文字。"
               : "框上的文字是「类别 + 置信度」，右侧列表的编号就是类别 id。"}
           </div>
         )}
       {!detResult && !pipeResult && result && result.lines.length > 0 && showBoxes && (
-        <div className="flex items-center gap-1.5 text-[11.5px] text-neutral-400">
+        <div className="flex items-center gap-1.5 text-[12px] text-neutral-400">
           图上的蓝框就是每一行的位置，编号与「逐行」列表一一对应。
         </div>
       )}
@@ -1033,7 +1033,7 @@ function ToggleRow({
       <div className="min-w-0 flex-1">
         <Label
           htmlFor={id}
-          className="flex cursor-pointer items-center gap-1.5 text-[12.5px] leading-none text-neutral-800"
+          className="flex cursor-pointer items-center gap-1.5 text-[13px] leading-none text-neutral-800"
         >
           {icon && <span className="text-neutral-400">{icon}</span>}
           {label}
@@ -1053,19 +1053,19 @@ function ToggleRow({
  */
 function DropZone({ onPick }: { onPick: () => void }) {
   return (
-    <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-[14px] border-2 border-dashed border-neutral-200 bg-neutral-50/50 px-6 py-8 text-center">
-      <div className="flex h-14 w-14 items-center justify-center rounded-[16px] bg-white text-blue-500 shadow-card">
+    <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-xl border-2 border-dashed border-neutral-200 bg-neutral-50/50 px-6 py-8 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-white text-blue-500 shadow-card">
         <ImagePlus className="h-6 w-6" strokeWidth={1.8} />
       </div>
-      <p className="mt-4 text-[15px] font-bold text-neutral-800">把图片拖到这里</p>
-      <p className="mt-1 text-[12.5px] text-neutral-500">放进来就自动识别，不用再点别的</p>
+      <p className="mt-4 text-[16px] font-bold text-neutral-800">把图片拖到这里</p>
+      <p className="mt-1 text-[13px] text-neutral-500">放进来就自动识别，不用再点别的</p>
 
       <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11.5px] text-neutral-600 ring-1 ring-neutral-200/80">
+        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] text-neutral-600 ring-1 ring-neutral-200/80">
           <Clipboard className="h-3.5 w-3.5 text-neutral-400" />
           按 Ctrl+V 粘贴截图
         </span>
-        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11.5px] text-neutral-600 ring-1 ring-neutral-200/80">
+        <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] text-neutral-600 ring-1 ring-neutral-200/80">
           <Keyboard className="h-3.5 w-3.5 text-neutral-400" />
           Win+Shift+S 截图后直接粘
         </span>

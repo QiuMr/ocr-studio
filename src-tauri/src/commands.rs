@@ -1345,6 +1345,178 @@ pub async fn find_semantic(
     })
 }
 
+/// 运行时提示找图参数。与 `SemanticFindArgs` 的差别：语义找图的目标是**模型固化的
+/// 类别**，这里的目标由调用方**当场给**——给图（`ref_image` + `ref_boxes`）或给词
+/// （`words`），换目标只换参数、不换模型。
+#[derive(Debug, serde::Deserialize)]
+pub struct PromptFindArgs {
+    /// `image` / `screen` / `window`
+    pub source: String,
+    /// `visual`（图找图，缺省）或 `text`（语言找图）
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub hwnd: Option<i64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub region: Option<[i32; 4]>,
+    /// 参考图（PNG/JPG 的 base64），`mode=visual` 必填
+    #[serde(default)]
+    pub ref_image: Option<String>,
+    /// 参考框 `[x1,y1,x2,y2]`（原图像素坐标），`mode=visual` 必填，可多个
+    #[serde(default)]
+    pub ref_boxes: Option<Vec<[f32; 4]>>,
+    /// 每个参考框归属的「槽」；同槽的多个框取**并集**当作一个提示。缺省全 0
+    #[serde(default)]
+    pub ref_classes: Option<Vec<usize>>,
+    /// 槽对应的名字（仅用于回显，不影响匹配）。缺省用「目标1/目标2…」
+    #[serde(default)]
+    pub ref_names: Option<Vec<String>>,
+    /// 提示词列表，`mode=text` 必填
+    #[serde(default)]
+    pub words: Option<Vec<String>>,
+    #[serde(default)]
+    pub conf: Option<f32>,
+    /// 只保留这些槽（`class_filter` 在这里是**提示槽下标**，不是模型类别）
+    #[serde(default)]
+    pub class_filter: Option<Vec<usize>>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+/// 运行时提示找图：与 HTTP 的 `/vision/prompt` 等价，出参与 `find_image` 同构。
+///
+/// 与 `find_semantic` 的区别：那个用**烘焙过提示**的模型（换目标要重导 ONNX），
+/// 这个把提示当**额外输入**（换目标只换参数）。代价是要多带两个编码器
+/// （视觉 12MB + 文本 250MB 级），首次调用才加载。
+#[tauri::command]
+pub async fn find_prompt(
+    state: State<'_, Arc<AppState>>,
+    args: PromptFindArgs,
+) -> Result<FindOut, String> {
+    let t0 = Instant::now();
+    let source = FindSource::parse(&args.source)
+        .ok_or_else(|| format!("未知来源 {:?}（可选 image/screen/window）", args.source))?;
+    let mode = args
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("visual")
+        .to_ascii_lowercase();
+
+    let conf = args.conf.unwrap_or(0.25);
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return Err(format!("conf 必须在 0..1，收到 {conf}"));
+    }
+
+    // 提示先组好再取目标图：提示参数错的时候不该先去截一次屏
+    let input = match mode.as_str() {
+        "visual" => {
+            let b64 = args
+                .ref_image
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "mode=visual 需要参考图 ref_image（base64）".to_string())?;
+            let raw = crate::api::dto::decode_base64_image(b64)?;
+            let reference = crate::api::dto::decode_image(&raw)?;
+
+            let boxes = args.ref_boxes.clone().unwrap_or_default();
+            if boxes.is_empty() {
+                return Err("mode=visual 需要至少一个参考框 ref_boxes".to_string());
+            }
+            for b in &boxes {
+                if !b.iter().all(|v| v.is_finite()) {
+                    return Err(format!("参考框 {b:?} 含非有限值"));
+                }
+                if b[2] <= b[0] || b[3] <= b[1] {
+                    return Err(format!("参考框 {b:?} 宽或高不为正（要 x2>x1 且 y2>y1）"));
+                }
+            }
+            let classes = match args.ref_classes.clone() {
+                Some(v) if !v.is_empty() => {
+                    if v.len() != boxes.len() {
+                        return Err(format!(
+                            "ref_classes 有 {} 项，ref_boxes 有 {} 个框，数量要一致",
+                            v.len(),
+                            boxes.len()
+                        ));
+                    }
+                    v
+                }
+                _ => vec![0usize; boxes.len()],
+            };
+            crate::engine::prompt::PromptInput::Visual {
+                reference,
+                boxes,
+                classes,
+                names: args.ref_names.clone().unwrap_or_default(),
+            }
+        }
+        "text" => {
+            let words: Vec<String> = args
+                .words
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|w| w.trim().to_string())
+                .filter(|w| !w.is_empty())
+                .collect();
+            if words.is_empty() {
+                return Err("mode=text 需要 words（至少一个提示词）".to_string());
+            }
+            crate::engine::prompt::PromptInput::Text { words }
+        }
+        other => return Err(format!("未知 mode {other:?}（可选 visual / text）")),
+    };
+
+    let find_opts = crate::api::dto::FindOptions {
+        image: args.image.clone(),
+        hwnd: args.hwnd,
+        title: args.title.clone(),
+        region: args.region,
+        ..Default::default()
+    };
+    let (hay, ox, oy) =
+        routes::acquire_haystack(source, &find_opts, None).map_err(|e| e.message())?;
+
+    let detect = crate::engine::DetectOptions {
+        conf_thresh: conf,
+        // 端到端头不做 NMS，暴露 iou 只会让人以为它生效了（同语义找图）
+        iou_thresh: 0.7,
+        class_filter: args.class_filter.clone().unwrap_or_default(),
+    };
+
+    // 只有屏幕/窗口来源需要回传截图（图片来源调用方本来就有原图）
+    let need_preview = source != FindSource::Image;
+    let preview_src = if need_preview { Some(hay.clone()) } else { None };
+
+    let dets = state
+        .prompt_find(input, image::DynamicImage::ImageRgb8(hay), detect)
+        .await
+        .map_err(|e| e.message())?;
+
+    let preview = match preview_src {
+        Some(img) => Some(rgb_to_png_b64(&img)?),
+        None => None,
+    };
+
+    Ok(FindOut {
+        data: routes::to_find_data_from_dets(
+            &dets,
+            (ox, oy),
+            source,
+            Some("yoloe-prompt".to_string()),
+            args.max_results.unwrap_or(8),
+            t0,
+        ),
+        preview,
+    })
+}
+
 // 命令注册集中在 `lib.rs` 的 `invoke_handler` 中，用 `tauri::generate_handler!`
 // 引用本模块的各个函数（宏接受路径，无需额外包装）。
 

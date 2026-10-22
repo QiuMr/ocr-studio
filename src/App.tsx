@@ -173,7 +173,7 @@ export default function App() {
           </aside>
 
           {/* 主区：白色圆角块。滚动条由它自己管，切页面时不会带着别页的滚动位置 */}
-          <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[14px] bg-white">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-white">
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
               <div
                 key={page}
@@ -223,7 +223,7 @@ function NavItem({
       aria-current={active ? "page" : undefined}
       className={cn(
         // leading-none：13px 文字默认行高 1.5（19.5px），配 18px 图标会看起来偏下
-        "group flex h-9 items-center rounded-[10px] text-[13px] leading-none",
+        "group flex h-9 items-center rounded-md text-[13px] leading-none",
         collapsed ? "w-9 justify-center" : "w-full gap-2.5 px-2.5",
         // 浅灰外壳上，选中项用**纯白浮起**（VS Code / Notion 的做法）：
         // 在 #f7f7f8 底上加深灰块会显得脏，白色 + 极淡描边 + 微阴影更干净

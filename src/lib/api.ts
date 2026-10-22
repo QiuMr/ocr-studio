@@ -24,6 +24,7 @@ import type {
   RecognizeResult,
   RegionOcrResult,
   BarcodeResult,
+  PromptFindArgs,
   SemanticFindArgs,
   WindowInfo,
 } from "../types";
@@ -367,6 +368,32 @@ export async function findSemantic(
     return invoke<FindResult & { preview?: string }>("find_semantic", { args });
   }
   const res = await fetch(`${HTTP_BASE}/ocr/yuyizhaotu`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as FindResult;
+}
+
+/**
+ * 提示找图：目标由调用方当场给——给参考图 + 框（图找图），或给提示词（语言找图）。
+ *
+ * 与 `findSemantic` 的差别是**换目标不用换模型**：语义找图的提示在导出时就
+ * 烘焙进权重了，这里是把提示当额外输入。出参与 `findImage` 完全同构，
+ * 额外多 `engine`（固定 `yoloe-prompt`）与命中里的 `class_id`/`class_name`
+ * （语言找图时类名就是提示词本身）。
+ */
+export async function findPrompt(
+  args: PromptFindArgs,
+): Promise<FindResult & { preview?: string }> {
+  if (isTauri()) {
+    return invoke<FindResult & { preview?: string }>("find_prompt", { args });
+  }
+  const res = await fetch(`${HTTP_BASE}/vision/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args),

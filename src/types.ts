@@ -181,8 +181,11 @@ export interface PipelineResult {
 export type FindSource = "image" | "screen" | "window";
 export type FindMode = "exact" | "loose";
 
-/** 找图模式：模板找图（比像素） / 语义找图（用检测模型认目标） */
-export type FindKind = "template" | "semantic";
+/** 找图模式：模板找图（比像素） / 语义找图（模型认固定类别） / 提示找图（当场给目标） */
+export type FindKind = "template" | "semantic" | "prompt";
+
+/** 提示找图的两种给目标方式：给图（参考图 + 框）/ 给词 */
+export type PromptMode = "visual" | "text";
 
 export interface FindHit {
   x: number;
@@ -252,6 +255,40 @@ export interface SemanticFindArgs {
   /** 检测置信度下限，默认 0.25 */
   conf?: number;
   /** 只保留这些类别 id；空 = 全部 */
+  class_filter?: number[];
+  max_results?: number;
+}
+
+/**
+ * 提示找图参数：目标由调用方**当场给**，不是模型固化的类别。
+ *
+ * - `mode=visual`：给参考图 + 一个（或多个）框，找「跟框里这块像的」。
+ * - `mode=text`：给几个词，找「语义上是的」。
+ *
+ * 与 `SemanticFindArgs` 的核心差别就是「换目标要不要换模型」：语义找图要，
+ * 这里不要。
+ */
+export interface PromptFindArgs {
+  source: FindSource;
+  /** `visual`（缺省）或 `text` */
+  mode?: PromptMode;
+  image?: string;
+  hwnd?: number;
+  title?: string;
+  region?: [number, number, number, number];
+  /** 参考图 base64（`mode=visual` 必填） */
+  ref_image?: string;
+  /** 参考框 `[x1,y1,x2,y2]`，原图像素坐标（`mode=visual` 必填） */
+  ref_boxes?: [number, number, number, number][];
+  /** 每个参考框归属的「槽」，同槽取并集。缺省全 0 */
+  ref_classes?: number[];
+  /** 槽的名字（仅回显用） */
+  ref_names?: string[];
+  /** 提示词列表（`mode=text` 必填） */
+  words?: string[];
+  /** 置信度下限，默认 0.25 */
+  conf?: number;
+  /** 只保留这些提示槽（不是模型类别 id） */
   class_filter?: number[];
   max_results?: number;
 }

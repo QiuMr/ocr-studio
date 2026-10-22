@@ -181,7 +181,7 @@ print(r["data"]["text"])`,
         <button
           type="button"
           onClick={() => onOpenPlayground("ocr", true)}
-          className="flex h-8 items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 text-[12.5px] font-semibold text-neutral-700 shadow-card transition-colors hover:border-neutral-300 hover:text-neutral-900"
+          className="flex h-8 items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 text-[12px] font-semibold text-neutral-700 shadow-card transition-colors hover:border-neutral-300 hover:text-neutral-900"
         >
           <Activity className="h-3.5 w-3.5 text-neutral-400" />
           传张图试试
@@ -189,7 +189,7 @@ print(r["data"]["text"])`,
       </div>
 
       {/* -------------------------------------------------------- 服务主卡 */}
-      <section className="panel-dark mt-5 overflow-hidden rounded-[16px] px-6 py-5 text-white">
+      <section className="panel-dark mt-5 overflow-hidden rounded-xl px-6 py-5 text-white">
         <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4">
           <div className="min-w-0">
             {/* 状态：点 + 文字。运行时外圈有水波，静止时不动 */}
@@ -218,7 +218,7 @@ print(r["data"]["text"])`,
             <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
               <code
                 className={cn(
-                  "tnum font-mono text-[27px] font-bold leading-none tracking-tight transition-colors",
+                  "tnum font-mono text-[26px] font-bold leading-none tracking-tight transition-colors",
                   running ? "text-white" : "text-white/35",
                 )}
               >
@@ -229,7 +229,7 @@ print(r["data"]["text"])`,
                 onClick={() => void copyEndpoint()}
                 title="复制地址"
                 className={cn(
-                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-semibold transition-colors",
+                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-semibold transition-colors",
                   copied
                     ? "bg-emerald-400/15 text-emerald-300"
                     : "bg-white/[0.08] text-white/60 hover:bg-white/[0.14] hover:text-white",
@@ -260,7 +260,7 @@ print(r["data"]["text"])`,
             onClick={() => void onToggle()}
             disabled={busy}
             className={cn(
-              "flex h-11 shrink-0 items-center gap-2 rounded-[11px] px-5 text-[13.5px] font-bold transition-all duration-200",
+              "flex h-11 shrink-0 items-center gap-2 rounded-md px-5 text-[13px] font-bold transition-all duration-200",
               running
                 ? "bg-white/[0.08] text-white/85 ring-1 ring-inset ring-white/15 hover:bg-white/[0.14] hover:text-white active:scale-[0.98]"
                 : "btn-brand text-white",
@@ -293,7 +293,7 @@ print(r["data"]["text"])`,
       </section>
 
       {error && (
-        <div className="mt-3 rounded-lg bg-amber-50 px-3.5 py-2.5 text-[12.5px] font-medium text-amber-900">
+        <div className="mt-3 rounded-lg bg-amber-50 px-3.5 py-2.5 text-[13px] font-medium text-amber-900">
           {error}
         </div>
       )}
@@ -321,7 +321,7 @@ print(r["data"]["text"])`,
         <button
           type="button"
           onClick={onOpenApi}
-          className="group flex shrink-0 items-center gap-1 text-[12.5px] font-bold text-[#2563EB] hover:underline"
+          className="group flex shrink-0 items-center gap-1 text-[13px] font-bold text-[#2563EB] hover:underline"
         >
           全部接口
           <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
@@ -336,19 +336,19 @@ print(r["data"]["text"])`,
               key={g.key}
               type="button"
               onClick={onOpenApi}
-              className="card-lift group flex flex-col rounded-[14px] border border-neutral-200 bg-white p-4 text-left shadow-card"
+              className="card-lift group flex flex-col rounded-xl border border-neutral-200 bg-white p-4 text-left shadow-card"
             >
               <div className="flex items-center gap-2.5">
                 <span
                   className={cn(
-                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px]",
+                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
                     g.tint,
                   )}
                 >
                   {g.icon}
                 </span>
                 <span className="text-[14px] font-bold text-neutral-900">{GROUP_LABEL[g.key]}</span>
-                <span className="ml-auto rounded-full bg-neutral-100 px-2 py-0.5 text-[10.5px] font-bold text-neutral-500">
+                <span className="ml-auto rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-bold text-neutral-500">
                   {list.length} 个
                 </span>
               </div>
@@ -357,7 +357,7 @@ print(r["data"]["text"])`,
               </p>
               <ul className="mt-3 flex flex-col gap-1.5 border-t border-neutral-100 pt-2.5">
                 {list.slice(0, 2).map((e) => (
-                  <li key={e.path} className="flex items-baseline gap-2 text-[11.5px]">
+                  <li key={e.path} className="flex items-baseline gap-2 text-[12px]">
                     <code className="shrink-0 font-mono font-medium text-neutral-400">
                       {e.path.replace("/ocr/", "").replace("/vision/", "")}
                     </code>
@@ -376,10 +376,10 @@ print(r["data"]["text"])`,
       </div>
 
       {/* ------------------------------------------------------ 接入指引 */}
-      <section className="mt-8 rounded-[16px] border border-neutral-200 bg-neutral-50/70 p-5">
+      <section className="mt-8 rounded-xl border border-neutral-200 bg-neutral-50/70 p-5">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-neutral-400" />
-          <h2 className="text-[15px] font-bold tracking-tight text-neutral-900">接进你的脚本</h2>
+          <h2 className="text-[16px] font-bold tracking-tight text-neutral-900">接进你的脚本</h2>
         </div>
 
         <div className="mt-4 grid gap-5 lg:grid-cols-[268px_1fr]">
@@ -391,14 +391,14 @@ print(r["data"]["text"])`,
               { t: "把图转成 Base64", d: "POST 过去，取 data.text 就是文字" },
             ].map((s, i) => (
               <li key={s.t} className="flex gap-3">
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-[11.5px] font-bold text-neutral-500 shadow-card ring-1 ring-neutral-200/70">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-[12px] font-bold text-neutral-500 shadow-card ring-1 ring-neutral-200/70">
                   {i + 1}
                 </span>
                 <div className="min-w-0">
-                  <p className="text-[12.5px] font-bold leading-6 text-neutral-800">{s.t}</p>
+                  <p className="text-[13px] font-bold leading-6 text-neutral-800">{s.t}</p>
                   <p
                     className={cn(
-                      "truncate text-[11.5px] font-medium text-neutral-500",
+                      "truncate text-[12px] font-medium text-neutral-500",
                       i === 1 && "font-mono text-[11px] text-neutral-600",
                     )}
                     title={s.d}
@@ -425,7 +425,7 @@ print(r["data"]["text"])`,
                   type="button"
                   onClick={() => setLang(it.v)}
                   className={cn(
-                    "h-7 rounded-md px-2.5 text-[11.5px] leading-none transition-colors",
+                    "h-7 rounded-md px-2.5 text-[12px] leading-none transition-colors",
                     lang === it.v
                       ? "bg-white font-bold text-neutral-900 shadow-card ring-1 ring-neutral-200/70"
                       : "font-medium text-neutral-500 hover:text-neutral-800",
@@ -439,7 +439,7 @@ print(r["data"]["text"])`,
               code={samples[lang]}
               lang={lang === "eyuyan" ? "易语言 / 按键精灵" : lang === "curl" ? "sh" : "python"}
             />
-            <p className="mt-2 text-[11.5px] font-medium leading-5 text-neutral-400">
+            <p className="mt-2 text-[12px] font-medium leading-5 text-neutral-400">
               返回是统一的 <code className="font-mono">{"{code, msg, data}"}</code>：
               <code className="font-mono">code</code> 为 0 才是成功，结果都在
               <code className="font-mono">data</code> 里。
@@ -457,7 +457,7 @@ print(r["data"]["text"])`,
               health?.status === "ok" ? "bg-emerald-500" : "bg-amber-400",
             )}
           />
-          <span className="text-[11.5px] font-medium text-neutral-500">
+          <span className="text-[12px] font-medium text-neutral-500">
             {health?.status === "ok"
               ? `识别引擎已就绪 · ${health.actual_device === "directml" ? "显卡" : "处理器"} · 字典 ${health.dict_size.toLocaleString()} 字`
               : "识别引擎还没就绪，接口会返回 503"}
@@ -466,7 +466,7 @@ print(r["data"]["text"])`,
         <button
           type="button"
           onClick={onOpenSettings}
-          className="flex items-center gap-1 text-[11.5px] font-bold text-neutral-500 hover:text-neutral-900"
+          className="flex items-center gap-1 text-[12px] font-bold text-neutral-500 hover:text-neutral-900"
         >
           引擎设置
           <ArrowRight className="h-3 w-3" />
@@ -484,7 +484,7 @@ function MiniStat({ label, value, live }: { label: string; value: string; live?:
       <p
         key={value}
         className={cn(
-          "tnum mt-1 text-[15px] font-bold leading-none",
+          "tnum mt-1 text-[16px] font-bold leading-none",
           live ? "animate-num text-white" : "text-white/70",
         )}
       >
