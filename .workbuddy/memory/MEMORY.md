@@ -18,6 +18,17 @@
   - 版本比较用 `version.rs::cmp_version`（**数值比**，字符串比会让 0.10.0 判成比 0.9.0 旧）。
 - `.gitattributes` 里 `*.ps1 -text`：本机 `core.autocrlf=true`，而 `.ps1` 必须 BOM+CRLF，让 git 一字节都别碰。
 
+## 托盘菜单（2026-10-23 重做，**改托盘前必读**）
+- **不用 `tauri::menu::Menu`**（系统原生菜单，白底黑字无图标、样式改不了）。改成自己画的无边框浮层窗口：label=`tray`，URL `index.html#tray`（`main.tsx` 按 hash 切 `TrayMenu`），transparent + always_on_top + skip_taskbar + shadow。**body 必须透明**（`body.tray-mode`），否则圆角外露白底、比原生菜单还丑。
+- 菜单内容：头部（产品名 + 版本徽标 + 服务状态绿点）、打开界面、启停服务、检查更新、退出。**有更新时「检查更新」变蓝色高亮条目**（`有更新 v0.1.3` + 蓝点）—— 这是原生菜单做不到的。
+- **三个已踩过的坑**：
+  1. **失焦隐藏不能照单全收**：`show()` 后 Windows 先抛一个假的 `Focused(false)`，直接隐藏会让菜单永远弹不出来（窗口建好、位置也对，但 `IsWindowVisible` 恒为 0）。现方案：`TRAY_HAD_FOCUS` 标记（先拿到过焦点才允许失焦隐藏）+ 600ms 宽限后用 `is_focused()` 复核。
+  2. **弹菜单后别再动主窗口**：`--debug-tray` 路径弹完菜单必须 return，否则 single-instance 回调接着 show/set_focus 主窗口，菜单立刻失焦被收。
+  3. **托盘窗口要跟上主窗口的渲染参数**（`WEBVIEW_ARGS`），否则主窗口切软件合成后托盘窗口会白。
+- 关闭途径：失焦 / Esc（前端）/ 点菜单项（`tray_action` 里先 hide）/ **再点一次托盘 toggle**（这条是「菜单拿不到焦点」时的唯一退路，别删）。
+- 状态刷新：后端 2 秒 emit `tray-status` 事件，菜单订阅；不再写菜单项文字（那是原生菜单时代的做法）。
+- 权限在 `src-tauri/capabilities/tray.json`（windows: ["tray"]），别忘同步。
+
 ## 前端技术规范（2026-10-21 用户确定）
 - 栈：React + TS + Tailwind + shadcn/ui（Vite，Tauri 2 壳）。Vue 方案已废弃。
 - 字体 MiSans（本地 @font-face）；配色纯白为主、黑为辅、蓝点缀。

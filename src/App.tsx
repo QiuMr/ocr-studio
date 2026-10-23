@@ -9,6 +9,7 @@ import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { cn } from "./lib/utils";
 import { invoke, isTauri } from "./lib/tauri";
+import { writeCachedUpdate } from "./lib/update";
 
 export type PageKey = "service" | "api" | "playground" | "logs" | "settings";
 /** 试跑页的三个 tab：认字 / 找图 / 扫码 */
@@ -102,6 +103,30 @@ export default function App() {
       .then((m) => m.getHealth())
       .then((h) => setVersion(h.version ?? ""))
       .catch(() => setVersion(""));
+  }, []);
+
+  /*
+   * 启动后静默检查更新。
+   *
+   * 「静默」是三条硬要求，少一条都会变成骚扰：
+   *   1. **延迟几秒**：启动时引擎加载、首屏渲染都在抢资源，
+   *      这时候插一个网络请求，最坏的情况是拖慢可见的首屏。
+   *   2. **失败完全不提示**：没网、源还没发版都是常态，
+   *      弹一句「检查更新失败」只会让人以为程序坏了。
+   *   3. **查到更新也不打断**：只把结果写进缓存，由托盘菜单和设置页
+   *      自己决定怎么显示 —— 用户没问就不该有东西跳出来。
+   */
+  useEffect(() => {
+    if (!isTauri()) return;
+    const timer = window.setTimeout(() => {
+      void import("./lib/api")
+        .then((m) => m.updateCheck())
+        .then((r) => writeCachedUpdate(r))
+        .catch(() => {
+          /* 静默：查不到就当没有更新 */
+        });
+    }, 4000);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const toggleSidebar = useCallback(() => {

@@ -408,4 +408,23 @@
   .tnum {
     font-variant-numeric: tabular-nums;
   }
+
+  /*
+   * 托盘菜单窗口（2026-10-23）
+   *
+   * 这个窗口是 transparent + 无边框的。body 必须跟着透明，
+   * 否则窗口矩形会露出一整块白底 —— 圆角外面全是白的，等于没透明，
+   * 看着就是一个贴着托盘的白色方块，比系统原生菜单还丑。
+   *
+   * 只作用于加了 .tray-mode 的托盘实例（main.tsx 里按 URL hash 加的），
+   * 主窗口的配色一个像素都不动。
+   */
+  body.tray-mode {
+    background: transparent;
+  }
+  /* 托盘窗口不该出现滚动条：菜单高度是按内容算的，
+     多一条滚动条会让内容被裁掉一截。 */
+  body.tray-mode #root {
+    overflow: hidden;
+  }
 }

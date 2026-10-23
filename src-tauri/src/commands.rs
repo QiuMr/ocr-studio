@@ -1767,3 +1767,76 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
 }
+
+// ─────────────────────────── 托盘菜单 ───────────────────────────
+
+/// 托盘菜单的点选动作。
+///
+/// 做成一个命令而不是四个，是因为这些动作的共同点比差异更重要：
+/// 都是「点了就该立刻收起菜单」的一次性入口，分开写每个都要重复一遍
+/// show/hide/focus 的样板，而且以后加一项要动两处（命令表 + 前端）。
+#[tauri::command]
+pub fn tray_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
+    // get_webview_window / try_state 都来自 Manager trait
+    use tauri::Manager as _;
+
+    // 不管哪种动作，菜单都得先收起来 —— 留着它会抢焦点，主窗口出不来。
+    if let Some(w) = app.get_webview_window(crate::TRAY_MENU_LABEL) {
+        let _ = w.hide();
+    }
+
+    match action.as_str() {
+        "open" => {
+            if let Some(w) = app.get_webview_window("main") {
+                w.show().map_err(|e| e.to_string())?;
+                let _ = w.unminimize();
+                w.set_focus().map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        "start" => {
+            let Some(state) = app.try_state::<Arc<AppState>>() else {
+                return Err("服务状态还没初始化".to_string());
+            };
+            if state.is_running() {
+                return Ok(());
+            }
+            tracing::info!("托盘：启动服务");
+            start_server_background(&state);
+            Ok(())
+        }
+        "stop" => {
+            let Some(state) = app.try_state::<Arc<AppState>>() else {
+                return Err("服务状态还没初始化".to_string());
+            };
+            tracing::info!("托盘：停止服务");
+            stop_server(&state);
+            Ok(())
+        }
+        "quit" => {
+            tracing::info!("托盘：退出应用");
+            app.exit(0);
+            Ok(())
+        }
+        other => Err(format!("未知托盘动作：{other}")),
+    }
+}
+
+/// 托盘菜单渲染完，告诉后端实际高度，让它重新贴到托盘图标上。
+///
+/// 为什么需要这一步：菜单里有没有「有更新」条目会差一行的高度，
+/// 而窗口是**先显示、再渲染**的 —— 首次显示时后端只能按估算高度定位，
+/// 不回调一次就会歪（菜单底部离托盘图标一大截，或者顶出屏幕外）。
+#[tauri::command]
+pub fn tray_menu_height(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    use tauri::Manager as _;
+
+    let Some(w) = app.get_webview_window(crate::TRAY_MENU_LABEL) else {
+        return Ok(());
+    };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let h = (height / scale).clamp(120.0, 640.0);
+    w.set_size(tauri::LogicalSize::new(crate::TRAY_MENU_WIDTH, h))
+        .map_err(|e| e.to_string())?;
+    crate::place_tray_menu(&w).map_err(|e| e.to_string())
+}
