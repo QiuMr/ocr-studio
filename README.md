@@ -11,7 +11,7 @@
 
 ```powershell
 pnpm install
-powershell -File scripts\fetch_models.ps1            # PP-OCR 三档模型（默认只下 small）
+powershell -File scripts\fetch_models.ps1 -Level all   # PP-OCR 三档模型（tiny/small/medium，-Level small 只下一档）
 powershell -File scripts\fetch_ddddocr.ps1           # 可选：DDDDOCR 识别模型（54MB）
 powershell -File scripts\fetch_yolo.ps1              # 可选：检测模型（默认 yolov8n，约 19MB，需本机装 ultralytics）
 powershell -File scripts\fetch_yolo.ps1 -Model yolo11n.pt   # 换其它 ultralytics 检测权重
@@ -92,8 +92,8 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/jubingzhaotu1\|2` | 截**指定窗口**找图（hwnd 或窗口标题） |
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图（返回屏幕绝对坐标） |
 | `POST /ocr/yuyizhaotu` | **语义找图**：不用模板图，让检测模型直接找目标（`source` 选 image/screen/window） |
-| `POST /vision/prompt` | **提示找图**：当场给参考图+框（`mode=visual`）或提示词（`mode=text`），换目标不用重导模型 |
-| `GET/POST/DELETE /vision/promptref` | **中文参考库**：教一次（框+中文名）→ 按中文名找，走图找图通道，不依赖文本塔 |
+| `POST /vision/prompt` | **提示找图**：当场给参考图+框（`mode=visual`）或教过的名字（`mode=ref`），换目标不用重导模型 |
+| `GET/POST/DELETE /vision/promptref` | **中文参考库**：教一次（框+中文名）→ 按名字找，走的就是图找图通道 |
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
 | `POST /vision/qrcode` | **扫码**：读出二维码 / 条形码内容（纯 CPU，与引擎无关） |
@@ -181,34 +181,25 @@ python scripts\fetch_yoloe.py --image assets\bus.png --box 30,230,800,776 --name
 
 | 模式 | 怎么给提示 | 依赖 |
 |---|---|---|
-| `mode=visual`（图找图） | 一张参考图 + 在上面框住要找的东西 | `models/yoloe/` 三件套（随包带） |
-| `mode=text`（语言找图） | 几个词，如 `"person,bus"` | 额外要 MobileCLIP2-B 文本塔（约 242MB，**随包带**） |
+| `mode=visual`（图找图） | 一张参考图 + 在上面框住要找的东西 | `models/yoloe/` 两件套（随包带，约 20MB） |
+| `mode=ref`（按名字找） | 几个**教过的**名字，如 `"提交按钮,搜索框"` | 同上 + 中文参考库里有这些名字 |
 
 两者出参都与模板找图同构。模型由 `scripts/export_yoloe_prompt.py` 导出到 `models/yoloe/`：
-检测器（`*_prompt.onnx`，双输入 `images` + `pe`）、视觉提示编码器（`*_vpe.onnx`）、
-文本提示头（`*_texthead.onnx`）。文本塔走纯 Rust的 `mobileclip2-b-rs`（直接读 ultralytics 的 `.ts`）。
+检测器（`*_prompt.onnx`，双输入 `images` + `pe`）、视觉提示编码器（`*_vpe.onnx`）。
+比的是「长得像不像」，所以换皮肤、按钮变按下态照样认得。
 
-**中文可以直接用**（见下节）：内置中英词表先映射，词表覆盖不到的用「中文参考库」教一次。
+> **`mode=text`（语言找图）已于 2026-10-23 移除。** 它把词编码成语义向量去找
+> 「语义上像的」，在 COCO 那类大物体上能看，到界面控件这种细粒度目标上分数只有
+> 0.1~0.2 量级（等于噪声）；为它要背 242MB 文本塔 + 英文 BPE 词表 + 中英词典。
+> 传 `mode=text` 会得到一条明确指路错误（先教一次、再 `mode=ref`）。
 
-> 本机导出只走**视觉提示**：文本提示要 ultralytics 的 CLIP fork，而那要拉 git 子模块、
-> 本机 MSYS 的 `sh` fork 是坏的（`0xC0000142`）。详见 docs/PROGRESS.md §7.8。
+### 按中文名找：中文参考库
 
-### 中文目标：词表 + 参考库
+「教会它认自家界面里的元素」——这也是唯一需要的「中文」支持。做法是框一次、起个中文名，
+之后只写名字。**走的就是图找图那条视觉通道**（存的是当初框的那块图），所以中文名随便起，
+不需要任何词表，也不需要模型认识这个东西。
 
-语言找图的文本塔（MobileCLIP2-B）是**英文语义空间**，中文原样喂进去会被 BPE 拆成
-UTF-8 字节片，那些 token 在英文语料里几乎没被训练过 —— 实测 19 个常见中文词只有
-「人」偶然撞中（分数还只有英文的 62%），「公交车」「手机」全是 0。
-换中文文本塔（CN-CLIP 等）原理上不可行：特征空间和 YOLOE 的 `texthead` 不对齐，
-喂进去只会输出垃圾。所以走两条工程路子：
-
-| 路子 | 怎么用 | 覆盖 |
-|---|---|---|
-| **内置中英词表** | `mode=text` 直接写中文，如 `"人,公交车"` | COCO 80 类 + 常用 UI/物体词（几百条），零准备 |
-| **中文参考库** | 从截图里框一次目标、起个中文名（如「提交按钮」），之后按名字找 | **任意中文名**，对自家软件里的特定元素比文本提示更准 |
-
-两条路返回的 `class_name` 都是你输入的中文。词表没盖住的词会**明确报错并给建议**
-（相近中文词 / 建议英文词），不会静默返回空。参考库存在本机配置目录
-（`%APPDATA%` 下的 `prompt_refs/`），只存裁剪小图，不上传、不联网：
+参考库存在本机配置目录（`%APPDATA%` 下的 `prompt_refs/`），只存参考图，不上传、不联网：
 
 ```bash
 # 教一次：整张参考图 + 图上的一个框 + 中文名
@@ -216,11 +207,13 @@ curl -X POST http://127.0.0.1:8848/vision/promptref \
   -H "Content-Type: application/json" \
   -d '{"name":"提交按钮","image":"<base64>","box":[100,200,180,230]}'
 
-# 之后按中文名找（走图找图通道，不需要 242MB 文本塔）
+# 之后按名字找
 curl -X POST http://127.0.0.1:8848/vision/prompt \
   -H "Content-Type: application/json" \
-  -d '{"mode":"text","image":"<base64>","words":"提交按钮"}'
+  -d '{"mode":"ref","image":"<base64>","words":"提交按钮"}'
 ```
+
+没教过的名字会**明确报错并列出已有的名字**，不会静默返回空。
 
 `GET /vision/promptref` 看教过哪些，`DELETE /vision/promptref` 按名字忘掉。
 同名重复教会覆盖；名字不存在删也返回成功（`removed=false`），重复删不报错。
@@ -251,10 +244,11 @@ POST /ai/v1/tool    调一个工具：{"tool":"ocr_image","args":{...},"request_
 ## 验证
 
 ```powershell
-cargo test                    # 133 个单元测试 + 16 个 API 冒烟 + 7 个 AI 接口端到端
+cargo test                    # 138 个单元测试 + 17 个 API 冒烟 + 7 个 AI 接口端到端
 cargo test -- --ignored       # 29 个重量级：精度基线、真实截图、逐字对齐、跨语言对齐、提示找图
 python scripts/verify_http_contract.py --exe "<OCR Studio.exe>"   # 404/405 与 CORS 信封
 python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"  # 分发包端到端
+python scripts/verify_ui_zh.py --exe "release/OCR-Studio/OCR Studio.exe"    # 截图自己的程序，验收按名字找（教/找/删 + 跨图泛化）
 python scripts/e2e_find.py    # 真实桌面找图端到端
 python scripts/e2e_danzi.py <图片>   # 逐字框端到端断言
 python scripts/ref_yolo.py models/detect/yolo/model.onnx assets/bus.png out.json   # yolo 官方实现参照

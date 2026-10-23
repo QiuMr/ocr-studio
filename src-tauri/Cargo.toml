@@ -76,21 +76,6 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
 ] }
 imageproc = "0.27.0"
 
-# 文本提示编码（YOLOE 的「语言找图」）：MobileCLIP2-B 的纯 Rust 实现 + CLIP BPE 分词器。
-#
-# 为什么不自己把文本塔导成 ONNX：ultralytics 给的 `mobileclip2_b.ts` 里嵌的是
-# TorchScript 图，**缺张量秩信息**，legacy 导出器在 multi_head_attention 的
-# `unflatten(-1, [3, size])` 上抛 "transpose for tensor of unknown rank"，
-# 换成 torch 2.4 的 dynamo 导出器（onnxscript 0.1.0）同样失败。改批次静态也没用。
-#
-# 这个 crate 直接读权重自己算（基于 candle），并且**已对官方 Python/OpenCLIP 参考
-# 做过数值对齐**：COCO-80 类名 80x512 的最大绝对差 5.2e-7、余弦 1.000000。
-# 它的文档里也写明「used by the YOLOE text path」。
-#
-#   text      —— 文本 Model API + CLIP BPE Tokenizer，并支持 safetensors 权重
-#   ts-loader —— 支持直接读 ultralytics 的 .ts（开发期就用已有的那份，免再下一次）
-mobileclip2-b-rs = { version = "0.1", default-features = false, features = ["text", "ts-loader"] }
-
 # 二维码 / 条码：rxing 是 ZXing 的纯 Rust 移植，覆盖 QR、DataMatrix、Aztec、
 # PDF417 以及 Code39/93/128、EAN、UPC、ITF、Codabar 等一维码。
 # 选它而不是 zbar/opencv：**没有原生依赖**，打包时不用额外塞 DLL，

@@ -192,12 +192,37 @@ HTTP 层在 AppState 持 `ai_enabled`/`ai_token`（config.json），开关关闭
 **不进 PATHS**：那张表是用户脚本的接口清单，AI 入口不该混进去。
 明确不提供给 AI：退出程序、改开机自启、改 AI 开关与连接码。
 
-### 中文目标（词表 + 参考库，2026-10-23 新增）
+### 中文目标：只留「按名字找」（2026-10-23 晚，用户拍板彻底移除文本提示）
 
-文本塔是英文语义空间，中文原样喂会被 BPE 拆成字节 token（实测仅「人」偶然命中）。
-两条工程路子：`engine/zh_words.rs` 内置中英词表（`text_pe` 前映射，未命中明确报错
-并给建议）；`engine/prompt_refs.rs` 中文参考库（框一次起中文名 → 走 VPE 图找图通道，
-不依赖 242MB 文本塔），落盘在本机配置目录，端到端有 `tests/ai_service.rs` 与实测钉住。
+历程（三次迭代，最终结论是「砍掉」）：
+
+1. 词表映射：MobileCLIP2-B 是英文语义空间，中文原样喂会被 BPE 拆成字节 token
+   （实测 19 个常用词只有「人」偶然命中）→ 加 `zh_words` 中英词典。
+2. PE 预烘焙：砍掉 242MB 文本塔后，词表内的词改为离线查表（`text_pe.bin`，482KB）。
+3. **整条移除**（当前）：用户实测后判断「语言提示找图太特定，没用，还占位置」。
+   数据支持这个判断——真实界面截图上 12 个词最高只有 0.207，YOLOE 对 UI 细粒度
+   概念本就不可用。为它维护的链路：242MB 塔 + CLIP 词表 + 提示头 onnx + 中英词典 +
+   烘焙工具 + 2 项 parity 用例，全部只为一个噪声级功能服务。
+
+移除范围：
+- `engine/zh_words.rs`、`engine/text_pe_cache.rs`、`src/bin/bake_text_pe.rs` 删除
+- `prompt.rs` 只保留 `visual_pe` + `pe_for_refs`；`PromptAssets` 只剩检测器 + VPE
+- Cargo 依赖 `mobileclip2-b-rs` 移除（构建时间也随之下降）
+- API：`/vision/prompt` 的 `mode` 只剩 `visual` / `ref`；传 `text` 得到**明确指路**
+  400（说清「已移除 + 先教一次 + 用 ref」），不是静默失效
+- AI 工具 `find_word` → `find_target`（只认教过的名字，未命中给出「先 teach_target」
+  与现有名字列表）
+- 打包：`*_texthead.onnx` / tokenizer / `text_pe.bin` / `zh_words.json` 一并剔掉
+
+**保留且更重要的那条**：`engine/prompt_refs.rs` 中文参考库——框一次起中文名 → 走 VPE
+视觉通道（比的是长得像不像）。任意中文名都能用，不需要词表，也不需要模型认识它。
+`/vision/prompt` 用 `mode=ref` 引用这些名字。
+
+### 中文场景精简包（已并入上一条）
+
+**PP-OCR 三档齐了**（用户指出「现在只有一种」）：`scripts/models.manifest.json`
+本就定义了 tiny/small/medium（RapidOCR v3.10.0，PP-OCRv6 官方三档），此前只落了
+small。已补下 tiny（6.3MB）与 medium（138.6MB），SHA256 全过，三档随包带。
 
 ### 7.1 视觉规范（2026-10-21 确定）
 

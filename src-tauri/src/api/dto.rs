@@ -1,4 +1,4 @@
-﻿//! HTTP 接口的请求/响应 DTO 与错误类型。
+//! HTTP 接口的请求/响应 DTO 与错误类型。
 //!
 //! 设计约定（见 `docs/PLAN.md` 第 6 节）：
 //! - 全部接口返回统一信封 `{code, msg, data?}`，`code == 0` 表示成功。
@@ -301,11 +301,11 @@ pub struct FindOptions {
 /// 运行时提示找图（`/vision/prompt`）的入参。
 ///
 /// 与 `FindOptions` 分开是刻意的：提示找图的「提示」有两条互斥的路
-/// （图找图 / 语言找图），塞进 `FindOptions` 会让那个结构变成大杂烩，
+/// （图找图 / 按名字找），塞进 `FindOptions` 会让那个结构变成大杂烩，
 /// 而且模板找图的字段在这里一个都用不上。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PromptOptions {
-    /// 提示方式：`visual`（图找图，缺省）/ `text`（语言找图）
+    /// 提示方式：`visual`（图找图，缺省）/ `ref`（按教过的名字找）
     #[serde(default)]
     pub mode: Option<String>,
     /// 目标图 base64。用 `source=screen/window` 时可不传
@@ -323,7 +323,7 @@ pub struct PromptOptions {
     /// 图找图：每个类的显示名，`;` 分隔；缺省回落「参考目标」
     #[serde(default)]
     pub ref_names: Option<String>,
-    /// 语言找图：提示词，逗号分隔（如 `person,bus`）
+    /// 按名字找：教过的名字，逗号分隔（如 `提交按钮,搜索框`）
     #[serde(default)]
     pub words: Option<String>,
     /// 置信度下限，缺省 0.25

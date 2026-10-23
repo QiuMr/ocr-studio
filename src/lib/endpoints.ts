@@ -191,9 +191,9 @@ export const ENDPOINTS: Endpoint[] = [
     method: "POST",
     path: "/vision/prompt",
     title: "提示找图：目标当场给，换目标不用换模型",
-    note: "上面那条「语义找图」的提示在导出时就烘焙进权重了，换目标得重新导 ONNX；这条把提示当**额外输入**——给一张参考图 + 一个框（`mode=visual`），或者给几个词（`mode=text`），当场就能换。代价是首次调用要多加载两个编码器（视觉 12MB / 文本 250MB 级）。返回结构与模板找图完全一样，脚本换个路径就能用。",
+    note: "上面那条「语义找图」的提示在导出时就烘焙进权重了，换目标得重新导 ONNX；这条把提示当**额外输入**——给一张参考图 + 一个框（`mode=visual`），或者给几个教过的名字（`mode=ref`），当场就能换。比较的是「长得像不像」，所以换皮肤、按下态变了也认。返回结构与模板找图完全一样，脚本换个路径就能用。",
     params: [
-      { name: "mode", desc: "visual（图找图，默认）/ text（语言找图）" },
+      { name: "mode", desc: "visual（图找图，默认）/ ref（按教过的名字找）" },
       { name: "source", desc: "去哪找：image（默认）/ screen / window" },
       { name: "image", desc: "source=image 时的搜索图 base64" },
       {
@@ -209,14 +209,14 @@ export const ENDPOINTS: Endpoint[] = [
         desc: "可选。每个框归属的「槽」，同槽的框取并集当一个提示；缺省全 0",
       },
       { name: "ref_names", desc: "可选。槽的名字，只用于回显（如 \"确认按钮\"）" },
-      { name: "words", desc: "mode=text 必填。提示词，逗号分隔。中文（人、公交车）与英文（person,bus）都行，混写也行" },
+      { name: "words", desc: "mode=ref 必填。教过的名字，逗号分隔（如 \"提交按钮,搜索框\"）。没教过的会被明确拒绝并列出可用名字" },
       { name: "conf", desc: "置信度阈值 0~1，默认 0.25" },
       { name: "class_filter", desc: "只保留这些提示槽；不传 = 全部" },
       { name: "hwnd", desc: "source=window 时的窗口句柄，或改用 title" },
       { name: "max_results", desc: "最多返回几个，默认 8" },
     ],
     returns:
-      "与模板找图同构（found / x / y / center_x / center_y / score / matched / matches[] / origin_x / origin_y）；额外多 engine（固定 yoloe-prompt）与命中里的 class_id/class_name（类名就是你给的提示词）",
+      "与模板找图同构（found / x / y / center_x / center_y / score / matched / matches[] / origin_x / origin_y）；额外多 engine（固定 yoloe-prompt）与命中里的 class_id/class_name（类名就是你给的那个名字）",
   },
 
   // ------------------------------------------------------------------ 找图
@@ -224,7 +224,7 @@ export const ENDPOINTS: Endpoint[] = [
     method: "GET",
     path: "/vision/promptref",
     title: "中文参考库：看已经「教过」哪些目标",
-    note: "语言找图的文本塔是英文语义空间，中文靠内置词表映射 —— 词表覆盖不到的（比如自家软件里那个按钮）就找不了。参考库是绕开文本塔的那条路：**从截图里框一次、起个中文名**，以后按中文名找，走图找图通道，比文本提示更准，也不需要那 250MB 文本塔。",
+    note: "「按中文名找」的唯一路子：**从截图里框一次、起个中文名**，以后直接写这个名字找。它走的就是图找图那条视觉通道（比的是长得像不像），所以自家软件里那个叫「提交按钮」的东西也不用管模型认不认识它。",
     params: [],
     returns: "refs[{name, box, width, height, created}]、count、dir（存哪）",
   },
@@ -232,7 +232,7 @@ export const ENDPOINTS: Endpoint[] = [
     method: "POST",
     path: "/vision/promptref",
     title: "中文参考库：教一个新目标（框一次 + 起中文名）",
-    note: "给整张参考图 + 它上面的一个框 + 一个中文名，就记下来了。同名会覆盖。教完之后 /vision/prompt 的 mode=text 直接写这个名字。",
+    note: "给整张参考图 + 它上面的一个框 + 一个中文名，就记下来了。同名会覆盖。教完之后 /vision/prompt 用 mode=ref 写这个名字就能找。",
     params: [
       { name: "name", required: true, desc: "中文名，如 \"提交按钮\"" },
       { name: "image", required: true, desc: "参考图 base64（**整张图**，不是裁剪块）" },

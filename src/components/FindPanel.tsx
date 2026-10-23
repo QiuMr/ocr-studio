@@ -18,7 +18,6 @@ import {
   Settings2,
   Sparkles,
   Target,
-  Type,
   Upload,
   X,
 } from "lucide-react";
@@ -59,7 +58,6 @@ import type {
   FindMode,
   FindResult,
   FindSource,
-  PromptMode,
   WindowInfo,
 } from "../types";
 
@@ -121,20 +119,14 @@ const KIND_HINT: Record<FindKind, string> = {
   semantic:
     "靠模型认目标：不用准备模板，模型认得「这是个按钮」就直接框出来。代价是只认得模型见过的类别，换目标得换模型。",
   prompt:
-    "目标当场给：圈出参考图里要的东西，或者直接写几个词，模型就去找「跟这个像的 / 是这个的」。换目标只改这里的输入，不用换模型——这是它跟「语义找图」最大的区别。",
-};
-
-/** 提示找图的两个子模式：给图 / 给词。 */
-const PROMPT_MODE_LABEL: Record<PromptMode, string> = {
-  visual: "图找图",
-  text: "语言找图",
+    "目标当场给：圈出参考图里要的东西，模型就去找「跟这个像的」。换目标只改这里的输入，不用换模型——这是它跟「语义找图」最大的区别。",
 };
 
 /** 三种找图方式的顺序与文案（顺序 = 从「最省心」到「最灵活」）。 */
 const KIND_META: { v: FindKind; label: string; blurb: string }[] = [
   { v: "template", label: "模板找图", blurb: "拿小图去大图里找" },
   { v: "semantic", label: "语义找图", blurb: "让模型自己认目标" },
-  { v: "prompt", label: "提示找图", blurb: "圈一张参考图 / 写几个词" },
+  { v: "prompt", label: "提示找图", blurb: "圈一张参考图就够了" },
 ];
 
 function KindIcon({ k, className }: { k: FindKind; className?: string }) {
@@ -178,11 +170,9 @@ export function FindPanel({ inheritedImage }: Props) {
   const [conf, setConf] = useState("0.25");
   const [classIds, setClassIds] = useState("");
   // ---- 提示找图专用 ----
-  const [promptMode, setPromptMode] = useState<PromptMode>("visual");
   /** 参考图：只是「给模型看的样例」，跟搜索范围无关 */
   const [refImg, setRefImg] = useState<Template | null>(null);
   const [refBoxes, setRefBoxes] = useState<RefBox[]>([]);
-  const [words, setWords] = useState("");
   /** 左侧卡片显示哪一块：参考图（要框东西）/ 搜索范围（看命中） */
   const [leftTab, setLeftTab] = useState<"ref" | "hay">("ref");
 
@@ -276,11 +266,10 @@ export function FindPanel({ inheritedImage }: Props) {
       const first = imgs[0];
       if (!first) return;
       if (kind === "template" && !tpl) void applyTemplate(first.b64, first.url, first.name);
-      else if (kind === "prompt" && promptMode === "visual" && !refImg)
-        void applyRefImage(first.b64, first.url, first.name);
+      else if (kind === "prompt" && !refImg) void applyRefImage(first.b64, first.url, first.name);
       else void applyHaystack(first.b64, first.url);
     },
-    [kind, promptMode, tpl, refImg, applyTemplate, applyRefImage, applyHaystack],
+    [kind, tpl, refImg, applyTemplate, applyRefImage, applyHaystack],
   );
 
   const { dragging } = useImageDrop(onDrop);
@@ -351,7 +340,7 @@ export function FindPanel({ inheritedImage }: Props) {
       setError("还没选模板图。模板 = 你要找的那个小图标/小按钮的截图。");
       return;
     }
-    if (kind === "prompt" && promptMode === "visual") {
+    if (kind === "prompt") {
       if (!refImg) {
         setError("还没选参考图。参考图 = 一张「里面有你要找的东西」的图，随便截一张就行。");
         return;
@@ -360,10 +349,6 @@ export function FindPanel({ inheritedImage }: Props) {
         setError("还没圈出要找的东西。在左边的参考图上按住拖一个框，把目标框住。");
         return;
       }
-    }
-    if (kind === "prompt" && promptMode === "text" && words.trim() === "") {
-      setError('还没写提示词。填几个词，逗号分隔，比如「确认按钮,取消」或「person,bus」。');
-      return;
     }
     if (kind === "semantic" && !modelEngine) {
       setError(
@@ -406,23 +391,15 @@ export function FindPanel({ inheritedImage }: Props) {
           : kind === "prompt"
             ? await findPrompt({
                 source,
-                mode: promptMode,
+                mode: "visual",
                 image: source === "image" ? (hay?.b64 ?? undefined) : undefined,
                 hwnd: source === "window" ? (hwnd ?? undefined) : undefined,
-                // 图找图：多个框当一个提示（同槽取并集）——用户圈几个样例时
+                // 多个框当一个提示（同槽取并集）——用户圈几个样例时
                 // 想要的是「这些都是一样的东西」，不是「分别找三样东西」。
-                ref_image: promptMode === "visual" ? refImg?.b64 : undefined,
-                ref_boxes:
-                  promptMode === "visual"
-                    ? refBoxes.map((b) => [b.x1, b.y1, b.x2, b.y2] as [number, number, number, number])
-                    : undefined,
-                words:
-                  promptMode === "text"
-                    ? words
-                        .split(/[,，\n]+/)
-                        .map((w) => w.trim())
-                        .filter(Boolean)
-                    : undefined,
+                ref_image: refImg?.b64,
+                ref_boxes: refBoxes.map(
+                  (b) => [b.x1, b.y1, b.x2, b.y2] as [number, number, number, number],
+                ),
                 conf: Number.isFinite(parsedConf) ? parsedConf : undefined,
                 max_results: maxResults,
               })
@@ -438,7 +415,7 @@ export function FindPanel({ inheritedImage }: Props) {
               });
       setResult(r);
       // 提示找图：搜完自动翻到「搜索范围」那一页，否则用户看不到框画在哪
-      if (kind === "prompt" && promptMode === "visual") setLeftTab("hay");
+      if (kind === "prompt") setLeftTab("hay");
       // 后端回传了它实际看到的画面：用它当背景，框与图必然对齐。
       // origin 由后端直接给出（屏幕/窗口截图的左上角），不靠前端反推。
       if (r.preview) {
@@ -481,11 +458,9 @@ export function FindPanel({ inheritedImage }: Props) {
       ? !!tpl
       : kind === "semantic"
         ? !!modelEngine
-        : promptMode === "visual"
-          ? !!refImg && refBoxes.length > 0
-          : words.trim() !== "";
-  /** 提示找图的图找图模式：左侧卡片显示参考图（要框东西）还是搜索范围（看命中） */
-  const showRefPicker = kind === "prompt" && promptMode === "visual";
+        : !!refImg && refBoxes.length > 0;
+  /** 提示找图：左侧卡片显示参考图（要框东西），搜完才翻到搜索范围 */
+  const showRefPicker = kind === "prompt";
   /** 高级栏底部那句「当前用 X 在 Y 里找」里的 X */
   const whatLabel =
     kind === "template"
@@ -494,13 +469,9 @@ export function FindPanel({ inheritedImage }: Props) {
         : "未选模板"
       : kind === "semantic"
         ? modelEngine || "未选模型"
-        : promptMode === "visual"
-          ? refBoxes.length > 0
-            ? `参考图的 ${refBoxes.length} 个框`
-            : "未圈目标"
-          : words.trim()
-            ? `提示词「${words.trim()}」`
-            : "未写提示词";
+        : refBoxes.length > 0
+          ? `参考图的 ${refBoxes.length} 个框`
+          : "未圈目标";
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col gap-3">
@@ -688,96 +659,46 @@ export function FindPanel({ inheritedImage }: Props) {
               <Hint>{KIND_HINT.prompt}</Hint>
             </Label>
             <div className="flex items-center gap-1.5">
-              {/* 图找图 / 语言找图：同一套权重，只是提示从哪来不一样 */}
-              <div className="flex items-center gap-0.5 rounded-lg bg-neutral-100 p-0.5">
-                {(["visual", "text"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => {
-                      setPromptMode(m);
-                      setResult(null);
-                      setError(null);
-                      setLeftTab(m === "visual" ? "ref" : "hay");
-                    }}
-                    className={cn(
-                      "flex h-7 items-center gap-1 rounded-md px-2 text-[12px] leading-none transition-colors",
-                      promptMode === m
-                        ? "bg-white font-medium text-neutral-900 shadow-sm"
-                        : "text-neutral-500 hover:text-neutral-700",
-                    )}
-                  >
-                    {m === "visual" ? (
-                      <Frame className="h-3.5 w-3.5" />
-                    ) : (
-                      <Type className="h-3.5 w-3.5" />
-                    )}
-                    {PROMPT_MODE_LABEL[m]}
-                  </button>
-                ))}
-              </div>
-
-              {promptMode === "visual" ? (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => refInputRef.current?.click()}
-                  >
-                    <Frame className="h-3.5 w-3.5" />
-                    {refImg ? "换参考图" : "选参考图"}
-                  </Button>
-                  <input
-                    ref={refInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void loadFileTo(f, "ref");
-                      e.target.value = "";
-                    }}
+              <Button size="sm" variant="outline" onClick={() => refInputRef.current?.click()}>
+                <Frame className="h-3.5 w-3.5" />
+                {refImg ? "换参考图" : "选参考图"}
+              </Button>
+              <input
+                ref={refInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void loadFileTo(f, "ref");
+                  e.target.value = "";
+                }}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void shootRef()}
+                disabled={busy}
+                title="直接截当前屏幕当参考图（想找的东西就在屏幕上时最省事）"
+              >
+                <Monitor className="h-3.5 w-3.5" />
+                截一张
+              </Button>
+              {refImg && (
+                <span
+                  className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
+                  title={refImg.name}
+                >
+                  <img
+                    src={refImg.url}
+                    alt="参考图"
+                    className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
                   />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void shootRef()}
-                    disabled={busy}
-                    title="直接截当前屏幕当参考图（想找的东西就在屏幕上时最省事）"
-                  >
-                    <Monitor className="h-3.5 w-3.5" />
-                    截一张
-                  </Button>
-                  {refImg && (
-                    <span
-                      className="flex items-center gap-1.5 rounded-md bg-neutral-50 py-0.5 pl-1 pr-2"
-                      title={refImg.name}
-                    >
-                      <img
-                        src={refImg.url}
-                        alt="参考图"
-                        className="h-6 w-6 rounded border border-neutral-200 bg-white object-contain"
-                      />
-                      <span className="font-mono text-[11px] text-neutral-500">
-                        {refImg.width}×{refImg.height}
-                        {refBoxes.length > 0 ? ` · ${refBoxes.length} 个框` : ""}
-                      </span>
-                    </span>
-                  )}
-                </>
-              ) : (
-                <>
-                  <Input
-                    className="h-8 w-[240px] text-[12px]"
-                    placeholder="确认按钮, 关闭"
-                    value={words}
-                    onChange={(e) => {
-                      setWords(e.target.value);
-                      setResult(null);
-                    }}
-                  />
-                  <span className="text-[12px] text-neutral-400">逗号分隔</span>
-                </>
+                  <span className="font-mono text-[11px] text-neutral-500">
+                    {refImg.width}×{refImg.height}
+                    {refBoxes.length > 0 ? ` · ${refBoxes.length} 个框` : ""}
+                  </span>
+                </span>
               )}
             </div>
           </div>
@@ -1095,9 +1016,7 @@ export function FindPanel({ inheritedImage }: Props) {
                       ? "模板是「要找的小图」，搜索范围是「去哪张图里找」。两个都有了才能开始。"
                       : kind === "semantic"
                         ? "语义找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
-                        : promptMode === "text"
-                          ? "语言找图不用模板，但得先确定「去哪张图里找」。选好范围就能开始。"
-                          : "搜索范围是「去哪张图里找」。在左边那页圈好参考图，这里选好范围，就能开始。"
+                        : "搜索范围是「去哪张图里找」。在左边那页圈好参考图，这里选好范围，就能开始。"
                   }
                   steps={
                     kind === "template"
@@ -1137,19 +1056,9 @@ export function FindPanel({ inheritedImage }: Props) {
                           ]
                         : [
                             {
-                              icon: promptMode === "visual" ? (
-                                <Frame className="h-3.5 w-3.5" />
-                              ) : (
-                                <Type className="h-3.5 w-3.5" />
-                              ),
-                              text:
-                                promptMode === "visual"
-                                  ? "① 选参考图，在上面拖框圈住要找的东西"
-                                  : "① 写几个提示词，逗号分隔",
-                              detail:
-                                promptMode === "visual"
-                                  ? "去左边「参考图」那页圈；多个框会当成同一个目标"
-                                  : "比如「确认按钮, 关闭」",
+                              icon: <Frame className="h-3.5 w-3.5" />,
+                              text: "① 选参考图，在上面拖框圈住要找的东西",
+                              detail: "去左边「参考图」那页圈；多个框会当成同一个目标",
                             },
                             {
                               icon: <AppWindow className="h-3.5 w-3.5" />,
@@ -1248,16 +1157,12 @@ export function FindPanel({ inheritedImage }: Props) {
                     ? kind === "semantic"
                       ? "模型没在这个画面里认出目标。先把「置信度下限」调小试试；还不行就是模型不认得这类目标，得换模型。"
                       : kind === "prompt"
-                        ? promptMode === "visual"
-                          ? "没找到跟参考框里那块像的东西。先把「置信度下限」调小试试；还不行就把参考框圈得更贴一点，或者换一张更清楚的参考图。"
-                          : "没找到符合这些词的东西。先把「置信度下限」调小试试；还不行就换个说法——用具体的名词，别用「按钮」这种太泛的词。"
+                        ? "没找到跟参考框里那块像的东西。先把「置信度下限」调小试试；还不行就把参考框圈得更贴一点，或者换一张更清楚的参考图。"
                         : "可能是画面里没有这个图，或者相似度不够。切到「容错」再试一次。"
                     : kind === "semantic"
                       ? "模型和搜索范围都选好后，点「语义查找」。"
                       : kind === "prompt"
-                        ? promptMode === "visual"
-                          ? "参考框和搜索范围都弄好后，点「开始找图」。"
-                          : "提示词和搜索范围都写好后，点「开始找图」。"
+                        ? "参考框和搜索范围都弄好后，点「开始找图」。"
                         : "模板和搜索范围都选好后，点「开始找图」。"
                 }
               />

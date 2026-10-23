@@ -1,4 +1,4 @@
-﻿//! HTTP 路由与处理器。路由表 1:1 对应 `docs/PLAN.md` 第 6 节。
+//! HTTP 路由与处理器。路由表 1:1 对应 `docs/PLAN.md` 第 6 节。
 //!
 //! 全部端点均已实现：
 //! - 识别类：`/ocr/shibie`、`/ocr/zhaozi`、`/ocr/duohangjson`、`/ocr/danzijson`
@@ -177,7 +177,7 @@ const P_DETECT: &str = "/vision/detect";
 const P_PIPELINE: &str = "/vision/pipeline";
 /// 扫码：二维码 / 条码。一个端点覆盖全部码制，用 `barcode_formats` 过滤
 const P_QRCODE: &str = "/vision/qrcode";
-/// 运行时提示找图：图找图（参考图 + 框）/ 语言找图（提示词），换目标不用换模型
+/// 运行时提示找图：图找图（参考图 + 框）/ 按名字找（教过的名字），换目标不用换模型
 const P_PROMPT: &str = "/vision/prompt";
 /// 中文视觉参考库：把「一个中文名」绑到「一块参考图区域」，之后按中文名找
 const P_PROMPTREF: &str = "/vision/promptref";
@@ -852,7 +852,7 @@ async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Res
     .into_response()
 }
 
-/// POST /vision/prompt —— 运行时提示找图：图找图 / 语言找图。
+/// POST /vision/prompt —— 运行时提示找图：图找图 / 按名字找。
 ///
 /// 与 `/ocr/yuyizhaotu` 的区别：那个用的是**烘焙过提示**的检测模型，换目标要重新
 /// 导出 ONNX；这个用的是把提示当**额外图输入**的模型，换目标只换输入。
@@ -860,11 +860,15 @@ async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Res
 /// 两种提示方式（`mode`）：
 /// - `visual`（图找图，缺省）：给参考图（`ref_image`）+ 一个框（`ref_boxes`），
 ///   模型找「跟这个像的」。不挑外观——换了皮肤、按钮变按下态也照样认得。
-/// - `text`（语言找图）：给几个词（`words`），模型找「语义上是的」。
+/// - `ref`（按名字找）：给几个**教过的**名字（`words`），逐个从中文参考库取
+///   当初框的那块图，走的就是 `visual` 那条视觉通道。
+///
+/// `mode=text`（按词描述找图）已于 2026-10-23 移除：实测在界面控件上分数只有
+/// 0.1~0.2 量级，等于噪声，为它要背 242MB 文本塔。传 text 会得到明确指路。
 ///
 /// **出参与找图完全一致**（`found`/`x`/`y`/`center_x`/`center_y`/`score`/
 /// `matches`/`origin_x`/`origin_y`），额外多出 `engine` 与命中的
-/// `class_id`/`class_name`（语言找图时类名就是提示词本身）。已有脚本换个路径就能用。
+/// `class_id`/`class_name`（按名字找时类名就是那个名字）。已有脚本换个路径就能用。
 async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
     let ParsedPrompt {
@@ -958,27 +962,47 @@ async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Resp
                 names,
             }
         }
-        "text" => {
-            let words = opts
+        "ref" => {
+            let names = opts
                 .words
                 .as_deref()
                 .map(|s| {
-                    s.split([',', '，'])
+                    s.split([',', '，', ';'])
                         .map(|p| p.trim().to_string())
                         .filter(|p| !p.is_empty())
                         .collect::<Vec<_>>()
                 })
+                .filter(|v| !v.is_empty())
+                // AI / 脚本常把名字放 names 而不是 words，两个都收
+                .or_else(|| {
+                    opts.ref_names.as_deref().map(|s| {
+                        s.split(';')
+                            .map(|p| p.trim().to_string())
+                            .filter(|p| !p.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                })
                 .unwrap_or_default();
-            if words.is_empty() {
+            if names.is_empty() {
                 return ApiError::BadRequest(
-                    "mode=text 需要 words（逗号分隔，如 \"person,bus\"）".to_string(),
+                    "mode=ref 需要 words（教过的名字，多个用逗号分隔，如 \"提交按钮,搜索框\"）"
+                        .to_string(),
                 )
                 .into_response();
             }
-            crate::engine::prompt::PromptInput::Text { words }
+            crate::engine::prompt::PromptInput::Refs { names }
+        }
+        "text" => {
+            return ApiError::BadRequest(
+                "mode=text（按词描述找图）已移除：实测在界面元素上分数只有 0.1~0.2，等于噪声。\
+                 改成「教一次再按名字找」：先 POST /vision/promptref（参考图 + 框 + 中文名）教一次，\
+                 再用 mode=ref 写这个名字找。纯图片提示用 mode=visual。"
+                    .to_string(),
+            )
+            .into_response()
         }
         other => {
-            return ApiError::BadRequest(format!("未知 mode {other:?}（可选 visual / text）"))
+            return ApiError::BadRequest(format!("未知 mode {other:?}（可选 visual / ref）"))
                 .into_response()
         }
     };
@@ -1024,8 +1048,8 @@ async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Resp
 
 /// 中文视觉参考库：列出已经「教过」的目标。
 ///
-/// 这些名字可以直接当 `mode=text` 的提示词用（"提交按钮" 而不是 "submit button"），
-/// 走的是图找图那条通道，不依赖英文文本塔。
+/// 这些名字可以直接当 `mode=ref` 的名字用（"提交按钮" 这种中文），
+/// 走的是图找图那条视觉通道。
 async fn prompt_ref_list(State(state): State<Arc<AppState>>) -> Response {
     let refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
     let items: Vec<serde_json::Value> = refs
@@ -1047,7 +1071,7 @@ async fn prompt_ref_list(State(state): State<Arc<AppState>>) -> Response {
             "还没有教过任何目标。POST 一张参考图 + 一个框 + 一个中文名就行".to_string()
         } else {
             format!(
-                "共 {} 个，可以直接当 /vision/prompt 的 mode=text 提示词用",
+                "共 {} 个，可以直接当 /vision/prompt 的 mode=ref 名字用",
                 items.len()
             )
         },
@@ -1126,7 +1150,7 @@ async fn prompt_ref_add(State(state): State<Arc<AppState>>, req: Request) -> Res
     tracing::info!("AI/用户教了新目标：{name}（{}x{}）", entry.width, entry.height);
     Json(ApiResp {
         code: 0,
-        msg: format!("已记住「{name}」，之后 /vision/prompt 的 mode=text 直接写这个名字就行"),
+        msg: format!("已记住「{name}」，之后 /vision/prompt 用 mode=ref 写这个名字就行"),
         data: Some(serde_json::json!({
             "name": entry.name,
             "box": entry.rect,

@@ -23,7 +23,6 @@ import {
   Shield,
   Square,
   Trash2,
-  Type,
   Zap,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -455,36 +454,26 @@ export function SettingsPage() {
             </div>
           </ModelGroup>
 
-          {/* 组 2：提示找图——自带，三种找法各自装没装 */}
+          {/* 组 2：提示找图——自带，两种用法共用同一套文件 */}
           <ModelGroup
             icon={<ScanSearch className="h-3.5 w-3.5" />}
             title="提示找图"
             badge={assets?.detector ? "已就绪" : "未安装"}
             badgeVariant={assets?.detector ? "success" : "warning"}
-            desc="在屏幕上找目标。三种找法各走各的模型文件，缺哪个补哪个，不用改任何设置。"
+            desc="在屏幕上找目标，只认「长得像」。两套文件缺哪个补哪个，不用改任何设置。"
           >
             <div className="flex flex-col gap-1.5">
               <AssetRow
                 icon={<ScanSearch className="h-3.5 w-3.5" />}
                 name="图找图"
-                desc="截一块目标当参考图，找屏幕上长得一样的"
+                desc="截一块目标当参考图，找屏幕上长得一样的——换皮肤、按下态也认"
                 ok={!!assets?.detector && !!assets?.vpe}
               />
               <AssetRow
                 icon={<Languages className="h-3.5 w-3.5" />}
-                name="中文找图"
-                desc="写中文词，或教一次起个中文名——走的和图找图同一条路"
+                name="按中文名找"
+                desc="框一次、起个中文名（如「提交按钮」），以后直接用这个名字找"
                 ok={!!assets?.detector && !!assets?.vpe}
-              />
-              <AssetRow
-                icon={<Type className="h-3.5 w-3.5" />}
-                name="英文语言找图"
-                desc={
-                  assets?.text_weights
-                    ? `直接写英文句子就能找（已带文本塔${assets.text_weights_mb ? `，${Math.round(assets.text_weights_mb)}MB` : ""}）`
-                    : "需要额外 242MB 文本塔，当前未装。中文找图不受影响"
-                }
-                ok={!!assets?.detector && !!assets?.text_head && !!assets?.text_weights}
               />
             </div>
             {assets && !assets.detector && (

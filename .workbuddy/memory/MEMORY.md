@@ -76,31 +76,35 @@
 
 ## 语义找图 / 提示找图（卖点，别削弱）
 - `/ocr/yuyizhaotu`（语义）与 `/vision/prompt`（提示）**出参与模板找图刻意同构**：`assemble_find_data()` 是唯一组装点，模板找图出参一个字节没变，不许改成新格式。不暴露 `iou`；不按来源分端点（用 `source`）。
-- 提示找图三件套在 `models/yoloe/`：`*_prompt.onnx`（检测器，双输入 images+pe）、`*_vpe.onnx`（视觉提示）、`*_texthead.onnx`（文本头）。文本塔 MobileCLIP2-B 走纯 Rust crate `mobileclip2-b-rs`（`ts-loader` feature 直接读 ultralytics 的 `.ts`）。
-- **语言找图需 242MB `mobileclip2_b.ts`**；`discover_assets` 搜 `models/yoloe/` → `models/_fixtures/weights/`。发布时放 `models/yoloe/`（打包保留）。
+- **提示找图只有两件套**（2026-10-23 起）：`*_prompt.onnx`（检测器，双输入 images+pe）、`*_vpe.onnx`（视觉提示编码器）。**没有文本塔、没有 texthead、没有词表**——语言找图整条已删（见下）。
 - `OutputLayout::EndToEnd` 判据 `anchors < grid && channels >= 6`（只看通道会误吃 v5 6 通道 raw head）；`class_channels()` 的 EndToEnd base 是 5 不是 6。
 
-## 中文找图 + AI 操控服务（2026-10-23，卖点，别削弱）
-- **MobileCLIP2-B 是英文语义空间，中文不可直接喂**（BPE 拆字节片，19 个常见词仅「人」偶然撞中）；换中文塔不可行（特征空间与 texthead 不对齐）。
-- 两条路子：① `engine/zh_words.rs` 中英词典（`models/yoloe/zh_words.json` 可覆盖），命中映射英文进文本塔、类名回显中文；② `engine/prompt_refs.rs` 中文视觉参考库（框一次起中文名 → 走 VPE 图找图，不依赖 242MB 文本塔），`GET/POST/DELETE /vision/promptref`，**DELETE 的 name 必须 query 与 body 都认**（`?name=中文` 是 AI 最自然写法）。
-- **架构红线：`prompt.rs::text_pe` 保持官方文本塔逐位复刻，中文映射只许放 API 边界的 `pe_for_words`。** parity 夹具 `text.words` 故意混中文词「确认按钮」，动引擎层就炸基线。
-- **AI 服务** `api/ai.rs` + `api/ai_tools.rs`（复用 8848，默认关）：Bearer 连接码、120 次/分限流、`request_id` 幂等、写操作审计、readonly/write/dangerous 三档；信封 `{ok,summary,data,error}`；未知工具给 `closest_tool` 候选；`/ai/v1/*` **刻意不进 `PATHS`**（那是用户脚本清单）。设置页「AI 控制」面板管理开关/连接码/提示词。
+## 语言找图已整体移除（2026-10-23 用户拍板，**别再往回加**）
+- `mode=text` 实测在界面控件上分数只有 **0.1~0.2 = 噪声**（设置页截图 12 个中文词全 0 命中，「按钮」放宽到 conf=0.10 才 1 命中 0.207）。是 YOLOE 文本提示的训练分布决定的，调参救不了。
+- 连带删除：`mobileclip2_b.ts`(242MB)、`tokenizer*.json`、`*_texthead.*`、`zh_words.rs`、`text_pe_cache.rs`、`bin/bake_text_pe.rs`、`mobileclip2-b-rs` 依赖、2 项文本塔 parity。**原「`text_pe` 逐位复刻 + 中文只放 `pe_for_words`」的架构红线随之作废。**
+- `mode=text` 保留**明确指路的 400**（不是静默、不是 404）：老脚本/AI 旧记忆都会写 `text`，静默会让人以为「功能还在只是没找到」。
+- 分发包 345.3MB → **224.6MB**；`verify_packaged.py` 有体积防线，文本塔文件回流即 FAIL。
+
+## 中文找图（只剩参考库）+ AI 操控服务（卖点，别削弱）
+- `engine/prompt_refs.rs` 中文视觉参考库：框一次起中文名 → 走 VPE 图找图。`GET/POST/DELETE /vision/promptref`，**DELETE 的 name 必须 query 与 body 都认**（`?name=中文` 是 AI 最自然写法）。
+- 找的时候用 **`mode=ref`**（`pe_for_refs(names, refs)` 只查参考库）；未命中的名字明确报错 + 列出已有名字 + 提示先教。
+- **教多大一块决定成败**（实测首位命中）：单行文字 0.16 / 整行 0.16 / 导航块 0.74 但跨页掉出前 3 / **整条侧边栏 0.94、跨页 0.84**。VPE 认「一块有结构的整体」，细条既低分又会被正文纹理骗走。
+- **AI 服务** `api/ai.rs` + `api/ai_tools.rs`（复用 8848，默认关）：Bearer 连接码、120 次/分限流、`request_id` 幂等、写操作审计、readonly/write/dangerous 三档；信封 `{ok,summary,data,error}`；未知工具给 `closest_tool` 候选；`/ai/v1/*` **刻意不进 `PATHS`**（那是用户脚本清单）。工具 `find_target`/`teach_target`/`list_targets`（原名 `find_word` 已改）。设置页「AI 控制」面板管理开关/连接码/提示词。
 
 ## 打包与分发
 - `scripts/pack_exe.ps1` 产 `release/OCR-Studio-<ver>-win64.zip`（免安装）。剔掉：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、`inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、`models/detect/yolo/` 下除 README 外全部。**新增夹具目录要同步加进来**。
 - `.gitignore` 必须有 `models/**/*.ts`（MobileCLIP2-B 权重后缀 `.ts` 会被当 TS 源码，253MB）。不能裸写 `*.ts`。另需忽略 `src-tauri/config.json`（运行期配置，含 AI 连接码）与 `prompt_refs/`。
 - 信封键是 **`msg`** 不是 `message`（`ApiResp { code, msg, data }`）。
-- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑 health/shibie/quyuocr/qrcode/prompt(visual+text) + 中文词表映射（类名回显中文）+ 参考库教/找/删 + >2MB 大图 multipart + AI 默认 403。改打包流程或模型清单后必须复跑。
+- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑「不该带什么」体积防线 + health/shibie/quyuocr/qrcode/prompt(visual) + `mode=text` 必须 400 指路 + `mode=ref` 未教过必须拒 + 参考库教/找/删 + >2MB 大图 multipart + AI 默认 403。改打包流程或模型清单后必须复跑。
+- **界面验收脚本 `scripts/verify_ui_zh.py`**：explorer 拉起 exe → **从截图里量左侧导航 5 项行位置**（不写死比例，写死过一次导致点在正文区、两张图同页、被误读成「找图不准」）→ 教「左侧侧边栏」→ 同图 + 跨页按名字找。调用 400 响应必须当正常响应读（urllib 默认抛 HTTPError）。
 - **请求体上限 32MB 靠 `DefaultBodyLimit` 显式放开**（`routes.rs` 的 `build_router_with`）：
   axum 0.8 默认只给 **2MB**，且只作用于 `Multipart` extractor（JSON 路径自己用
   `to_bytes(body, MAX_BODY)`，不受影响）。**漏了它，用户 multipart 传 3MB 截图就 400**
   「Error parsing multipart/form-data request」，同一张图走 JSON 却正常 —— 极难排查。
-- **语言找图权重 `mobileclip2_b.ts`（242MB）随包带**：放正式位置 `models/yoloe/`
-  （硬链接到 `_fixtures/weights/`，零额外占用；`discover_assets` 本就先搜这里）。
-  分发包因此约 **360MB**（`.ts` 已是 zip，再压几乎不减小）。
+- 分发包现约 **224.6MB**（PP-OCR tiny/small/medium 三档是主要体积；文本塔移除后省 242MB）。
 - `pack_exe.ps1` 删构建产物必须走 `Remove-BuildArtifact`（.NET 直删）——safe-delete trash 对暂存目录抛 fail-closed。
 
-## 当前状态（2026-10-23）
-- 全部大需求已落地：区域OCR、蒙版模板匹配、二维码/条码、语义找图、提示找图、中文找图（词表+参考库）、AI 操控服务、界面精修、全面检查。端点 **19**（认字 5 / 找图 9 / 看图 3 / 状态 2）。
-- 测试基线：`cargo test --lib` **133 passed**；`api_smoke` **17 passed + 10 ignored**；`ai_service` **7 passed**；`--ignored` **29 项全绿**（含 `pipeline_match` 黄金基线、`yoloe_prompt_parity` 3/3）。
-- 详细记录见 `docs/PROGRESS.md`（§7.10 = 中文找图 + AI 服务）；引擎契约见 `docs/ENGINES.md`。
+## 当前状态（2026-10-23 晚）
+- 全部大需求已落地：区域OCR、蒙版模板匹配、二维码/条码、语义找图、提示找图（图找图 + 按中文名找）、AI 操控服务、界面精修、全面检查。端点 **19**（认字 5 / 找图 9 / 看图 3 / 状态 2）——语言找图移除**不减少端点数**（那是 `mode` 的一个取值，不是独立路径）。
+- 测试基线：`cargo test --lib` **127 passed**；`api_smoke` **17 passed + 10 ignored**；`ai_service` **7 passed**；`--ignored` **27 项**（逐 target 跑；`capture_live::window_capture_produces_non_blank_image` 在无头/远程会话里必黑，属环境限制不属缺陷）。
+- 详细记录见 `docs/PROGRESS.md`（§7.11 = 移除语言提示找图）；引擎契约见 `docs/ENGINES.md` §6.7。

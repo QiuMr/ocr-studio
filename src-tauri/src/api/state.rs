@@ -156,13 +156,13 @@ pub struct AppState {
     pub engine: Mutex<Option<OcrEngine>>,
     /// PP-OCR 之外的引擎（当前只会是 ddddocr），单槽。
     alt: Mutex<Option<AltEngine>>,
-    /// 运行时提示引擎（YOLOE 开放词汇的图找图/语言找图），单槽、按需加载。
-    /// 它带 250MB 级的文本塔，不能跟主引擎一起常驻。
+    /// 运行时提示引擎（YOLOE 开放词汇的图找图），单槽、按需加载。
+    /// 检测器 + 视觉编码器几百 MB，不能跟主引擎一起常驻。
     prompt: Mutex<Option<crate::engine::prompt::PromptEngine>>,
     /// 中文视觉参考库（`<数据目录>/prompt_refs/`）。
     ///
     /// 独立于提示引擎：教一个新目标只是存图 + 写索引，不该为了加一条记录
-    /// 去加载那 242MB 的文本塔。
+    /// 就去加载检测器。`mode=ref` 查找时才把参考图送进视觉编码器。
     pub refs: Mutex<crate::engine::prompt_refs::RefStore>,
     /// AI 接口的限流窗口（最近一分钟内的调用时刻）。
     pub ai_rate: Mutex<std::collections::VecDeque<std::time::Instant>>,
@@ -360,7 +360,7 @@ impl AppState {
         .map_err(|e| ApiError::Internal(format!("推理任务崩溃: {e}")))?
     }
 
-    /// 运行时提示找图（图找图 / 语言找图）。
+    /// 运行时提示找图（图找图 / 按名字找）。
     ///
     /// 引擎按需加载、单槽常驻：文本塔是 250MB 级的权重，不能每次请求都读盘；
     /// 但也不跟主 OCR 引擎一起加载——不用这个功能的人不该付这份内存。

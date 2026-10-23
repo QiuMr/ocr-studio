@@ -185,7 +185,7 @@ export type FindMode = "exact" | "loose";
 export type FindKind = "template" | "semantic" | "prompt";
 
 /** 提示找图的两种给目标方式：给图（参考图 + 框）/ 给词 */
-export type PromptMode = "visual" | "text";
+export type PromptMode = "visual" | "ref";
 
 export interface FindHit {
   x: number;
@@ -263,14 +263,14 @@ export interface SemanticFindArgs {
  * 提示找图参数：目标由调用方**当场给**，不是模型固化的类别。
  *
  * - `mode=visual`：给参考图 + 一个（或多个）框，找「跟框里这块像的」。
- * - `mode=text`：给几个词，找「语义上是的」。
+ * - `mode=ref`：给几个**教过的**名字（中文参考库），走同一条视觉通道。
  *
  * 与 `SemanticFindArgs` 的核心差别就是「换目标要不要换模型」：语义找图要，
  * 这里不要。
  */
 export interface PromptFindArgs {
   source: FindSource;
-  /** `visual`（缺省）或 `text` */
+  /** `visual`（缺省）或 `ref` */
   mode?: PromptMode;
   image?: string;
   hwnd?: number;
@@ -284,7 +284,7 @@ export interface PromptFindArgs {
   ref_classes?: number[];
   /** 槽的名字（仅回显用） */
   ref_names?: string[];
-  /** 提示词列表（`mode=text` 必填） */
+  /** 名字列表（`mode=ref` 必填，必须先在参考库里教过） */
   words?: string[];
   /** 置信度下限，默认 0.25 */
   conf?: number;
@@ -354,25 +354,17 @@ export interface EngineList {
 /**
  * 设置页「模型」卡片用：提示找图（YOLOE）资产的安装状态。
  *
- * 与 `EngineList` 分工：那份表只扫 OCR 引擎，这份扫提示找图三件套 +
- * 242MB 文本塔。**中文找图（词表 + 参考库）不依赖文本塔**——
- * 只有纯英文语言找图才需要它，界面上要把这点讲清楚。
+ * 与 `EngineList` 分工：那份表只扫 OCR 引擎，这份扫提示找图两件套。
+ * 只有两个文件（检测器 + 视觉提示编码器），没有文本塔——文本提示已于
+ * 2026-10-23 移除（实测在界面控件上分数只有噪声量级）。
  */
 export interface PromptAssets {
   /** 检测器在不在（整套功能可用的判据） */
   detector: boolean;
-  /** 视觉提示编码器：图找图、中文参考库都走它 */
+  /** 视觉提示编码器：图找图和「按名字找」都走它 */
   vpe: boolean;
-  /** 文本提示头：英文语言找图用 */
-  text_head: boolean;
-  /** 文本塔权重（242MB MobileCLIP2-B）：纯英文语言找图才需要 */
-  text_weights: boolean;
-  /** 文本塔文件大小（MB）；没装是 null */
-  text_weights_mb: number | null;
   /** 资产目录约定（缺东西时告诉用户该放哪） */
   dir: string;
-  /** 中文词表是用户自带的（zh_words.json）还是内置表 */
-  zh_words_custom: boolean;
 }
 
 /**

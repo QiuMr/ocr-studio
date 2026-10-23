@@ -673,56 +673,36 @@ pub fn list_engines(state: State<'_, Arc<AppState>>) -> EngineListOut {
 /// 设置页「模型」卡片：提示找图（YOLOE）资产的安装状态。
 ///
 /// 与 `list_engines` 的区别：那份表只扫 **OCR 引擎**（ppocr/ddddoc/yolo），
-/// 提示找图三件套和 242MB 文本塔走另一套 `discover_assets`，
-/// 不在这里露出来，设置页就只能显示「引擎清单」而说不清找图模型装没装。
+/// 提示找图的两件套走另一套 `discover_assets`，不在这里露出来，
+/// 设置页就只能显示「引擎清单」而说不清找图模型装没装。
 /// 只扫目录、不加载模型 —— 与引擎清单同一纪律。
 #[derive(Debug, Serialize)]
 pub struct PromptAssetsOut {
     /// 检测器在不在（整套功能可用的判据）
     pub detector: bool,
-    /// 视觉提示编码器：图找图、中文参考库都走它
+    /// 视觉提示编码器：图找图和「按名字找」都走它
     pub vpe: bool,
-    /// 文本提示头：英文语言找图用
-    pub text_head: bool,
-    /// 文本塔权重（242MB MobileCLIP2-B）：纯英文语言找图才需要
-    pub text_weights: bool,
-    /// 文本塔文件大小（MB）；没装是 None
-    pub text_weights_mb: Option<f64>,
     /// 资产目录约定（缺东西时告诉用户该放哪）
     pub dir: String,
-    /// 中文词表是用户自带的（zh_words.json）还是内置表
-    pub zh_words_custom: bool,
 }
 
 #[tauri::command]
 pub fn prompt_assets_status(state: State<'_, Arc<AppState>>) -> PromptAssetsOut {
     use crate::engine::prompt::discover_assets;
-    let root = &state.models_root;
-    let dir = root.join("yoloe").display().to_string();
-    let Some(a) = discover_assets(root) else {
+    let dir = state.models_root.join("yoloe").display().to_string();
+    let Some(a) = discover_assets(&state.models_root) else {
         return PromptAssetsOut {
             detector: false,
             vpe: false,
-            text_head: false,
-            text_weights: false,
-            text_weights_mb: None,
             dir,
-            zh_words_custom: false,
         };
     };
     PromptAssetsOut {
         detector: true,
         vpe: a.vpe.is_some(),
-        text_head: a.text_head.is_some(),
-        text_weights: a.text_weights.is_some(),
-        text_weights_mb: a.text_weights.as_ref().and_then(|p| {
-            std::fs::metadata(p).ok().map(|m| m.len() as f64 / 1048576.0)
-        }),
         dir,
-        zh_words_custom: a.zh_words.is_some(),
     }
 }
-
 // ---------------------------------------------------------------- 检测模型
 
 /// 设置页「目标检测模型」卡片的一条记录。
@@ -1400,12 +1380,12 @@ pub async fn find_semantic(
 
 /// 运行时提示找图参数。与 `SemanticFindArgs` 的差别：语义找图的目标是**模型固化的
 /// 类别**，这里的目标由调用方**当场给**——给图（`ref_image` + `ref_boxes`）或给词
-/// （`words`），换目标只换参数、不换模型。
+/// （`words`，教过的名字），换目标只换参数、不换模型。
 #[derive(Debug, serde::Deserialize)]
 pub struct PromptFindArgs {
     /// `image` / `screen` / `window`
     pub source: String,
-    /// `visual`（图找图，缺省）或 `text`（语言找图）
+    /// `visual`（图找图，缺省）或 `ref`（按教过的名字找）
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
@@ -1428,7 +1408,7 @@ pub struct PromptFindArgs {
     /// 槽对应的名字（仅用于回显，不影响匹配）。缺省用「目标1/目标2…」
     #[serde(default)]
     pub ref_names: Option<Vec<String>>,
-    /// 提示词列表，`mode=text` 必填
+    /// 名字列表，`mode=ref` 必填（必须先在参考库里教过）
     #[serde(default)]
     pub words: Option<Vec<String>>,
     #[serde(default)]
@@ -1509,8 +1489,8 @@ pub async fn find_prompt(
                 names: args.ref_names.clone().unwrap_or_default(),
             }
         }
-        "text" => {
-            let words: Vec<String> = args
+        "ref" => {
+            let names: Vec<String> = args
                 .words
                 .clone()
                 .unwrap_or_default()
@@ -1518,12 +1498,21 @@ pub async fn find_prompt(
                 .map(|w| w.trim().to_string())
                 .filter(|w| !w.is_empty())
                 .collect();
-            if words.is_empty() {
-                return Err("mode=text 需要 words（至少一个提示词）".to_string());
+            if names.is_empty() {
+                return Err(
+                    "mode=ref 需要 words（教过的名字，至少一个；先用「教它认」教一次）".to_string(),
+                );
             }
-            crate::engine::prompt::PromptInput::Text { words }
+            crate::engine::prompt::PromptInput::Refs { names }
         }
-        other => return Err(format!("未知 mode {other:?}（可选 visual / text）")),
+        "text" => {
+            return Err(
+                "mode=text（按词描述找图）已移除：在界面元素上的分数只有 0.1~0.2，等于噪声。\
+                 改用 mode=ref，按「教过的名字」找"
+                    .to_string(),
+            )
+        }
+        other => return Err(format!("未知 mode {other:?}（可选 visual / ref）")),
     };
 
     let find_opts = crate::api::dto::FindOptions {

@@ -1,22 +1,29 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-23（中文目标词表 + 中文参考库 + AI 操控接口；免安装分发包已重打）
+> 最后更新：2026-10-23 晚（移除语言提示找图；提示找图只留视觉通道 + 中文参考库）
 
 ---
 
 ## 0. 一句话现状
 
 **M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），此后是用户反馈驱动的
-几轮改造。**本轮（10-23）：中文目标开箱可用 + AI 操控接口**。
-语言找图的中文输入走「内置中英词表 → 英文文本塔」，词表没盖住的用**中文参考库**
-（框一次起中文名 → 走 VPE 图找图通道，不依赖 242MB 文本塔），端点是
-`GET/POST/DELETE /vision/promptref`（第 19 个端点）。同时新增 **AI 操控接口**
+几轮改造。**本轮（10-23 深夜）：移除语言提示找图**——用户实测后判断「太特定了，没用，
+还占位置」。实测数据支持这个判断：真实界面截图上 12 个中文词最高只有 0.207，
+YOLOE 的文本提示对 UI 细粒度概念本就不可用。
+
+删掉的东西：`mode=text`、MobileCLIP2-B 文本塔（242MB）、CLIP 词表、`*_texthead.onnx`、
+`engine/zh_words.rs`（中英词典）、`engine/text_pe_cache.rs` + `bin/bake_text_pe.rs`
+（PE 预烘焙）、`mobileclip2-b-rs` 依赖、2 项 parity 用例。
+
+留下的核心：**图找图（VPE）+ 中文参考库**（`/vision/promptref`，框一次起中文名 →
+`mode=ref` 按名字找，走的就是视觉通道）。AI 工具 `find_word` 相应改为 `find_target`
+（只认教过的名字，未命中给「先 teach_target」+ 现有名字列表）。
+`/vision/prompt` 传 `mode=text` 会得到**明确指路**的 400，不是静默失效。
+
+上一轮：中文目标开箱（词表 + 参考库）+ **AI 操控接口**
 （`GET /ai/v1/tools` + `POST /ai/v1/tool`，复用 8848，默认关闭，Bearer 连接码 +
-幂等 + 限流 + 审计），设置页有「AI 控制」面板（开关 / 连接码 / 一键复制提示词）。
-端到端实测：中文「人」0.913 = person 0.913、「公交车」0.879 = bus 0.879，
-参考库「我的公交车」找到中心点 (409.06, 486.16)（与图找图通道逐位一致）。
-lib 单测 + 集成测试全绿（含新增 `tests/ai_service.rs` 7 项）。
+幂等 + 限流 + 审计），设置页有「AI 控制」面板。
 
 上一轮完成：检测模型可自定义（多模型 + 任意路径 + 类名从 ONNX metadata 读）、
 外壳改浅灰、标题栏 ACL 权限修复、侧栏去蓝、DirectML 假象纠正。
@@ -199,8 +206,8 @@ vite 就会新建空目录，比删安全。
 ## 1. 验证状态（可复现）
 
 ```
-cargo test                       # 133 个非重量级测试（lib 133 + api_smoke 16 + ai_service 7）
-cargo test -- --ignored          # + 29 个重量级集成测试（需模型/DLL/真实桌面）
+cargo test                       # 127 个非重量级测试（lib 127 + api_smoke 17 + ai_service 7）
+cargo test -- --ignored          # + 27 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
 cargo build --release            # 无安装包（bundle.active=false）
 powershell -File scripts/pack_exe.ps1    # 打免安装 zip
@@ -220,13 +227,13 @@ python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"
 
 | 测试 | 结果 |
 |---|---|
-| 单元测试（geometry / det / rec / preprocess / resize fixture / **matcher** / **prompt** / **api::state 错误映射**） | **113 / 113 通过**（1 个 bench 标 ignored） |
+| 单元测试（geometry / det / rec / preprocess / resize fixture / **matcher** / **prompt** / **api::state 错误映射**） | **127 / 127 通过**（1 个 bench 标 ignored；文本提示相关的 6 项随功能删除） |
 | `matcher::*`（7 个） | **7 / 7 通过**：原位命中(score>0.999)、亮度缩放免症、无假阳、纯色模板不误检、NMS 多目标、超大模板拒绝、1080p 多层金字塔 |
 | `pipeline_match::rust_matches_python_reference` | **通过**：文本不一致 0、框偏差 >2px 0、置信度偏差 >0.05 0 |
 | `tensor_diff::rec_tensor_matches_python_dump` | 通过（rec 输入张量与 Python dump 一致） |
 | `tensor_diff::warp_perspective_matches_python_crop` | 通过（透视裁剪 **0/3069 逐位一致**） |
 | `tensor_diff::rec_probe_matches_python_on_same_tensor` | 通过（同一张量下 Rust/Python 逐帧 argmax 一致） |
-| `api_smoke`（26 个：16 非 ignored + 10 ignored） | **26 / 26 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、**danzijson 逐字**、**quyuocr 区域**、**yuyizhaotu 语义**、**vision_prompt 文本提示**、400 错误路径 |
+| `api_smoke`（27 个：17 非 ignored + 10 ignored） | **27 / 27 通过**：health、shibie(JSON/multipart)、zhaozi(子串/正则)、**6 个找图路径**、**danzijson 逐字**、**quyuocr 区域**、**yuyizhaotu 语义**、**vision_prompt（教一次 → mode=ref 找 → 删）**、400 错误路径（含 `mode=text` 必须指路） |
 | `capture_live`（5 个，`--ignored`） | **5 / 5 通过**：全屏尺寸→自匹配**位置零误差、score=1.0**、区域截图坐标本地化、窗口枚举、窗口截图 136 万非黑像素 |
 | `scripts/e2e_find.py`（服务进程级） | **全部通过**：真实桌面自截模板 → `/ocr/pingmuzhaotu1` 命中**坐标零误差、score=1.0000**；容错端点一致；`tuzhaotu` 图内坐标与 `origin=(0,0)` 正确；缺模板返回 400 |
 | `scripts/e2e_danzi.py`（服务进程级） | **通过**：UI 截图 39 行 / 192 字，**每行字数与文本长度一致**、**每个字框都落在行框内** |
@@ -247,14 +254,16 @@ curl http://127.0.0.1:8848/ocr/health               {"status":"ok","model":"smal
 release/OCR-Studio-0.1.0-win64.zip                  exe + 3 个 dll + models + 使用说明
 ```
 
-打包产物实测（2026-10-23，`scripts/verify_packaged.py` 全绿，见 §7.9）：
+打包产物实测（2026-10-23 晚，`scripts/verify_packaged.py` 全绿，见 §7.9 / §7.11）：
 ```
-release/OCR-Studio-0.1.0-win64.zip                  约 360 MB（含语言找图 242MB 文本塔）
-OCR Studio.exe                                      14.84 MB
+release/OCR-Studio-0.1.0-win64.zip                  224.6 MB（242MB 文本塔已移除；
+                                                    体积主要来自 PP-OCR tiny/small/medium 三档）
+OCR Studio.exe                                      15.32 MB
 解压目录直接跑                                       health ok / actual_device=directml
 /ocr/shibie /ocr/quyuocr /vision/qrcode             全部 code=0，结果正确
 /vision/prompt mode=visual                          found=true score=0.955 engine=yoloe-prompt
-/vision/prompt mode=text                            found=true（类名=提示词）engine=yoloe-prompt
+/vision/prompt mode=text                            明确 400 + 指路 promptref（功能已移除）
+/vision/prompt mode=ref                             教一次 → 按名字找 found=true
 ```
 
 基线文件：`models/small/reference_output.json`（由 `scripts/ref_pipeline.py` 生成）。
@@ -1182,6 +1191,75 @@ set_threshold。**刻意不提供**：退出程序、改开机自启、改 AI �
    `libimage-*.rlib` 让 cargo 重建即恢复；若报「重跑一次就好」的那种瞬时损坏别删文件。
 
 ---
+
+## 7.11 M9：移除语言提示找图（2026-10-23 晚，用户拍板）
+
+### 结论先给
+
+用户原话：「语言提示找图太特定了，没有用，又占位置，我觉得还是去掉吧……就用 yoloe 的图找图就够了。」
+数据完全支持这个判断——不是「效果一般」，是**量级上就是噪声**：
+
+| 词 | 命中数 | 最高分 |
+|---|---|---|
+| 导航栏 / 侧边栏 / 工具栏 / 窗口 / 标签 / 列表 / 表格 / 文本框 / 链接 / 菜单 / 进度条 / 关闭按钮 | 0 | — |
+| 按钮（放宽到 conf=0.10） | 1 | **0.207** |
+
+对比同一条视觉通道：图找图在自截界面上命中分 0.6+，参考库「设置导航项」稳定命中。
+YOLOE 的文本提示在 COCO 那种大物体上能看，到界面控件这种细粒度概念就崩——这是
+训练分布决定的，不是调参能救的。
+
+### 删了什么（一条功能牵出的整条链）
+
+| 项 | 为什么必然连着删 |
+|---|---|
+| `mode=text` | 功能本体 |
+| `mobileclip2_b.ts`（242MB） | 只有文本塔能算词向量 |
+| `tokenizer.min.json` | 文本塔的分词器 |
+| `*_texthead.onnx` | 把 feat 变 pe 的提示头 |
+| `engine/zh_words.rs` | 中文得靠词典硬映射（CLIP 是英文语义空间） |
+| `engine/text_pe_cache.rs` + `bin/bake_text_pe.rs` | 为了不带 242MB 塔而做的预烘焙 |
+| `mobileclip2-b-rs` 依赖 | 文本塔的 Rust 实现，去掉后构建也快了一截 |
+| `yoloe_prompt_parity` 的 2 项 | 专测文本塔与官方 TorchScript 的逐值对齐 |
+
+**必须留的**：中文参考库（`engine/prompt_refs.rs`）最初就是为了「词表覆盖不到的自家元素」
+而做的，它走 VPE 视觉通道。所以 `mode=text` 不能简单删掉——参考库的名字原本是当
+`mode=text` 的词传进去的。改成 **`mode=ref`**：`pe_for_refs` 只查参考库，
+未命中的名字明确报错 + 列出已有名字 + 提示先教。
+
+### 接口与 AI 工具的迁移
+
+- `POST /vision/prompt`：`mode=visual`（缺省）/ `mode=ref`；传 `text` →
+  400「已移除……先 POST /vision/promptref 教一次，再用 mode=ref」
+- 报错为什么不用 404/静默：老脚本、老提示词、AI 的旧记忆都会写 `mode=text`。
+  静默忽略会让人以为「这功能还在，只是没找到」；404 会让人以为路径写错了。
+- AI 工具：`find_word` → `find_target`（`names` 参数）。未教过 → 错误里给
+  `teach_target` 的下一步与现有名字列表。
+- 设置页「模型」卡：组 2 从三行（图找图 / 中文找图 / 英文语言找图）并为两行
+  （图找图 / 按中文名找），`prompt_assets_status` 只剩 `detector` + `vpe`。
+
+### 验收
+
+- `cargo test --lib` **127 passed**（原 133，减 6 项词表/预烘焙用例）
+- `cargo test --test api_smoke` **17 passed / 10 ignored**（新增 `mode=text` 指路用例；
+  `vision_prompt_finds_taught_target` 改为「教一次 → mode=ref 找 → 删」）
+- `cargo test -- --ignored` **27 项**（原 29，减 2 项文本塔 parity；视觉 `pe` 对齐
+  仍为 1.64e-7）
+- 分发包 **224.6 MB**（原 345.3MB；242MB 文本塔移除，同时新纳入 PP-OCR tiny/medium 两档）。
+  `verify_packaged.py` 新增体积防线：`mobileclip2_b.*` / `tokenizer*` / `text_pe.bin` /
+  `zh_words.json` / `*_texthead.*` 一旦回流就 FAIL
+- `verify_packaged.py`：`mode=text` 明确拒绝并指路 / `mode=ref` 未教过明确拒绝 /
+  参考库教·找·删 / 命中中心落在框内
+- `verify_ui_zh.py`：截图程序自己的界面 → 教「左侧侧边栏」→ 同图 0.907、跨页仍命中
+
+### 验收脚本本身的两个坑（都差点被误读成产品缺陷）
+
+1. **导航坐标不能写死比例**。原来按 `NAV_Y["设置"]=0.55` 点，实际那一点在正文区，
+   于是「设置」根本没切过去，两张图是同一页；后面教参考图教到了正文标题上，
+   找图 0 命中——看着像「找图不准」，其实是素材没换。
+   现在改成**从截图里量的**：左侧竖条按行投影找暗像素带，取最后 5 段当 5 个导航项。
+   另加一条断言「两张截图字节不同」，钉住「导航真的切页了」。
+2. **参考库要教多大一块**（详见 `ENGINES.md` §6.7）：单行文字 0.16、整行 0.16、
+   导航块跨页掉出前 3，整条侧边栏同图 0.94 / 跨页 0.84。所以脚本教的是「左侧侧边栏」。
 
 ## 8. 关键文件索引
 

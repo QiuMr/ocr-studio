@@ -32,6 +32,8 @@ target
 # ONNX 模型与运行期 DLL（体积大，走下载脚本）
 models/**/*.onnx
 models/**/*.txt
+# fetch_models.ps1 现场生成的档位描述，跟着模型一起下来，不入库
+models/**/meta.json
 *.dll
 # …但目录说明文件要进仓库：它会随分发包发出去，也是「本目录出厂为空」的
 # 唯一书面说明，丢在 .gitignore 后面就等于只有本机有。
@@ -41,8 +43,8 @@ models/**/*.txt
 # pack_exe.ps1 也会把它们从分发包里剔掉）
 *.pt
 
-# MobileCLIP2-B 文本塔权重（253MB，语言找图 /vision/prompt mode=text 才用得到；
-# 图找图不需要它）。后缀是 .ts（TorchScript zip）或 .safetensors，
+# 已废弃的文本塔权重（MobileCLIP2-B，242MB，.ts = TorchScript zip）。
+# 语言找图已于 2026-10-23 移除，这里仍忽略是为了别人本地留着的旧权重不会误入库；
 # 注意别把前端的 TypeScript 源码一起忽略掉，所以只按 models/ 前缀限定。
 models/**/*.ts
 models/**/*.safetensors
@@ -59,6 +61,8 @@ __pycache__/
 scripts/_*.png
 scripts/shot-*.png
 scripts/_edgeprofile/
+# verify_ui_zh.py 的中间截图目录
+scripts/_verify_ui/
 
 # 免安装分发包产物（scripts/pack_exe.ps1 生成，47MB+，不进仓库）
 /release/
@@ -70,3 +74,6 @@ dist_old_*/
 # 里面有 AI 连接码等机器相关数据，不进仓库。
 src-tauri/config.json
 prompt_refs/
+
+# 已废弃的预烘焙提示词表（随语言找图一起移除，生成工具已删）
+models/yoloe/text_pe.bin

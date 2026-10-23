@@ -19,6 +19,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $version = "0.1.0"
 
+# 打包只搬文件，不编译（编译走 build.ps1）。这里不设 cargo env，
+# 免得以后有人以为「打包会顺手 build」。
+
 # 删本脚本自己产生的构建产物（release/ 下的暂存目录、剔出的 junk、旧 zip）。
 #
 # **刻意不走 Remove-Item**：本机 shell 的 safe-delete 包装会对这些路径抛
@@ -109,7 +112,31 @@ if (-not $SkipModels) {
           Write-Host ("[INFO] - detect/yolo/{0}" -f $_.Name)
         }
     }
-    Write-Host "[INFO] + models/"
+    # ---- 提示找图只留两件套：检测器 + 视觉提示编码器 ----
+    #
+    # 文本提示已于 2026-10-23 移除（实测在界面控件上分数只有 0.1~0.2，等于噪声）。
+    # 既然功能没了，配套文件一个都不带：文本塔（242MB）、CLIP 词表、文本提示头、
+    # 预烘焙向量、中英词典。留着只会让用户以为「还没配好」。
+    $yoloeDst = Join-Path $dstModels "yoloe"
+    if (Test-Path $yoloeDst) {
+      $junk = @(
+        "mobileclip2_b.ts", "mobileclip2_b.safetensors",
+        "tokenizer.min.json", "tokenizer.json",
+        "text_pe.bin", "zh_words.json"
+      )
+      # 文本提示头的 .onnx 和它的 .json 元数据一起剔。只剔 .onnx 会留下
+      # 一个孤零零的 yoloe26n_texthead.json，用户照着它去找 .onnx 永远找不到。
+      $junk += (Get-ChildItem $yoloeDst -Filter "*_texthead.*" -File |
+        ForEach-Object { $_.Name })
+      foreach ($n in $junk) {
+        $p = Join-Path $yoloeDst $n
+        if (Test-Path $p) {
+          Remove-BuildArtifact $p
+          Write-Host "[INFO] - yoloe/$n（文本提示已移除，不带）"
+        }
+      }
+    }
+    Write-Host "[INFO] + models/（tiny / small / medium 三档 + 提示找图）"
   } else {
     Write-Warning "models 目录不存在，分发包将缺少模型"
   }
@@ -264,24 +291,36 @@ OCR Studio —— 免安装版使用说明
   没有放模型时，接口会明确提示「没有找到检测模型」，不会静默返回空。
 
 
-提示找图（/vision/prompt，两种模式）
+识别精度（三档，设置 → 模型）
+  tiny    最快，字大清晰的截图够用
+  small   默认，速度与精度均衡
+  medium  最准，字小、模糊、背景花的图用它，会慢一些
+  三档模型分发包里都带了（PP-OCRv6 官方 tiny / small / medium 三档，
+  共约 150MB），切换后第一次调用会重载几秒，之后正常。
+
+
+提示找图（/vision/prompt）
   这是「换目标不用换模型」的那条：提示当成检测器的额外输入，当场给就行。
+  比的是「长得像不像」，所以换了皮肤、按钮变成按下态照样认得。
     图找图（mode=visual）  给一张参考图 + 在上面框住要找的东西。
-    语言找图（mode=text）  直接给几个词，如 "person,bus" 或中文 "人,公交车"。
+    按名字找（mode=ref）   给几个**教过的**名字（见下「按中文名找」）。
+  models\yoloe\ 下只需要两个文件：检测器（*_prompt.onnx）+ 视觉提示编码器
+  （*_vpe.onnx），共约 20MB，随包带。
+  举例：POST /vision/prompt  {"mode":"visual","image":"<要找的图>",
+        "ref_image":"<参考图>","ref_boxes":"10,20,110,60","conf":0.25}
 
-  两种模式的模型分发包里都带了（models\yoloe\ 下：检测器 + 视觉提示编码器
-  + 文本提示头 + MobileCLIP2-B 文本塔权重）。第一次调语言找图会多花一两秒
-  把文本塔读进内存，之后常驻。
-
-中文目标（语言找图）
-  提示词**中文可以直接写**（如 "人,公交车"）：内置中英词表会先映射成英文再进文本塔，
-  返回的类别名还是你输入的中文，实测分数与英文逐位一致。
-  词表没盖住的词（比如你自己软件里那个「提交按钮」）用**中文参考库**：
-    1) POST /vision/promptref，给一张参考图 + 图上的框 + 起个中文名，教一次；
-    2) 之后 /vision/prompt 的 mode=text 直接写这个名字（走图找图通道，不需要文本塔，
-       对特定元素比文本提示更准）；
+按中文名找（中文参考库，等于「教会它认自家界面里的元素」）
+  图找图每次都要给参考图；嫌麻烦就先教一次、起个中文名，之后只写名字：
+    1) POST /vision/promptref，给一张参考图 + 图上的框 + 起个中文名（如「提交按钮」）；
+    2) 之后 /vision/prompt 用 mode=ref + words="提交按钮" 就能找；
     3) GET /vision/promptref 看教过哪些，DELETE 按名字忘掉。
-  参考库存在本机 %APPDATA%\com.ocrstudio.app\prompt_refs\，只存裁剪小图，不上传、不联网。
+  走的就是图找图那条视觉通道（存的是当初框的那块图），所以中文名随便起，
+  不需要任何词表，也不需要模型认识这个东西。
+  参考库存在本机 %APPDATA%\com.ocrstudio.app\prompt_refs\，只存参考图，不上传、不联网。
+
+  注：早期还有一个「语言找图」（mode=text，写几个词让它找语义上像的）。
+  实测在界面控件这类细粒度目标上分数只有 0.1~0.2 量级，等于噪声，已整体移除；
+  传 mode=text 会得到一条明确的指路错误。
 
 
 AI 控制（让本机 AI 助手直接操控这个服务，默认关闭）

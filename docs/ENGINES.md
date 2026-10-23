@@ -399,20 +399,25 @@ v5/v6/v7 的 raw head 是 `[1, N, 5+cls]`，类别数少（1 类 → 6 通道）
 与 COCO 参考框 `(31.5,230.7,801.4,775.8)` 几乎重合。
 `cargo test --test yoloe_smoke -- --ignored` 通过；`cargo test --lib` 92 通过。
 
-### 6.7 运行时提示找图（图找图 / 语言找图，2026-10-22 深夜，用户要求）
+### 6.7 运行时提示找图（图找图 + 中文参考库，2026-10-22；文本提示 2026-10-23 移除）
 
 **动机**：6.6 的「语义找图」是**烘焙**提示——`head.fuse(pe)` 把提示向量融进分类头权重，
-换目标必须重新导 ONNX。用户要的是**运行时**：给一张参考图 + 一个框，或者给几个词，
+换目标必须重新导 ONNX。用户要的是**运行时**：给一张参考图 + 一个框（教过的名字同理），
 当场换目标，不换模型。
+
+> **文本提示（`mode=text`）已于 2026-10-23 整条移除**。它把词编码成语义向量，
+> 在界面控件这类细粒度目标上分数只有 0.1~0.2 量级（实测设置页截图 12 个词最高 0.207），
+> 等于噪声；维护它要背 242MB 文本塔 + CLIP 词表 + 提示头 + 中英词典 + 烘焙工具。
+> 要「按中文名找」用中文参考库（`prompt_refs.rs`）：框一次起个中文名，之后走的就是
+> 下面这条视觉通道。
 
 **核心机制**：提示向量 `pe` 作为检测器的**第二张图输入**。
 
 ```
-图找图：参考图 + 框 → 掩码 → savpe → vpe ─┐
-                                          ├→ pe [1,80,512] ─┐
-语言找图：词 → CLIP 分词 → MobileCLIP2-B → reprta+归一化 ────┤
-                                                             ↓
-                            目标图 → letterbox → 检测器(images + pe) → [1,300,38]
+图找图：    参考图 + 框 → 掩码 → savpe → vpe ──→ pe [1,80,512] ─┐
+按名字找：  参考库里的名字 → 当初那块图 + 框 → 同一条 vpe 通道 ──┤
+                                                                ↓
+                             目标图 → letterbox → 检测器(images + pe) → [1,300,38]
 ```
 
 **为什么 `pe` 走 `vpe` 形参**：`YOLOEModel.predict` 里 `get_vpe` 对 `ndim == 3` 的 vpe
@@ -426,19 +431,34 @@ Identity，那样 `pe` 就不再是输入了。
 分数恒等于 bias(-10) → `sigmoid ≈ 4.5e-5`，天然低于任何阈值。好处是**输出形状与烘焙版
 完全一致**（`[1,300,38]`），`yolo.rs` 的解码器一行都不用改。
 
-**三件套**（`models/yoloe/`，由 `scripts/export_yoloe_prompt.py` 产出）：
+**两件套**（`models/yoloe/`，由 `scripts/export_yoloe_prompt.py` 产出）：
 
 | 文件 | 输入 → 输出 |
 |---|---|
 | `yoloe26n_prompt.onnx` | `images[1,3,640,640]` + `pe[1,80,512]` → `output0[1,300,38]` + `proto` |
 | `yoloe26n_vpe.onnx` | `ref[1,3,640,640]` + `vp[1,Q,80,80]` → `vpe[1,Q,512]`（Q 动态） |
-| `yoloe26n_texthead.onnx` | `feat[N,512]` → `pe[1,N,512]`（N 动态） |
-| `tokenizer.min.json` | CLIP BPE 词表（HF 格式），给 `mobileclip2-b-rs` 用 |
 
-**端点**：`POST /vision/prompt`，`mode=visual|text`，出参与模板找图**完全同构**
+**端点**：`POST /vision/prompt`，`mode=visual|ref`，出参与模板找图**完全同构**
 （`found`/`x`/`y`/`center_x`/`center_y`/`score`/`matches`/`origin_x`/`origin_y`），
 额外多 `engine`（固定 `yoloe-prompt`）与命中的 `class_id`/`class_name`。
-语言找图的 `class_name` 就是提示词本身——这是它对脚本最重要的可读性来源。
+`mode=ref` 的 `class_name` 就是教过的那个名字——脚本据此确认「找到的是我要的那个」。
+传 `mode=text` 会得到 400 并指路（先 `POST /vision/promptref` 教一次，再 `mode=ref`）。
+
+#### 参考库该教多大一块（2026-10-23 实测，写进 `verify_ui_zh.py` 钉住）
+
+VPE 比的是「长得像不像」，同一张 1102×722 设置页截图、默认 `conf=0.25`，看**首位命中**：
+
+| 教的框 | 同图 | 切到「接口」页 |
+|---|---|---|
+| 一行导航文字 (38×21) | 0.16，0 命中 | — |
+| 整行「图标+文字」(166×36) | 0.16，0 命中 | 0.11，0 命中 |
+| 导航块（5 项，170×190） | 0.74，但被正文卡片顶到第 2 位 | 掉出前 3，0 命中 |
+| 整条侧边栏 (180×670) | **0.94**，首位在侧边栏中心 | **0.84**，首位仍在 |
+
+结论：**VPE 认的是「一块有结构的整体」，不是一根细条**。细条 / 半块既分数低，
+又会被正文里的局部纹理骗走；整条侧边栏反而最稳（大面积稳定版式，翻页不变）。
+这条对用户是产品语义（「教大一点、教完整」），对验收是脚本必须遵守的刻度——
+`verify_ui_zh.py` 因此教「左侧侧边栏」而不是某一项导航。
 
 #### 踩过的坑（都是「不报错但结果不对」那一类）
 
@@ -467,27 +487,14 @@ Identity，那样 `pe` 就不再是输入了。
    `(r >= x1) * (r < x2) * (c >= y1) * (c < y2)`——**r 比 x、c 比 y**。
    `visuals[idx] |= mask` 是同类多框取并集。
 
-#### 文本塔为什么不导 ONNX
+#### 文本提示为什么被移除（历史）
 
-`mobileclip2_b.ts` 里嵌的 TorchScript 图**缺张量秩信息**，legacy 导出器在
-multi_head_attention 的 `unflatten(-1, [3, size])` 上抛
-"transpose for tensor of unknown rank"；torch 2.4 的 dynamo 导出器（需 onnxscript
-**0.1.0**，0.7.2 的 `onnxscript.values.ParamSchema` 已被删）同样失败，batch 改静态也没用。
-
-**解法**：文本塔不导 ONNX，Python 侧只导 `reprta` 提示头；Rust 侧用
-`mobileclip2-b-rs`（crates.io，MIT，基于 candle）直接读 `.ts` 权重自己算。
-它自带 CLIP BPE 分词器，文档里明写「used by the YOLOE text path」，且已对官方
-Python/OpenCLIP 参考做过数值对齐。
-
-**分词器要自己配**：crate 的 `Tokenizer::from_file` 吃 HF 格式的 `tokenizer.json`，
-而 `mobileclip2_b.ts` 里没有词表。用 `openai/clip-vit-base-patch32` 的
-`tokenizer.json` 存成 `models/yoloe/tokenizer.min.json`。**必须逐 id 核对**
-（`scripts/_probe_tokenizer.py`）——两处分词差一个 id，`pe` 就变，而 pe 变了对用户
-就是「同样的词找不到东西」，不会有任何报错。
-
-> 核对时的坑：**不能把 id 0 当 padding 过滤掉**。CLIP 字节级词表里 id 0 就是字符
-> `!` 的合法 token，过滤会把真实 token 删掉，反而把「一致」判成「不一致」。
-> 正确做法是把 HF 输出右补 0 到 77，与 `clip.tokenize` 的整条序列逐位比。
+早期的 `mode=text` 走 MobileCLIP2-B 文本塔（`mobileclip2-b-rs` 纯 Rust 读 `.ts`）+
+`*_texthead.onnx` 提示头，中文靠 `zh_words` 词表映射。实测结论：**在界面控件这类
+细粒度目标上不可用**（分数 0.1~0.2，等于噪声），中文更是要外加一份 240 概念的词典。
+2026-10-23 用户拍板整条移除，`zh_words.rs` / `text_pe_cache.rs` / `bake_text_pe.rs` /
+`mobileclip2-b-rs` 依赖一并删除。文本塔当年不导 ONNX 的原因（TorchScript 缺秩信息、
+legacy/dynamo 导出器都失败）仅作追溯，见 git 历史。
 
 #### 验收（都是逐值比对，不是「看着对」）
 
@@ -495,15 +502,13 @@ Python/OpenCLIP 参考做过数值对齐。
   端到端 IoU 1.0000。
 - `scripts/ref_yoloe_prompt.py` 生成 `models/yoloe/reference_prompt.json`（中间量
   `feat`/`vpe`/`pe` + 端到端框）。
-- `cargo test --test yoloe_prompt_parity -- --ignored`：
-  - 文本 `pe` 与官方 TorchScript 文本塔最大差 **4.99e-7**（验的是第三方 crate）
-  - 视觉 `pe` 最大差 **1.64e-7**（验的是掩码栅格化 + letterbox 搬运）
-  - 端到端 3 框 **IoU 1.0000、置信度差 0.0000**
-- `cargo test --test api_smoke -- vision_prompt`：参数校验 7 条；ignored 那条真跑
-  HTTP 全链路（bus.png + `person,bus` → 6 框，最高 0.913）。
+- `cargo test --test yoloe_prompt_parity -- --ignored`：视觉 `pe` 最大差 **1.64e-7**
+  （验的是掩码栅格化 + letterbox 搬运）。文本 `pe` 的用例随功能一起移除。
+- `cargo test --test api_smoke -- vision_prompt`：参数校验若干条（含 `mode=text` 必须
+  400 指路）；ignored 那条真跑 HTTP 全链路（教一次 → `mode=ref` 找 → 删）。
 
 **为什么必须比中间量而不只比最终框**：导出脚本只证明了 ONNX 与 torch 一致；
-但「分词」「补零」「掩码」「坐标搬运」这四段是 Rust 独有的，任何一处差一点 `pe` 就变，
+但「补零」「掩码」「坐标搬运」这三段是 Rust 独有的，任何一处差一点 `pe` 就变，
 而一个错的 `pe` 也可能碰巧检出相似的东西，只看框会把问题盖住。
 
 ## 7. 不做的事（已评估，记录原因）

@@ -11,7 +11,12 @@
   3. /ocr/quyuocr         区域识别（框坐标已平移回原图）
   4. /vision/qrcode       扫码（纯 CPU，与引擎无关）
   5. /vision/prompt visual 图找图：分发包**带全了**这套模型，必须能出框
-  6. /vision/prompt text   语言找图：分发包**带全了** 242MB 文本塔权重，必须能出框
+  6. /vision/prompt ref    按中文名找：参考库教一次 → 按名字找 → 删掉（6c）
+                           `mode=text` 已整体移除，必须明确 400 并指路（6b）
+
+「不该带什么」也在这里钉住：language 找图的 242MB 文本塔（`mobileclip2_b.ts`）、
+`*_texthead.onnx`、`tokenizer*.json`、`text_pe.bin`、`zh_words.json` 一旦重新
+混进分发包，体积会悄悄涨回三百多 MB，而接口其实根本不用它。
 
 用法：
     python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe" [--port 8848]
@@ -132,6 +137,22 @@ def main() -> int:
         print(f"[FAIL] exe 不存在: {exe}")
         return 2
 
+    # ---------------- 0. 分发包体积防线（不需要起服务，先查） ----------------
+    print("\n=== 分发包不该带的东西（语言找图已移除） ===")
+    root = Path(exe).parent
+    banned = [
+        "models/yoloe/mobileclip2_b.ts",          # 242MB 英文文本塔
+        "models/yoloe/mobileclip2_b.safetensors",  # 同上，torch 原始权重
+        "models/yoloe/tokenizer.min.json",         # CLIP BPE 词表
+        "models/yoloe/tokenizer.json",
+        "models/yoloe/text_pe.bin",                # 预烘焙提示词
+        "models/yoloe/zh_words.json",              # 中英词典（已删模块）
+    ]
+    for rel in banned:
+        check(f"没有 {rel}", not (root / rel).exists(), str(root / rel))
+    stray = sorted(p.name for p in (root / "models" / "yoloe").glob("*_texthead.onnx"))
+    check("没有 *_texthead.onnx", not stray, str(stray))
+
     try:
         stop()
         start(exe, port)
@@ -243,36 +264,35 @@ def main() -> int:
                   f"score={h.get('score')} class={h.get('class_name')}")
         check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
 
-        # ---------------- 6. prompt text（语言找图，分发包应带全） ----------------
-        print("\n=== /vision/prompt mode=text（语言找图，分发包应带全） ===")
-        st, j = post_json(f"{base}/vision/prompt", {
-            "mode": "text",
-            "image": b64(bus),
-            "words": "person,bus",
-            "conf": 0.25,
-        })
-        d = j.get("data") or {}
-        print(json.dumps(d, ensure_ascii=False)[:500])
-        check("prompt text code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
-        check("prompt text 命中", bool(d.get("found")), str(d.get("found")))
-        check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
-        names = [m.get("class_name") for m in (d.get("matches") or [])]
-        check("类名就是提示词", any(n in ("person", "bus") for n in names), str(names[:5]))
+        # ---------------- 6. prompt ref（按中文名找 / 语言找图已移除） ----------------
+        # 老块「mode=text 应该命中」已随功能移除一起删掉：留在这里会永远 FAIL，
+        # 因为 text 现在是明确拒绝（见 6b）。
 
-        # ---------- 6b. 中文提示词（词表映射，类名回显中文） ----------
-        print("\n=== /vision/prompt mode=text 中文（词表映射后进英文文本塔） ===")
+        # ---------- 6b. 语言提示已移除：必须明确 400 + 指路，不是静默失效 ----------
+        print("\n=== /vision/prompt mode=text（已移除，应当明确指路） ===")
         st, j = post_json(f"{base}/vision/prompt", {
             "mode": "text",
             "image": b64(bus),
             "words": "人,公交车",
             "conf": 0.25,
         })
-        d = j.get("data") or {}
-        print(json.dumps(d, ensure_ascii=False)[:500])
-        check("中文 prompt code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
-        check("中文 prompt 命中", bool(d.get("found")), str(d.get("found")))
-        names = [m.get("class_name") for m in (d.get("matches") or [])]
-        check("类名回显中文", any(n in ("人", "公交车") for n in names), str(names[:5]))
+        msg = str(j.get("msg", ""))
+        check("text 模式被拒（400 信封 code!=0）", j.get("code") != 0, f"code={j.get('code')}")
+        check("报错文案说明已移除并指路 promptref",
+              "已移除" in msg and "promptref" in msg, msg[:200])
+
+        # 没教过的名字：明确拒绝 + 列出可用的名字 / 提示先教
+        print("\n=== mode=ref 用没教过的名字应明确报错并指路 ===")
+        st, j = post_json(f"{base}/vision/prompt", {
+            "mode": "ref",
+            "image": b64(bus),
+            "words": "宇宙飞船",
+            "conf": 0.25,
+        })
+        msg = str(j.get("msg", ""))
+        check("未教过的名字被拒", j.get("code") != 0, f"code={j.get('code')}")
+        check("报错文案指路（promptref / 教过的名字）",
+              "还没教过" in msg and "promptref" in msg, msg[:200])
 
         # ---------- 6c. 中文参考库（教一次 → 按中文名找 → 忘掉） ----------
         print("\n=== /vision/promptref（中文参考库：教/找/删） ===")
@@ -289,7 +309,7 @@ def main() -> int:
         check("参考库列表里有它", "我的巴士" in got, str(got))
 
         st, j = post_json(f"{base}/vision/prompt", {
-            "mode": "text",
+            "mode": "ref",
             "image": b64(bus),
             "words": "我的巴士",
             "conf": 0.25,

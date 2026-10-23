@@ -123,11 +123,11 @@ pub const TOOLS: &[Tool] = &[
         ],
     ),
     tool(
-        "find_word",
-        "按**词**找东西的位置（语义找图）。中文（人、公交车、提交按钮）和英文（person,bus）都行，混写也行；中文若在参考库里会走更准的图找图通道。不给图就截屏。",
+        "find_target",
+        "按**教过的名字**找东西的位置。名字必须是先用 teach_target 教过的（list_targets 能看有哪些）；没教过会明确报错并列出可用名字。不给图就截屏。",
         RISK_WRITE,
         &[
-            arg("words", "要找什么，逗号分隔，如 \"人,公交车\" 或 \"person,bus\"", true, ""),
+            arg("names", "教过的名字，逗号分隔，如 \"提交按钮,搜索框\"", true, ""),
             arg("image_path", "在本地这张图里找", false, ""),
             arg("image", "图片 base64", false, ""),
             arg("source", "不给图时去哪截：screen（默认）", false, "screen"),
@@ -162,7 +162,7 @@ pub const TOOLS: &[Tool] = &[
     ),
     tool(
         "teach_target",
-        "教它认一个新目标：给一张参考图 + 图上的一个框 + 一个中文名。教完之后 find_word 就能直接用这个中文名找。**遇到没见过的中文目标就用这个先教一次**。",
+        "教它认一个新目标：给一张参考图 + 图上的一个框 + 一个中文名。教完之后 find_target 就能直接用这个中文名找。**遇到没见过的目标就用这个先教一次**。",
         RISK_WRITE,
         &[
             arg("name", "中文名，如 \"提交按钮\"", true, ""),
@@ -488,7 +488,7 @@ pub async fn exec(
                     "参考库还是空的。遇到没见过的中文目标，用 teach_target 教一次。".to_string()
                 } else {
                     format!(
-                        "已经教过 {} 个：{}。这些名字可以直接给 find_word 用。",
+                        "已经教过 {} 个：{}。这些名字可以直接给 find_target 用。",
                         items.len(),
                         refs.list().iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join("、")
                     )
@@ -542,15 +542,18 @@ pub async fn exec(
             ))
         }
 
-        "find_word" => {
-            let words_raw = s(args, "words").ok_or("缺少 words（要找什么，如 \"人,公交车\" 或 \"person,bus\"）")?;
-            let words: Vec<String> = words_raw
-                .split([',', '，'])
+        "find_target" => {
+            // 名字只能来自参考库。旧写法把名字写进 words，这里一并收下
+            let raw = s(args, "names")
+                .or_else(|| s(args, "words"))
+                .ok_or("缺少 names（要找的名字，必须是先用 teach_target 教过的）")?;
+            let names: Vec<String> = raw
+                .split([',', '，', ';'])
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
                 .collect();
-            if words.is_empty() {
-                return Err("words 是空的".into());
+            if names.is_empty() {
+                return Err("names 是空的".into());
             }
             let conf = clamp_f(f(args, "conf").unwrap_or(0.25), 0.0, 1.0) as f32;
             let max_results = clamp_i(f(args, "max_results").unwrap_or(8.0), 1, 64);
@@ -561,7 +564,7 @@ pub async fn exec(
                 class_filter: Vec::new(),
             };
             let dets = state
-                .prompt_find(PromptInput::Text { words: words.clone() }, img, opts)
+                .prompt_find(PromptInput::Refs { names: names.clone() }, img, opts)
                 .await
                 .map_err(|e| e.to_string())?;
             let mut hits: Vec<Value> = dets
@@ -583,11 +586,11 @@ pub async fn exec(
             Ok((
                 if hits.is_empty() {
                     format!(
-                        "没找到「{}」。可以调低 conf 再试，或者用 teach_target 教一次它长什么样。",
-                        words.join("、")
+                        "没找到「{}」。可以调低 conf 再试；如果它外观变了，用 teach_target 重新教一次。",
+                        names.join("、")
                     )
                 } else {
-                    format!("找到 {} 个「{}」。", total, words.join("、"))
+                    format!("找到 {} 个「{}」。", total, names.join("、"))
                 },
                 json!({ "found": !hits.is_empty(), "matches": hits, "count": total }),
             ))
@@ -675,7 +678,7 @@ pub async fn exec(
                     .map_err(|e| e.to_string())?
             };
             Ok((
-                format!("记住了「{}」，之后 find_word 直接写这个名字就能找。", entry.name),
+                format!("记住了「{}」，之后 find_target 直接写这个名字就能找。", entry.name),
                 json!({ "name": entry.name, "box": entry.rect, "width": entry.width, "height": entry.height }),
             ))
         }

@@ -22,7 +22,6 @@ pub mod ddddocr;
 pub mod prompt;
 pub mod prompt_refs;
 pub mod yolo;
-pub mod zh_words;
 
 use std::fmt;
 use std::path::Path;

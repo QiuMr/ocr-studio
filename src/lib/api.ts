@@ -52,20 +52,12 @@ export async function listEngines(): Promise<EngineList> {
 }
 
 /**
- * 提示找图（YOLOE）资产状态：三件套 + 242MB 文本塔装没装。
+ * 提示找图（YOLOE）资产状态：检测器 + 视觉提示编码器装没装。
  * 只扫目录不加载模型，设置页「模型」卡片用。
  */
 export async function promptAssets(): Promise<PromptAssets> {
   if (!isTauri()) {
-    return {
-      detector: false,
-      vpe: false,
-      text_head: false,
-      text_weights: false,
-      text_weights_mb: null,
-      dir: "-",
-      zh_words_custom: false,
-    };
+    return { detector: false, vpe: false, dir: "-" };
   }
   return invoke<PromptAssets>("prompt_assets_status");
 }
@@ -401,12 +393,12 @@ export async function findSemantic(
 }
 
 /**
- * 提示找图：目标由调用方当场给——给参考图 + 框（图找图），或给提示词（语言找图）。
+ * 提示找图：目标由调用方当场给——给参考图 + 框（图找图），或给教过的名字（按名字找）。
  *
  * 与 `findSemantic` 的差别是**换目标不用换模型**：语义找图的提示在导出时就
  * 烘焙进权重了，这里是把提示当额外输入。出参与 `findImage` 完全同构，
  * 额外多 `engine`（固定 `yoloe-prompt`）与命中里的 `class_id`/`class_name`
- * （语言找图时类名就是提示词本身）。
+ * （按名字找时类名就是那个名字）。
  */
 export async function findPrompt(
   args: PromptFindArgs,

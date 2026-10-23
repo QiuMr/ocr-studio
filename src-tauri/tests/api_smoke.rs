@@ -766,7 +766,7 @@ fn vision_prompt_route_exists_and_validates_params() {
     );
     println!("prompt(bad mode) -> {status} {body}");
     assert_eq!(status, 400, "未知 mode 应 400 而不是 404: {body}");
-    assert!(body.contains("visual") && body.contains("text"), "{body}");
+    assert!(body.contains("visual") && body.contains("ref"), "{body}");
 
     // mode=visual 缺参考图 → 400，提示里要说清「参考图」和怎么传
     let payload = format!("{{\"image\":\"{img}\",\"mode\":\"visual\"}}");
@@ -824,37 +824,7 @@ fn vision_prompt_route_exists_and_validates_params() {
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("x2>x1"), "{body}");
 
-    // mode=text 没给词 → 400
-    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"text\"}}");
-    let (status, body) = http(
-        srv.addr,
-        "POST",
-        "/vision/prompt",
-        "application/json",
-        payload.as_bytes(),
-    );
-    println!("prompt(text no words) -> {status} {body}");
-    assert_eq!(status, 400, "{body}");
-    assert!(body.contains("words"), "{body}");
-
-    // 走到这一步说明参数校验都放行了——真跑推理的验收在下面的 ignored 用例里。
-}
-
-/// 提示找图真跑一遍（HTTP 层全链路）：文本提示 → `pe` → 检测 → 出参。
-///
-/// 这里验的是 **HTTP 这一层**：JSON 解析、`acquire_haystack`、出参组装、
-/// `found/x/y/class_name` 这些字段是不是脚本能直接用的形状。
-/// 数值是否与 ultralytics 一致由 `yoloe_prompt_parity` 负责，两者不重复。
-///
-/// 跑：`cargo test --test api_smoke -- --ignored --nocapture vision_prompt`
-#[test]
-#[ignore = "重量级：需要 models/yoloe 三件套 + mobileclip2_b.ts + onnxruntime.dll"]
-fn vision_prompt_finds_target_with_text_prompt() {
-    let root = workspace_root();
-    let srv = start_server_for_detect();
-
-    let img = png_b64(&image::open(root.join("assets").join("bus.png")).unwrap().to_rgb8());
-    // source 缺省是 image：搜索图就是上传的这张，坐标是图内坐标（origin 为 0）
+    // mode=text 已移除 → 400 且指路（不是沉默的 404，用户得知道下一步做什么）
     let payload = format!("{{\"image\":\"{img}\",\"mode\":\"text\",\"words\":\"person,bus\"}}");
     let (status, body) = http(
         srv.addr,
@@ -863,7 +833,89 @@ fn vision_prompt_finds_target_with_text_prompt() {
         "application/json",
         payload.as_bytes(),
     );
-    println!("prompt(text) -> {status}\n{}", &body[..body.len().min(1200)]);
+    println!("prompt(text removed) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("已移除"), "{body}");
+    assert!(body.contains("promptref"), "应指路教一次: {body}");
+
+    // mode=ref 没给名字 → 400
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"ref\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(ref no names) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("words"), "{body}");
+
+    // 未知 mode → 400 且列出可选值（旧脚本写 text 之外的花样时也知道该怎么改）
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"nope\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(bad mode) -> {status} {body}");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("visual / ref"), "{body}");
+
+    // 走到这一步说明参数校验都放行了——真跑推理的验收在下面的 ignored 用例里。
+}
+
+/// 提示找图真跑一遍（HTTP 层全链路）：教一次 → 按名字找 → 出参形状。
+///
+/// 这里验的是 **HTTP 这一层**：`/vision/promptref` 落盘、`mode=ref` 取回那块图、
+/// `acquire_haystack`、出参组装、`found/center_x/class_name` 这些字段是不是脚本能
+/// 直接用的形状。`pe` 的数值是否与 ultralytics 一致由 `yoloe_prompt_parity` 负责。
+///
+/// 教的时候用「整图 60% 中心框」，找也在同一张图上：判据只要求「命中的中心落在
+/// 教的框里」，不押注检测器的精度。
+///
+/// 跑：`cargo test --test api_smoke -- --ignored --nocapture vision_prompt`
+#[test]
+#[ignore = "重量级：需要 models/yoloe 两件套 + onnxruntime.dll"]
+fn vision_prompt_finds_taught_target() {
+    let root = workspace_root();
+    let srv = start_server_for_detect();
+
+    let dimg = image::open(root.join("assets").join("bus.png")).unwrap();
+    let (w, h) = (dimg.width() as f32, dimg.height() as f32);
+    let img = png_b64(&dimg.to_rgb8());
+    // 框盖住图中间的 60%：一定能框住点东西，也不至于退化成整图
+    let bx = [w * 0.2, h * 0.2, w * 0.8, h * 0.8];
+    let name = "公交车整体";
+
+    // 1) 教一次
+    let payload = format!(
+        "{{\"name\":\"{name}\",\"image\":\"{img}\",\"box\":[{},{},{},{}]}}",
+        bx[0], bx[1], bx[2], bx[3]
+    );
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/promptref",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("promptref add -> {status}\n{}", &body[..body.len().min(400)]);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"code\":0"), "{body}");
+
+    // 2) 按名字找（source 缺省 image：搜索图就是上传的这张）
+    let payload = format!("{{\"image\":\"{img}\",\"mode\":\"ref\",\"words\":\"{name}\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/prompt",
+        "application/json",
+        payload.as_bytes(),
+    );
+    println!("prompt(ref) -> {status}\n{}", &body[..body.len().min(1200)]);
     assert_eq!(status, 200, "{body}");
     assert_eq!(json_bool(&body, "found"), Some(true), "{body}");
     assert!(json_num(&body, "elapsed_ms").is_some(), "应回传耗时: {body}");
@@ -872,11 +924,20 @@ fn vision_prompt_finds_target_with_text_prompt() {
         Some(0.0),
         "source=image 时原点必须是 0: {body}"
     );
-    // 类名就是提示词本身——这是「语言找图」对脚本最重要的可读性来源
-    assert!(
-        body.contains("\"person\"") || body.contains("\"bus\""),
-        "命中的 class_name 应当是提示词: {body}"
+    // 类名就是那个名字——脚本据此确认「找到的是我要的那个东西」
+    assert!(body.contains(name), "命中的 class_name 应当是这个名字: {body}");
+
+    // 3) 忘掉它（按名字删，一个 API 调用即可复原现场）
+    let payload = format!("{{\"name\":\"{name}\"}}");
+    let (status, body) = http(
+        srv.addr,
+        "DELETE",
+        "/vision/promptref",
+        "application/json",
+        payload.as_bytes(),
     );
+    println!("promptref del -> {status} {body}");
+    assert_eq!(status, 200, "{body}");
 }
 
 /// 语义找图真跑一遍：需要 `models/detect/yolo/` 下有**认得 assets/bus.png** 的模型。
