@@ -1835,7 +1835,9 @@ pub fn tray_menu_height(app: tauri::AppHandle, height: f64) -> Result<(), String
         return Ok(());
     };
     let scale = w.scale_factor().unwrap_or(1.0);
-    let h = (height / scale).clamp(120.0, 640.0);
+    // ceil：逻辑像素换成物理像素时会被截掉小数，底部就少一截
+    // （表现是「退出」那一行下面被切掉一点）。
+    let h = (height / scale).ceil().clamp(120.0, 640.0);
     w.set_size(tauri::LogicalSize::new(crate::TRAY_MENU_WIDTH, h))
         .map_err(|e| e.to_string())?;
     crate::place_tray_menu(&w).map_err(|e| e.to_string())

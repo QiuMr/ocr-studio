@@ -6,11 +6,15 @@
  * 要好看只能自己做窗口。换来的好处：能放图标、能放状态徽标、
  * 能把「有更新」做成一条蓝色高亮条目（原生菜单做不到）。
  *
- * 两个必须知道的约束：
- * - 窗口是 transparent + 无边框的，**人物/阴影要自己画**，
- *   所以最外层留 6px padding 给阴影，否则边缘会被窗口矩形裁掉。
+ * 三个必须知道的约束：
+ * - 窗口是 transparent + 无边框的，**内容要贴着窗口边缘**。别在卡片外面留
+ *   padding：那圈透明区域会被 CSS 阴影染成一层灰边，看着像「菜单外面套了个
+ *   框」（实测用户第一眼就问这是不是故意的）。阴影交给窗口自己的
+ *   `shadow(true)`——它画在窗口矩形**外面**，不占内容区，也不会形成边框感。
  * - 高度不是固定的：有没有「有更新」那一条会差一行。渲染完要主动
  *   把实际高度回给后端重新定位（`tray_menu_height`），否则菜单会歪。
+ * - 量高要量**最外层**（含 padding / border），量内层卡片会少算一圈，
+ *   底部正好被切掉一截 —— 表现为「退出」那一行下面少一点。
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -101,7 +105,8 @@ export function TrayMenu() {
   useLayoutEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const h = el.getBoundingClientRect().height;
+    // 向上取整：小数高度在后端换算物理像素时会被截掉，底部就少一截。
+    const h = Math.ceil(el.getBoundingClientRect().height);
     if (h > 0) {
       void invoke<void>("tray_menu_height", { height: h }).catch(() => {});
     }
@@ -134,11 +139,10 @@ export function TrayMenu() {
   const hasUpdate = !!cached?.has_update;
 
   return (
-    <div className="p-1.5">
-      <div
-        ref={rootRef}
-        className="overflow-hidden rounded-xl border border-neutral-200/80 bg-white shadow-[0_8px_28px_rgba(0,0,0,0.16)]"
-      >
+    // ref 必须在**最外层**：量内层卡片会漏掉外层的 padding / border，
+    // 后端按这个高度设窗口就会把底部切掉一截。
+    <div ref={rootRef}>
+      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
         {/* 头部：不是可点的菜单项，是状态说明 —— 别让它看起来像按钮 */}
         <div className="flex items-center justify-between gap-2 px-3 py-2.5">
           <span className="truncate text-[13px] font-semibold text-neutral-900">OCR Studio</span>
