@@ -4,7 +4,7 @@
 - **OCR-Studio 是 API 工具，不是识别软件。** 交付物是跑在 `127.0.0.1:8848` 的接口服务，桌面界面只是控制面板。任何界面设计先问：是不是又把产品做成了「图片识别软件」。
 - 首页必答三件事：服务开没开 / 地址（可复制）/ 能调什么怎么调（给现成代码）。「上传图片看效果」是验证手段，不是主叙事。
 - 导航固定 5 项：服务 / 接口 / 试跑 / 日志 / 设置。
-- 端点事实源 `src/lib/endpoints.ts`（首页概览与接口页同源），改后端路由必须同步。目前 **18 个端点**（认字 5 / 找图 8 / 看图 3 / 状态 2）。
+- 端点事实源 `src/lib/endpoints.ts`（首页概览与接口页同源），改后端路由必须同步。目前 **19 个端点**（认字 5 / 找图 9 / 看图 3 / 状态 2）；`/vision/promptref` 一个路径三种方法，前端计数用 `ENDPOINT_PATH_COUNT`（按路径去重）对齐后端 `PATHS`。
 
 ## 前端技术规范（2026-10-21 用户确定）
 - 栈：React + TS + Tailwind + shadcn/ui（Vite，Tauri 2 壳）。Vue 方案已废弃。
@@ -80,11 +80,17 @@
 - **语言找图需 242MB `mobileclip2_b.ts`**；`discover_assets` 搜 `models/yoloe/` → `models/_fixtures/weights/`。发布时放 `models/yoloe/`（打包保留）。
 - `OutputLayout::EndToEnd` 判据 `anchors < grid && channels >= 6`（只看通道会误吃 v5 6 通道 raw head）；`class_channels()` 的 EndToEnd base 是 5 不是 6。
 
+## 中文找图 + AI 操控服务（2026-10-23，卖点，别削弱）
+- **MobileCLIP2-B 是英文语义空间，中文不可直接喂**（BPE 拆字节片，19 个常见词仅「人」偶然撞中）；换中文塔不可行（特征空间与 texthead 不对齐）。
+- 两条路子：① `engine/zh_words.rs` 中英词典（`models/yoloe/zh_words.json` 可覆盖），命中映射英文进文本塔、类名回显中文；② `engine/prompt_refs.rs` 中文视觉参考库（框一次起中文名 → 走 VPE 图找图，不依赖 242MB 文本塔），`GET/POST/DELETE /vision/promptref`，**DELETE 的 name 必须 query 与 body 都认**（`?name=中文` 是 AI 最自然写法）。
+- **架构红线：`prompt.rs::text_pe` 保持官方文本塔逐位复刻，中文映射只许放 API 边界的 `pe_for_words`。** parity 夹具 `text.words` 故意混中文词「确认按钮」，动引擎层就炸基线。
+- **AI 服务** `api/ai.rs` + `api/ai_tools.rs`（复用 8848，默认关）：Bearer 连接码、120 次/分限流、`request_id` 幂等、写操作审计、readonly/write/dangerous 三档；信封 `{ok,summary,data,error}`；未知工具给 `closest_tool` 候选；`/ai/v1/*` **刻意不进 `PATHS`**（那是用户脚本清单）。设置页「AI 控制」面板管理开关/连接码/提示词。
+
 ## 打包与分发
 - `scripts/pack_exe.ps1` 产 `release/OCR-Studio-<ver>-win64.zip`（免安装）。剔掉：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、`inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、`models/detect/yolo/` 下除 README 外全部。**新增夹具目录要同步加进来**。
-- `.gitignore` 必须有 `models/**/*.ts`（MobileCLIP2-B 权重后缀 `.ts` 会被当 TS 源码，253MB）。不能裸写 `*.ts`。
+- `.gitignore` 必须有 `models/**/*.ts`（MobileCLIP2-B 权重后缀 `.ts` 会被当 TS 源码，253MB）。不能裸写 `*.ts`。另需忽略 `src-tauri/config.json`（运行期配置，含 AI 连接码）与 `prompt_refs/`。
 - 信封键是 **`msg`** 不是 `message`（`ApiResp { code, msg, data }`）。
-- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑 health/shibie/quyuocr/qrcode/prompt(visual+text) + >2MB 大图 multipart。改打包流程或模型清单后必须复跑。
+- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑 health/shibie/quyuocr/qrcode/prompt(visual+text) + 中文词表映射（类名回显中文）+ 参考库教/找/删 + >2MB 大图 multipart + AI 默认 403。改打包流程或模型清单后必须复跑。
 - **请求体上限 32MB 靠 `DefaultBodyLimit` 显式放开**（`routes.rs` 的 `build_router_with`）：
   axum 0.8 默认只给 **2MB**，且只作用于 `Multipart` extractor（JSON 路径自己用
   `to_bytes(body, MAX_BODY)`，不受影响）。**漏了它，用户 multipart 传 3MB 截图就 400**
@@ -92,8 +98,9 @@
 - **语言找图权重 `mobileclip2_b.ts`（242MB）随包带**：放正式位置 `models/yoloe/`
   （硬链接到 `_fixtures/weights/`，零额外占用；`discover_assets` 本就先搜这里）。
   分发包因此约 **360MB**（`.ts` 已是 zip，再压几乎不减小）。
+- `pack_exe.ps1` 删构建产物必须走 `Remove-BuildArtifact`（.NET 直删）——safe-delete trash 对暂存目录抛 fail-closed。
 
 ## 当前状态（2026-10-23）
-- 全部大需求已落地：区域OCR、蒙版模板匹配、二维码/条码、语义找图、提示找图、界面精修、全面检查。
-- 测试基线：`cargo test --lib` **113 passed**；`--ignored` **29 项全绿**（含 `pipeline_match` 黄金基线、`yoloe_prompt_parity`）。
-- 详细记录见 `docs/PROGRESS.md`（§7.9 = 界面精修 + 全面检查）；引擎契约见 `docs/ENGINES.md`。
+- 全部大需求已落地：区域OCR、蒙版模板匹配、二维码/条码、语义找图、提示找图、中文找图（词表+参考库）、AI 操控服务、界面精修、全面检查。端点 **19**（认字 5 / 找图 9 / 看图 3 / 状态 2）。
+- 测试基线：`cargo test --lib` **133 passed**；`api_smoke` **17 passed + 10 ignored**；`ai_service` **7 passed**；`--ignored` **29 项全绿**（含 `pipeline_match` 黄金基线、`yoloe_prompt_parity` 3/3）。
+- 详细记录见 `docs/PROGRESS.md`（§7.10 = 中文找图 + AI 服务）；引擎契约见 `docs/ENGINES.md`。
