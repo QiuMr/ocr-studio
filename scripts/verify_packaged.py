@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -61,6 +62,14 @@ def req(method: str, url: str, body: bytes | None = None, headers: dict | None =
 def post_json(url: str, obj: dict):
     body = json.dumps(obj).encode("utf-8")
     st, raw = req("POST", url, body, {"Content-Type": "application/json"})
+    try:
+        return st, json.loads(raw.decode("utf-8"))
+    except Exception:
+        return st, {"_raw": raw[:300].decode("utf-8", "replace")}
+
+
+def get_json(url: str):
+    st, raw = req("GET", url)
     try:
         return st, json.loads(raw.decode("utf-8"))
     except Exception:
@@ -249,6 +258,74 @@ def main() -> int:
         check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
         names = [m.get("class_name") for m in (d.get("matches") or [])]
         check("类名就是提示词", any(n in ("person", "bus") for n in names), str(names[:5]))
+
+        # ---------- 6b. 中文提示词（词表映射，类名回显中文） ----------
+        print("\n=== /vision/prompt mode=text 中文（词表映射后进英文文本塔） ===")
+        st, j = post_json(f"{base}/vision/prompt", {
+            "mode": "text",
+            "image": b64(bus),
+            "words": "人,公交车",
+            "conf": 0.25,
+        })
+        d = j.get("data") or {}
+        print(json.dumps(d, ensure_ascii=False)[:500])
+        check("中文 prompt code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+        check("中文 prompt 命中", bool(d.get("found")), str(d.get("found")))
+        names = [m.get("class_name") for m in (d.get("matches") or [])]
+        check("类名回显中文", any(n in ("人", "公交车") for n in names), str(names[:5]))
+
+        # ---------- 6c. 中文参考库（教一次 → 按中文名找 → 忘掉） ----------
+        print("\n=== /vision/promptref（中文参考库：教/找/删） ===")
+        st, j = post_json(f"{base}/vision/promptref", {
+            "name": "我的巴士",
+            "image": b64(bus),
+            "box": [31, 231, 801, 776],
+        })
+        check("教一次 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+
+        st, j = get_json(f"{base}/vision/promptref")
+        d = j.get("data") or {}
+        got = [r.get("name") for r in (d.get("refs") or [])]
+        check("参考库列表里有它", "我的巴士" in got, str(got))
+
+        st, j = post_json(f"{base}/vision/prompt", {
+            "mode": "text",
+            "image": b64(bus),
+            "words": "我的巴士",
+            "conf": 0.25,
+        })
+        d = j.get("data") or {}
+        print(json.dumps(d, ensure_ascii=False)[:400])
+        check("按中文名找 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+        check("按中文名找 命中", bool(d.get("found")), str(d.get("found")))
+        hits = d.get("matches") or []
+        if hits:
+            cx, cy = hits[0].get("center_x"), hits[0].get("center_y")
+            in_box = cx is not None and 31 <= cx <= 801 and 231 <= cy <= 776
+            check("命中框落在巴士上", bool(in_box), f"center=({cx},{cy})")
+
+        # query string 里中文必须 percent-encode，否则 http.client 按 ascii 发不出去
+        st, j = req("DELETE", f"{base}/vision/promptref?name="
+                   + urllib.parse.quote("我的巴士"))
+        try:
+            j = json.loads(j)
+        except Exception:
+            j = {}
+        check("删除 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+
+        st, j = get_json(f"{base}/vision/promptref")
+        got = [r.get("name") for r in ((j.get("data") or {}).get("refs") or [])]
+        check("删完后列表也干净", "我的巴士" not in got, str(got))
+
+        # ---------- 6d. AI 接口默认关闭：明确 403 并指路，不是 404 ----------
+        print("\n=== /ai/v1/*（默认关闭，应明确拒绝） ===")
+        st, body = req("GET", f"{base}/ai/v1/tools")
+        text = body.decode("utf-8", "replace")
+        check("AI tools 默认 403", st == 403, f"status={st}")
+        check("403 文案指路设置页", "设置" in text, text[:120])
+        st, body = req("POST", f"{base}/ai/v1/tool", b'{"tool":"get_status"}',
+                       {"Content-Type": "application/json"})
+        check("AI tool 默认 403", st == 403, f"status={st}")
 
     finally:
         stop()

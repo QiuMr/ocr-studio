@@ -132,10 +132,12 @@ models/<level>/
 
 ---
 
-## 6. HTTP 接口（原产品 12 条 + 后续扩展，现共 18 条）
+## 6. HTTP 接口（原产品 12 条 + 后续扩展，现共 19 条）
 
 > **事实源**：`src/lib/endpoints.ts`（首页概览与「接口」页同源）与
 > `src-tauri/src/api/routes.rs` 的 `PATHS`。改路由必须同步这两处。
+> 界面上的端点数取 `ENDPOINT_PATH_COUNT`（按路径去重 —— `/vision/promptref`
+> 三种方法在 `endpoints.ts` 里拆 3 条讲，但只能算 1 个端点）。
 
 | 方法 | 路径 | 入参 | 出参 |
 |---|---|---|---|
@@ -152,6 +154,7 @@ models/<level>/
 | POST | `/ocr/pingmuzhaotu2` | template(+region) | 同上 容错 |
 | POST | `/ocr/yuyizhaotu` | source + 检测模型 | 语义找图，出参与模板找图同构 |
 | POST | `/vision/prompt` | mode + 参考图/提示词 | 提示找图，出参与模板找图同构 |
+| GET/POST/DELETE | `/vision/promptref` | 中文参考库：name+image+box / 列表 / 删除 | 教一次按中文名找，走 VPE 通道 |
 | POST | `/vision/detect` | image + engine:yolo | 目标检测 |
 | POST | `/vision/pipeline` | image + detect_engine | 检测 + 识别串联 |
 | POST | `/vision/qrcode` | image | 二维码 / 条形码 |
@@ -168,10 +171,33 @@ models/<level>/
 产品是 **API 工具**，界面只是它的控制面板。导航固定 5 项（原方案 4 项，已加「接口」页）：
 
 - **服务**：服务状态（运行中/已停止）、地址复制、启停、能力概览、接入代码。
-- **接口**：18 个端点的完整文档（参数 / 返回 / 错误码 / 可复制示例），数据来自 `endpoints.ts`。
+- **接口**：19 个端点的完整文档（参数 / 返回 / 错误码 / 可复制示例），数据来自 `endpoints.ts`。
 - **试跑**：拖入/粘贴图片 → 识别 / 找图 / 语义找图 / 提示找图 / 扫码；左图右结果，框可叠加。
 - **日志**：实时日志（tracing → 前端事件）。
-- **设置**：端口、默认档位、设备、检测模型管理、开机自启、CORS。
+- **设置**：端口、默认档位、设备、检测模型管理、中文参考库、**AI 控制**（开关 / 连接码 / 一键复制提示词）、开机自启、CORS。
+
+### 7.0 AI 操控接口（`/ai/v1/*`，2026-10-23 新增）
+
+给**本机 AI 助手**用的两个端点，复用 8848，默认关闭：
+
+| 端点 | 作用 |
+|---|---|
+| `GET /ai/v1/tools` | 工具清单：name / summary / risk（readonly/write/dangerous）/ 参数 schema |
+| `POST /ai/v1/tool` | 调工具：`{tool, args, request_id}` → `{ok, summary, data, error}` |
+
+要点（与 WPE Lab 参考项目同款设计）：Bearer 连接码常数时间比较；`request_id`
+幂等回放（保留 200 条 + inflight 占位）；120 次/分钟滑动窗口限流；写操作记审计
+日志；工具名/参数错误给**可读的下一步**（AI 靠它自我修正，含最接近的候选工具名）。
+HTTP 层在 AppState 持 `ai_enabled`/`ai_token`（config.json），开关关闭时 403 并指路。
+**不进 PATHS**：那张表是用户脚本的接口清单，AI 入口不该混进去。
+明确不提供给 AI：退出程序、改开机自启、改 AI 开关与连接码。
+
+### 中文目标（词表 + 参考库，2026-10-23 新增）
+
+文本塔是英文语义空间，中文原样喂会被 BPE 拆成字节 token（实测仅「人」偶然命中）。
+两条工程路子：`engine/zh_words.rs` 内置中英词表（`text_pe` 前映射，未命中明确报错
+并给建议）；`engine/prompt_refs.rs` 中文参考库（框一次起中文名 → 走 VPE 图找图通道，
+不依赖 242MB 文本塔），落盘在本机配置目录，端到端有 `tests/ai_service.rs` 与实测钉住。
 
 ### 7.1 视觉规范（2026-10-21 确定）
 

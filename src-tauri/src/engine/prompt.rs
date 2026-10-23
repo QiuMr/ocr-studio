@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3, Array4};
+use std::collections::HashMap;
 
 use super::yolo::{decode, letterbox, postprocess_end2end, Candidate, OutputLayout, YoloLayout};
 use super::{DetectOptions, Detection, VisionError};
@@ -56,6 +57,8 @@ pub struct PromptAssets {
     pub text_weights: Option<PathBuf>,
     /// CLIP BPE 词表。
     pub tokenizer: Option<PathBuf>,
+    /// 用户自定义的中文→英文词表（`zh_words.json`）。没有就用内置的。
+    pub zh_words: Option<PathBuf>,
 }
 
 /// 在模型根目录下找运行时提示三件套。
@@ -95,6 +98,7 @@ pub fn discover_assets(models_root: &Path) -> Option<PromptAssets> {
         ]),
         text_weights: find(&["mobileclip2_b.safetensors", "mobileclip2_b.ts"]),
         tokenizer: find(&["tokenizer.min.json", "tokenizer.json"]),
+        zh_words: find(&["zh_words.json"]),
     })
 }
 
@@ -120,6 +124,8 @@ pub struct PromptEngine {
     text: Option<TextTower>,
     actual_device: Device,
     detector_path: PathBuf,
+    /// 用户自定义的中文→英文词表（覆盖内置表，同一个中文词以用户为准）。
+    zh_words: HashMap<String, String>,
     /// 加载时的备注（缺哪个编码器等），给状态页看
     notes: Vec<String>,
 }
@@ -274,6 +280,7 @@ impl PromptEngine {
             text,
             actual_device,
             detector_path: assets.detector,
+            zh_words: super::zh_words::load_extra(assets.zh_words.as_deref()),
             notes,
         })
     }
@@ -432,10 +439,15 @@ impl PromptEngine {
     // 文本提示
     // -----------------------------------------------------------------------
 
-    /// 语言找图：词 → `pe` 与类别名（类名就是词本身）。
+    /// 语言找图：词 → `pe` 与类别名（类名就是**传进来的词**）。
     ///
     /// 链路：CLIP BPE 分词 → MobileCLIP2-B 文本塔（纯 Rust）→ 提示头 `reprta` + 归一化。
     /// 与 ultralytics `YOLOEModel.get_text_pe` 同构。
+    ///
+    /// **这里刻意不做中文映射**：本方法是官方文本塔的逐位复刻
+    /// （`tests/yoloe_prompt_parity.rs` 拿它对着 TorchScript 抠数值，夹具里
+    /// 故意混了中文词「确认按钮」—— 原样喂进去才复刻得了官方的 byte-token 行为）。
+    /// 中文便利属于 API 边界的事，放在 `pe_for_words` 里做。
     pub fn text_pe(&mut self, words: &[String]) -> Result<(Array3<f32>, Vec<String>), VisionError> {
         let tower = self.text.as_ref().ok_or_else(|| VisionError::Unsupported {
             engine: "yoloe-prompt".into(),
@@ -499,7 +511,122 @@ impl PromptEngine {
             .try_extract_array::<f32>()
             .map_err(|e| VisionError::Inference(format!("文本提示输出读取失败: {e}")))?;
         let pe = pad_pe(&tpe)?;
-        Ok((pe, words))
+        // 类名就是传进来的词本身。**这里刻意不做中文映射**：本方法是官方文本塔的
+        // 逐位复刻（tests/yoloe_prompt_parity.rs 拿它对着 TorchScript 抠数值），
+        // 中文便利属于 API 边界的事，放在 pe_for_words 里做。
+        Ok((pe, words.to_vec()))
+    }
+
+    /// 语言找图 / 中文找图：**按顺序**把一批词组装成一张 `pe`。
+    ///
+    /// 每个词有两条路可走，逐词决定：
+    /// - 中文参考库里有这个名字（`refs`）→ 走**图找图**通道（VPE）。
+    ///   不碰文本塔，任意中文名都能用，对自家界面里的特定元素最准。
+    /// - 否则 → 走文本通道（`text_pe`，中文会先经 `zh_words` 转成英文）。
+    ///
+    /// 混着写也行（"人,提交按钮"）：参考库命中槽位填 VPE 的结果，其余填文本塔的
+    /// 结果，槽位按用户给的顺序排，所以 `class_id` 与输入一一对应。
+    pub fn pe_for_words(
+        &mut self,
+        words: &[String],
+        refs: &super::prompt_refs::RefStore,
+    ) -> Result<(Array3<f32>, Vec<String>), VisionError> {
+        let words: Vec<String> = words
+            .iter()
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.is_empty() {
+            return Err(VisionError::BadRequest(
+                "语言找图至少要给一个词，例如 \"person,bus\" 或 \"人,公交车\"".into(),
+            ));
+        }
+        if words.len() > NC_SLOTS {
+            return Err(VisionError::BadRequest(format!(
+                "提示词最多 {NC_SLOTS} 个，收到 {}",
+                words.len()
+            )));
+        }
+
+        let mut hits: Vec<(String, super::prompt_refs::RefEntry)> = Vec::new();
+        let mut text_words: Vec<String> = Vec::new();
+        for w in &words {
+            match refs.get(w) {
+                Some(e) => hits.push((w.clone(), e.clone())),
+                None => text_words.push(w.clone()),
+            }
+        }
+
+        // 文本通道的词先过中文词表：中文 → 英文，**类名仍回显用户输入的中文**。
+        // 英文（纯 ASCII）原样放行。查不到的中文词明确报错并给建议 ——
+        // 文本塔是英文语义空间，把没映射的中文喂进去只会「碰运气」，比报错更坏。
+        let clip_words: Vec<String> = if text_words.is_empty() {
+            Vec::new()
+        } else {
+            super::zh_words::resolve(&text_words, &self.zh_words)
+                .map_err(|missing| {
+                    VisionError::BadRequest(super::zh_words::missing_message(
+                        &missing,
+                        &self.zh_words,
+                    ))
+                })?
+                .into_iter()
+                .map(|r| r.clip)
+                .collect()
+        };
+
+        // 全是文本就走原路，一次多余的事都不做
+        if hits.is_empty() {
+            let (pe, _) = self.text_pe(&clip_words)?;
+            return Ok((pe, words));
+        }
+
+        let mut pe = Array3::<f32>::zeros((1, NC_SLOTS, EMBED));
+        let mut names: Vec<String> = Vec::new();
+        let mut slot = 0usize;
+
+        // 同一张参考图的框合成一次 VPE 前向（用户多半是从一张截图里框了好几个）
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, (_name, e)) in hits.iter().enumerate() {
+            if !groups.contains_key(&e.image) {
+                order.push(e.image.clone());
+            }
+            groups.entry(e.image.clone()).or_default().push(i);
+        }
+
+        for file in &order {
+            let idxs = &groups[file];
+            let img = refs.load_image(&hits[idxs[0]].1)?;
+            let boxes: Vec<[f32; 4]> = idxs.iter().map(|&i| hits[i].1.rect).collect();
+            let classes: Vec<usize> = (0..idxs.len()).collect();
+            let gnames: Vec<String> = idxs.iter().map(|&i| hits[i].0.clone()).collect();
+            let (gpe, glabels) = self.visual_pe(&img, &boxes, &classes, &gnames)?;
+            for k in 0..glabels.len() {
+                if slot >= NC_SLOTS {
+                    break;
+                }
+                pe.slice_mut(ndarray::s![0, slot, ..])
+                    .assign(&gpe.slice(ndarray::s![0, k, ..]));
+                names.push(glabels[k].clone());
+                slot += 1;
+            }
+        }
+
+        if !text_words.is_empty() {
+            let (tpe, _) = self.text_pe(&clip_words)?;
+            for k in 0..clip_words.len() {
+                if slot >= NC_SLOTS {
+                    break;
+                }
+                pe.slice_mut(ndarray::s![0, slot, ..])
+                    .assign(&tpe.slice(ndarray::s![0, k, ..]));
+                names.push(text_words[k].clone());
+                slot += 1;
+            }
+        }
+
+        Ok((pe, names))
     }
 
     // -----------------------------------------------------------------------
@@ -601,11 +728,14 @@ impl PromptInput {
 
 impl PromptEngine {
     /// 一步到位：按提示来源算出 `pe`，再在目标图里找。
+    ///
+    /// `refs` 是中文视觉参考库：`mode=text` 的词若在库里，就改走图找图通道。
     pub fn run(
         &mut self,
         target: &DynamicImage,
         input: &PromptInput,
         opts: &DetectOptions,
+        refs: &super::prompt_refs::RefStore,
     ) -> Result<Vec<Detection>, VisionError> {
         let (pe, names) = match input {
             PromptInput::Visual {
@@ -614,7 +744,7 @@ impl PromptEngine {
                 classes,
                 names,
             } => self.visual_pe(reference, boxes, classes, names)?,
-            PromptInput::Text { words } => self.text_pe(words)?,
+            PromptInput::Text { words } => self.pe_for_words(words, refs)?,
         };
         self.detect(target, &pe, &names, opts)
     }

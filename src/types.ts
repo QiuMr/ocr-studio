@@ -302,6 +302,18 @@ export interface WindowInfo {
   height: number;
 }
 
+// ---------------------------------------------------------------- AI 操控
+
+/** 与 Rust 侧 commands::AiStatusOut 对应。 */
+export interface AiStatus {
+  enabled: boolean;
+  port: number;
+  base_url: string;
+  token: string;
+  prompt: string;
+  running: boolean;
+}
+
 // ---------------------------------------------------------------- 引擎
 
 /**

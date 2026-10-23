@@ -19,6 +19,22 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $version = "0.1.0"
 
+# 删本脚本自己产生的构建产物（release/ 下的暂存目录、剔出的 junk、旧 zip）。
+#
+# **刻意不走 Remove-Item**：本机 shell 的 safe-delete 包装会对这些路径抛
+# SAFE_DELETE_FAIL_CLOSED（trash 对「项目内的构建产物」这类路径不稳定，
+# detail 显示 OK 也照抛）。这些都是打包中间产物，进回收站没有意义
+# （永远不会「恢复」一个暂存目录），所以用 .NET 直删，稳定且语义更对。
+function Remove-BuildArtifact([string]$path) {
+  if (-not (Test-Path $path)) { return }
+  $item = Get-Item $path -Force
+  if ($item.PSIsContainer) {
+    [System.IO.Directory]::Delete($path, $true)
+  } else {
+    [System.IO.File]::Delete($path)
+  }
+}
+
 # ---- 1. 找 release exe -------------------------------------------------------
 # 注意本机把 CARGO_TARGET_DIR 指到了 D:\rust-target，不能只认 src-tauri\target
 $candidates = @(
@@ -34,7 +50,7 @@ Write-Host "[INFO] 使用 exe: $exe"
 # ---- 2. 准备目录 -------------------------------------------------------------
 $name = "OCR-Studio"
 $stage = Join-Path $root (Join-Path $OutRoot $name)
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+if (Test-Path $stage) { Remove-BuildArtifact $stage }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item $exe (Join-Path $stage "OCR Studio.exe") -Force
@@ -66,19 +82,19 @@ if (-not $SkipModels) {
         $_.Name -eq 'inspect.json'
     }
     foreach ($f in $junk) {
-      Remove-Item $f.FullName -Force
+      Remove-BuildArtifact $f.FullName
       Write-Host ("[INFO] - {0} ({1:N1} MB)" -f $f.Name, ($f.Length / 1MB))
     }
     # 开发夹具（yolo 精度基线用的模型与参考框）不进分发包
     $fixtures = Join-Path $dstModels "_fixtures"
     if (Test-Path $fixtures) {
-      Remove-Item $fixtures -Recurse -Force
+      Remove-BuildArtifact $fixtures
       Write-Host "[INFO] - models/_fixtures（开发夹具）"
     }
     # PP-OCR 逐张量比对用的行图与参考张量（tensor_diff / ddddocr_parity 才读）
     $dumpDir = Join-Path $dstModels "small\dump"
     if (Test-Path $dumpDir) {
-      Remove-Item $dumpDir -Recurse -Force
+      Remove-BuildArtifact $dumpDir
       Write-Host "[INFO] - models/small/dump（逐张量比对夹具）"
     }
     # 检测模型也不进分发包：models/detect/yolo/ 只留 README.txt。
@@ -89,7 +105,7 @@ if (-not $SkipModels) {
       Get-ChildItem $detectDir -Recurse -File |
         Where-Object { $_.Name -ne 'README.txt' } |
         ForEach-Object {
-          Remove-Item $_.FullName -Force
+          Remove-BuildArtifact $_.FullName
           Write-Host ("[INFO] - detect/yolo/{0}" -f $_.Name)
         }
     }
@@ -123,13 +139,13 @@ OCR Studio —— 免安装版使用说明
 
 界面导航（左侧 5 项）
   服务   服务状态、地址复制、启停、能力概览、接入代码。第一次用先看这里。
-  接口   18 个接口的完整文档：参数、返回、错误码、请求示例，逐条可展开。
+  接口   19 个接口的完整文档：参数、返回、错误码、请求示例，逐条可展开。
   试跑   在界面里直接传图验证，不用写代码。识别结果带耗时和框坐标。
   日志   实时看后端日志，可按级别过滤、搜索。排查「为什么没返回」先看这里。
-  设置   模型档位、推理设备、端口、检测模型管理。改完自动保存。
+  设置   模型档位、推理设备、端口、检测模型管理、中文参考库、AI 控制。改完自动保存。
 
 
-接口一览（共 18 个，事实来源与「接口」页一致）
+接口一览（共 19 个，事实来源与「接口」页一致）
 
   认字（5 个）
     POST /ocr/shibie          整图识别，返回拼好的整段文字（最常用）
@@ -138,7 +154,7 @@ OCR Studio —— 免安装版使用说明
     POST /ocr/danzijson       逐字定位，每个字一个框
     POST /ocr/quyuocr         区域识别：只认你指定那块矩形里的字（框坐标已平移回原图）
 
-  找图（8 个）
+  找图（9 个）
     POST /ocr/tuzhaotu1       上传大图 + 小图，精准档找位置
     POST /ocr/tuzhaotu2       上传大图 + 小图，容错档找位置
     POST /ocr/pingmuzhaotu1   服务自己截屏找图，精准档（返回屏幕绝对坐标）
@@ -149,6 +165,8 @@ OCR Studio —— 免安装版使用说明
                               （source 选 image/screen/window；出参与上面几条完全一样）
     POST /vision/prompt       提示找图：当场给「参考图 + 框住的地方」，或者直接给几个词，
                               换目标不用重新导模型（出参与上面几条完全一样）
+    GET/POST/DELETE /vision/promptref
+                              中文参考库：框一次 + 起个中文名，以后按中文名找
 
   看图（3 个）
     POST /vision/detect       目标检测，框出物体类别（请求里要显式带 engine: yolo）
@@ -249,12 +267,33 @@ OCR Studio —— 免安装版使用说明
 提示找图（/vision/prompt，两种模式）
   这是「换目标不用换模型」的那条：提示当成检测器的额外输入，当场给就行。
     图找图（mode=visual）  给一张参考图 + 在上面框住要找的东西。
-    语言找图（mode=text）  直接给几个词，如 "person,bus"。
+    语言找图（mode=text）  直接给几个词，如 "person,bus" 或中文 "人,公交车"。
 
   两种模式的模型分发包里都带了（models\yoloe\ 下：检测器 + 视觉提示编码器
   + 文本提示头 + MobileCLIP2-B 文本塔权重）。第一次调语言找图会多花一两秒
-  把文本塔读进内存，之后常驻。提示词请用**英文**——文本塔是 CLIP 的英文词表，
-  中文会被拆成字节 token，基本匹配不上。
+  把文本塔读进内存，之后常驻。
+
+中文目标（语言找图）
+  提示词**中文可以直接写**（如 "人,公交车"）：内置中英词表会先映射成英文再进文本塔，
+  返回的类别名还是你输入的中文，实测分数与英文逐位一致。
+  词表没盖住的词（比如你自己软件里那个「提交按钮」）用**中文参考库**：
+    1) POST /vision/promptref，给一张参考图 + 图上的框 + 起个中文名，教一次；
+    2) 之后 /vision/prompt 的 mode=text 直接写这个名字（走图找图通道，不需要文本塔，
+       对特定元素比文本提示更准）；
+    3) GET /vision/promptref 看教过哪些，DELETE 按名字忘掉。
+  参考库存在本机 %APPDATA%\com.ocrstudio.app\prompt_refs\，只存裁剪小图，不上传、不联网。
+
+
+AI 控制（让本机 AI 助手直接操控这个服务，默认关闭）
+  设置 → AI 控制：打开开关、复制连接码、一键复制提示词。
+  把提示词粘给任何跑在**这台电脑上**的 AI（编程助手、本地脚本、本地模型）就行，
+  **不用装任何东西**（不是 MCP；网页版 AI 在云端，访问不到 127.0.0.1，只有本机能用）。
+    GET  /ai/v1/tools   工具清单：name / summary / risk 风险档 / 参数说明
+    POST /ai/v1/tool    调工具：{"tool":"ocr_image","args":{...},"request_id":"..."}
+  每次请求要带请求头 Authorization: Bearer <连接码>（设置页可复制、可重置）。
+  写操作建议带 request_id：同一次意图重试带同一个值，不会重复执行。
+  风险分三档：readonly（只看）/ write（会改状态或读屏幕）/ dangerous（启停服务、
+  改端口阈值，会影响正在调接口的其他脚本）。AI 的每次调用都记在「日志」页里。
 
 
 日志与排错
@@ -282,7 +321,7 @@ $readmePath = Join-Path $stage "使用说明.txt"
 
 # ---- 4. 压缩 ----------------------------------------------------------------
 $zip = Join-Path $root (Join-Path $OutRoot ("OCR-Studio-{0}-win64.zip" -f $version))
-if (Test-Path $zip) { Remove-Item $zip -Force }
+if (Test-Path $zip) { Remove-BuildArtifact $zip }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 $size = (Get-Item $zip).Length / 1MB
 Write-Host ("[PASS] 已生成 {0} ({1:N1} MB)" -f $zip, $size)

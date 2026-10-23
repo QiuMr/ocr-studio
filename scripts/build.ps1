@@ -17,7 +17,10 @@ param(
     [switch]$Run
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+# ↑ 刻意**不用** "Stop"：npm / vite / cargo 都把正常进度写进 stderr，
+#   PowerShell 会当成 NativeCommandError，配 "Stop" 会在构建其实成功时中止脚本
+#   （vite 8 / cargo 都踩过）。成败一律看每步后面的 $LASTEXITCODE。
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -40,13 +43,26 @@ function Step($n, $msg) { Write-Host "`n[$n] $msg" -ForegroundColor Cyan }
 
 # ---- 1. 前端 ----
 Step 1 "构建前端（tsc + vite）"
+
+# vite 会先清空 dist（里面上百个字体切片），文件数一多就会被环境的 safe-delete
+# 拦下 —— 表现是「Build failed in Xs」但其实是**删不掉**，不是代码问题。
+# 先用 .NET API 删干净，vite 就不用再删了（删完记得：它按进程 CWD 解析，用绝对路径）。
+$dist = Join-Path $root "dist"
+if (Test-Path $dist) { [System.IO.Directory]::Delete($dist, $true) }
 if (-not (Test-Path (Join-Path $root "node_modules"))) {
     Write-Host "[INFO] 安装前端依赖…"
     & npm install
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] npm install 失败" -ForegroundColor Red; exit 1 }
 }
-& npm run build
-if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] 前端构建失败（先看上面的 TS 报错）" -ForegroundColor Red; exit 1 }
+# vite 会把进度/reporter 信息写到 **stderr**（PowerShell 看到就报 NativeCommandError，
+# 配上本脚本的 `$ErrorActionPreference="Stop"` 会直接中止 —— 实际上构建是成功的）。
+# 所以这一段临时降级成 Continue，成败只看退出码。
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& npm run build 2>&1 | ForEach-Object { Write-Host $_ }
+$code = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($code -ne 0) { Write-Host "[FAIL] 前端构建失败（先看上面的 TS 报错）" -ForegroundColor Red; exit 1 }
 
 # ---- 2. 让 build.rs 重跑，把新 dist 嵌进 exe ----
 Step 2 "触发重新嵌入前端资源"

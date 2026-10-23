@@ -241,6 +241,8 @@ fn end2end_text_prompt_finds_the_same_boxes() {
     let mut eng = load_engine();
     let target = image(&r.end2end.image);
 
+    // 参考库传空的：这条用例走的是纯文本通道，不该被中文参考库影响
+    let refs = ocr_studio_lib::engine::prompt_refs::RefStore::default();
     let dets = eng
         .run(
             &target,
@@ -252,6 +254,7 @@ fn end2end_text_prompt_finds_the_same_boxes() {
                 iou_thresh: 0.7,
                 class_filter: Vec::new(),
             },
+            &refs,
         )
         .expect("端到端提示找图失败");
 

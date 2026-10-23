@@ -49,6 +49,8 @@ ndarray = "0.17"
 
 # 本地 HTTP 服务
 axum = { version = "0.8", features = ["multipart"] }
+# DELETE /vision/promptref?name=中文 的 query 解码（axum 的传递依赖，声明出来直接用）
+serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 
 # 接口入参解码

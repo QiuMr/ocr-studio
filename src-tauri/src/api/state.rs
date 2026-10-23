@@ -122,7 +122,7 @@ fn alt_spec_of(opts: &OcrOptions) -> Result<Option<EngineSpec>, ApiError> {
 }
 
 /// 把引擎层错误映射成 API 错误（`Unsupported`/`UnknownEngine` 带专用 code）。
-fn map_engine_err(e: VisionError) -> ApiError {
+pub fn map_engine_err(e: VisionError) -> ApiError {
     map_engine_err_ctx(e, None)
 }
 
@@ -132,7 +132,7 @@ fn map_engine_err(e: VisionError) -> ApiError {
 /// 「这套模型没带」——那时抛的是 `VisionError::Unsupported`，必须原样映射成
 /// code 1002，不能像早期那样一律拍成 `Internal`（500）。脚本靠 1002 区分
 /// 「引擎做不到，换条路」和「服务出故障了」，两者混在一起就没法自动降级。
-fn map_engine_err_ctx(e: VisionError, ctx: Option<&str>) -> ApiError {
+pub fn map_engine_err_ctx(e: VisionError, ctx: Option<&str>) -> ApiError {
     let with = |m: String| match ctx {
         Some(c) => format!("{c}: {m}"),
         None => m,
@@ -159,6 +159,15 @@ pub struct AppState {
     /// 运行时提示引擎（YOLOE 开放词汇的图找图/语言找图），单槽、按需加载。
     /// 它带 250MB 级的文本塔，不能跟主引擎一起常驻。
     prompt: Mutex<Option<crate::engine::prompt::PromptEngine>>,
+    /// 中文视觉参考库（`<数据目录>/prompt_refs/`）。
+    ///
+    /// 独立于提示引擎：教一个新目标只是存图 + 写索引，不该为了加一条记录
+    /// 去加载那 242MB 的文本塔。
+    pub refs: Mutex<crate::engine::prompt_refs::RefStore>,
+    /// AI 接口的限流窗口（最近一分钟内的调用时刻）。
+    pub ai_rate: Mutex<std::collections::VecDeque<std::time::Instant>>,
+    /// AI 接口的幂等缓存（`request_id` → 上次的响应）。
+    pub ai_idem: Mutex<super::ai::AiIdem>,
     pub cfg: RwLock<AppConfig>,
     pub started_at: Instant,
     /// 停机信号发送端。`Some` 表示服务正在运行。
@@ -171,14 +180,27 @@ impl AppState {
     }
 
     pub fn with_data_dir(models_root: PathBuf, cfg: AppConfig, data_dir: PathBuf) -> Self {
+        // 先算好再搬 `data_dir`：struct 字面量里字段是按书写顺序求值的，
+        // `data_dir` 一旦移动进去，后面就没法再借它拼路径了。
+        let refs = crate::engine::prompt_refs::RefStore::load(&data_dir.join("prompt_refs"));
+        let mut cfg = cfg;
+        // 连接码「首次生成即落盘」：用户看到界面上那个码之后，它就必须稳定可用。
+        if cfg.ensure_ai_token() {
+            if let Err(e) = cfg.save(&data_dir) {
+                tracing::warn!("AI 连接码没能落盘（下次启动会变）：{e}");
+            }
+        }
         Self {
             models_root,
             data_dir,
             engine: Mutex::new(None),
             alt: Mutex::new(None),
             prompt: Mutex::new(None),
+            refs: Mutex::new(refs),
             cfg: RwLock::new(cfg),
             started_at: Instant::now(),
+            ai_rate: Mutex::new(std::collections::VecDeque::new()),
+            ai_idem: Mutex::new(super::ai::AiIdem::default()),
             shutdown: Mutex::new(None),
         }
     }
@@ -358,9 +380,12 @@ impl AppState {
                 *guard = Some(eng);
             }
             let eng = guard.as_mut().expect("上面刚赋值过");
+            // 参考库的锁要在调用期间一直拿着：参考图路径是从索引里读的，
+            // 中途被删掉会读不到文件。它和 prompt 是两把不同的锁，不会互等。
+            let refs = st.refs.lock().unwrap_or_else(|e| e.into_inner());
             // 走 map_engine_err_ctx 而不是直接 Internal：缺 MobileCLIP2-B 权重 /
             // 缺视觉编码器时抛的是 Unsupported，必须映射成 1002 而不是 500。
-            eng.run(&target, &input, &opts)
+            eng.run(&target, &input, &opts, &refs)
                 .map_err(|e| map_engine_err_ctx(e, Some("提示找图失败")))
         })
         .await

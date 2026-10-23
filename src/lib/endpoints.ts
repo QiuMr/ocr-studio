@@ -11,7 +11,7 @@
 export type EndpointGroup = "ocr" | "find" | "vision" | "status";
 
 export interface Endpoint {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "DELETE";
   path: string;
   /** 一句话说清干什么，用用户能懂的话 */
   title: string;
@@ -209,14 +209,44 @@ export const ENDPOINTS: Endpoint[] = [
         desc: "可选。每个框归属的「槽」，同槽的框取并集当一个提示；缺省全 0",
       },
       { name: "ref_names", desc: "可选。槽的名字，只用于回显（如 \"确认按钮\"）" },
-      { name: "words", desc: "mode=text 必填。提示词，逗号分隔，如 \"person,bus\"" },
+      { name: "words", desc: "mode=text 必填。提示词，逗号分隔。中文（人、公交车）与英文（person,bus）都行，混写也行" },
       { name: "conf", desc: "置信度阈值 0~1，默认 0.25" },
       { name: "class_filter", desc: "只保留这些提示槽；不传 = 全部" },
       { name: "hwnd", desc: "source=window 时的窗口句柄，或改用 title" },
       { name: "max_results", desc: "最多返回几个，默认 8" },
     ],
     returns:
-      "与模板找图同构（found / x / y / center_x / center_y / score / matched / matches[] / origin_x / origin_y）；额外多 engine（固定 yoloe-prompt）与命中里的 class_id/class_name（语言找图时类名就是提示词本身）",
+      "与模板找图同构（found / x / y / center_x / center_y / score / matched / matches[] / origin_x / origin_y）；额外多 engine（固定 yoloe-prompt）与命中里的 class_id/class_name（类名就是你给的提示词）",
+  },
+
+  // ------------------------------------------------------------------ 找图
+  {
+    method: "GET",
+    path: "/vision/promptref",
+    title: "中文参考库：看已经「教过」哪些目标",
+    note: "语言找图的文本塔是英文语义空间，中文靠内置词表映射 —— 词表覆盖不到的（比如自家软件里那个按钮）就找不了。参考库是绕开文本塔的那条路：**从截图里框一次、起个中文名**，以后按中文名找，走图找图通道，比文本提示更准，也不需要那 250MB 文本塔。",
+    params: [],
+    returns: "refs[{name, box, width, height, created}]、count、dir（存哪）",
+  },
+  {
+    method: "POST",
+    path: "/vision/promptref",
+    title: "中文参考库：教一个新目标（框一次 + 起中文名）",
+    note: "给整张参考图 + 它上面的一个框 + 一个中文名，就记下来了。同名会覆盖。教完之后 /vision/prompt 的 mode=text 直接写这个名字。",
+    params: [
+      { name: "name", required: true, desc: "中文名，如 \"提交按钮\"" },
+      { name: "image", required: true, desc: "参考图 base64（**整张图**，不是裁剪块）" },
+      { name: "box", required: true, desc: "参考框 [x1,y1,x2,y2]，参考图左上角为原点" },
+    ],
+    returns: "name、box、width、height",
+  },
+  {
+    method: "DELETE",
+    path: "/vision/promptref",
+    title: "中文参考库：忘掉一个目标",
+    note: "按名字删。名字不存在也返回 code=0（removed=false），重复删不会报错。",
+    params: [{ name: "name", required: true, desc: "要忘掉的目标名" }],
+    returns: "name、removed",
   },
 
   // ------------------------------------------------------------------ 看图
@@ -284,11 +314,22 @@ export function endpointsOf(group: EndpointGroup): Endpoint[] {
   return ENDPOINTS.filter((e) => groupOf(e.path) === group);
 }
 
+/**
+ * 去重后的端点数（同一路径的 GET/POST/DELETE 算**一个**）。
+ *
+ * 为什么不能直接用 `ENDPOINTS.length`：`/vision/promptref` 是「一个端点三种方法」，
+ * 在 ENDPOINTS 里拆成 3 条写（参数和出参不一样，必须拆开讲），直接取 length 会把
+ * 1 个端点算成 3 个。后端 `routes.rs` 的 `PATHS` 与自检断言按**路径**计，
+ * 界面数字必须和它对得上，否则用户按界面数去核对 PATHS 会以为少登记了。
+ */
+export const ENDPOINT_PATH_COUNT = new Set(ENDPOINTS.map((e) => e.path)).size;
+
 export function groupOf(path: string): EndpointGroup {
-  // `/vision/prompt`（提示找图）虽然挂在 /vision 前缀下，但它是一条**找图**能力：
-  // 出参与模板找图同构，在 ENDPOINTS 里也写在「找图」那一段。不特判的话它会被
+  // `/vision/prompt`（提示找图）与 `/vision/promptref`（中文参考库）虽然挂在
+  // /vision 前缀下，但它们都是**找图**能力：出参与模板找图同构（参考库是给提示
+  // 找图喂中文名的），在 ENDPOINTS 里也写在「找图」那一段。不特判的话它们会被
   // 前缀规则划进「看图」，接口页上就跑到别组去了（注释和实际分组对不上）。
-  if (path === "/vision/prompt") return "find";
+  if (path === "/vision/prompt" || path === "/vision/promptref") return "find";
   if (path.startsWith("/vision")) return "vision";
   if (path.includes("zhaotu")) return "find";
   if (path.startsWith("/ocr/") && path !== "/ocr/health") return "ocr";

@@ -27,6 +27,7 @@ import type {
   PromptFindArgs,
   SemanticFindArgs,
   WindowInfo,
+  AiStatus,
 } from "../types";
 
 /** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
@@ -446,7 +447,8 @@ export function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/** 取图片自然尺寸。 */export function imageSize(src: string): Promise<{ width: number; height: number }> {
+/** 取图片自然尺寸。 */
+export function imageSize(src: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
@@ -474,3 +476,26 @@ export async function subscribeLogs(onLines: (lines: LogLine[]) => void): Promis
   const { listen } = await import("@tauri-apps/api/event");
   return listen<LogLine[]>("log-lines", (e) => onLines(e.payload));
 }
+
+// ---------------------------------------------------------------- AI 操控
+
+/** AI 接口当前状态（含可复制的提示词）。 */
+export async function aiStatus(): Promise<AiStatus> {
+  return invoke<AiStatus>("ai_status");
+}
+
+/** 开关 AI 接口。不用重启服务，改完立刻生效。 */
+export async function aiSetEnabled(enabled: boolean): Promise<AiStatus> {
+  return invoke<AiStatus>("ai_set_enabled", { enabled });
+}
+
+/** 重置连接码，旧码立刻失效。 */
+export async function aiResetToken(): Promise<AiStatus> {
+  return invoke<AiStatus>("ai_reset_token");
+}
+
+/** 中文参考库里已经教过的目标名。 */
+export async function aiTargets(): Promise<string[]> {
+  return invoke<string[]>("ai_targets");
+}
+

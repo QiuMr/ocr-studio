@@ -426,6 +426,10 @@ pub fn run() {
             commands::list_windows,
             commands::get_logs,
             commands::read_image_file,
+            commands::ai_status,
+            commands::ai_set_enabled,
+            commands::ai_reset_token,
+            commands::ai_targets,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

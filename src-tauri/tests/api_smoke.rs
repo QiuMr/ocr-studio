@@ -1240,3 +1240,99 @@ fn bad_requests_return_400() {
     let (status, _) = http(srv.addr, "GET", "/ocr/nope", "application/json", b"");
     assert_eq!(status, 404);
 }
+
+// ---------- 中文参考库：DELETE 的 name 从 query 还是 body 都认 ----------
+
+/// 教/删参考库是纯文件操作，不加载引擎；`data_dir` 用临时目录，不碰真配置。
+///
+/// 为什么钉这个：`DELETE ...?name=中文` 是 curl 和 AI 最自然的写法，
+/// 曾经只认 JSON body，调用方按 REST 惯例写就吃一个「JSON 解析失败」——
+/// 报错还指向了完全不相干的方向（body），极难排查。
+#[test]
+fn promptref_delete_accepts_query_and_body() {
+    let root = workspace_root();
+    let data_dir = std::env::temp_dir().join(format!(
+        "ocr_promptref_del_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let srv = spawn_server(AppState::with_data_dir(
+        root.join("models"),
+        AppConfig::default(),
+        data_dir.clone(),
+    ));
+
+    let img = image::RgbImage::from_pixel(40, 40, image::Rgb([80u8, 80, 80]));
+    let b64 = png_b64(&img);
+    let teach = format!("{{\"name\":\"提交按钮\",\"image\":\"{b64}\",\"box\":[4,4,30,30]}}");
+
+    // 教一个（POST JSON body）
+    let (status, body) = http(
+        srv.addr,
+        "POST",
+        "/vision/promptref",
+        "application/json",
+        teach.as_bytes(),
+    );
+    println!("教一次 -> {status} {body}");
+    assert_eq!(status, 200, "教一次应成功");
+
+    // DELETE 用 query string（「提交按钮」的 percent-encoding）
+    let (status, body) = http(
+        srv.addr,
+        "DELETE",
+        "/vision/promptref?name=%E6%8F%90%E4%BA%A4%E6%8C%89%E9%92%AE",
+        "application/json",
+        b"",
+    );
+    println!("DELETE(query) -> {status} {body}");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"removed\":true"), "按 query 名删除应生效");
+
+    // 再教一个，改用 JSON body 删
+    let (status, _) = http(
+        srv.addr,
+        "POST",
+        "/vision/promptref",
+        "application/json",
+        teach.as_bytes(),
+    );
+    assert_eq!(status, 200);
+    let del_body = "{\"name\":\"提交按钮\"}".to_string();
+    let (status, body) = http(
+        srv.addr,
+        "DELETE",
+        "/vision/promptref",
+        "application/json",
+        del_body.as_bytes(),
+    );
+    println!("DELETE(body) -> {status} {body}");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"removed\":true"), "按 body 名删除应生效");
+
+    // 删不存在的：幂等，removed=false 但仍是 200
+    let (status, body) = http(
+        srv.addr,
+        "DELETE",
+        "/vision/promptref?name=%E4%B8%8D%E5%AD%98%E5%9C%A8",
+        "application/json",
+        b"",
+    );
+    println!("DELETE(不存在) -> {status} {body}");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"removed\":false"));
+
+    // 什么都没给：明确 400，并告诉调用方两种正确写法
+    let (status, body) = http(
+        srv.addr,
+        "DELETE",
+        "/vision/promptref",
+        "application/json",
+        b"",
+    );
+    println!("DELETE(空) -> {status} {body}");
+    assert_eq!(status, 400);
+    assert!(body.contains("name"), "报错要点名缺的是 name");
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

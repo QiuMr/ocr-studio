@@ -17,12 +17,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::to_bytes;
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, RawQuery, Request, State};
 use axum::http::header::{self, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use image::{DynamicImage, RgbImage};
 
 use super::dto::{
@@ -39,7 +40,7 @@ use crate::matcher::{self, MatchOptions, TemplateMask};
 use crate::ocr::Device;
 
 /// 请求体上限 32MB：截图级 PNG  compressed 一般几百 KB，留足余量。
-const MAX_BODY: usize = 32 * 1024 * 1024;
+pub const MAX_BODY: usize = 32 * 1024 * 1024;
 
 /// `template_file` 允许的扩展名。限制扩展名是为了让这条「读本地路径」的通道
 /// 只能拿图片，不能被当作任意文件读取器使用。
@@ -124,6 +125,16 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_PIPELINE, post(vision_pipeline))
         .route(P_QRCODE, post(vision_qrcode))
         .route(P_PROMPT, post(vision_prompt))
+        .route(
+            P_PROMPTREF,
+            get(prompt_ref_list)
+                .post(prompt_ref_add)
+                .delete(prompt_ref_del),
+        )
+        // AI 操控接口（给本机 AI 助手用，默认关闭，见 api/ai.rs）。
+        // 不进 PATHS：那张表是「用户脚本能用哪些接口」的清单，AI 的入口不该混进去。
+        .route(super::ai::P_AI_TOOLS, get(super::ai::ai_tools))
+        .route(super::ai::P_AI_TOOL, post(super::ai::ai_tool))
         // 兜底：先注册再套 layer，layer 才会把 fallback 一起包住
         .fallback(not_found);
 
@@ -168,11 +179,13 @@ const P_PIPELINE: &str = "/vision/pipeline";
 const P_QRCODE: &str = "/vision/qrcode";
 /// 运行时提示找图：图找图（参考图 + 框）/ 语言找图（提示词），换目标不用换模型
 const P_PROMPT: &str = "/vision/prompt";
+/// 中文视觉参考库：把「一个中文名」绑到「一块参考图区域」，之后按中文名找
+const P_PROMPTREF: &str = "/vision/promptref";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
     P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_QUYU, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1,
-    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE, P_PROMPT,
+    P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE, P_PROMPT, P_PROMPTREF,
 ];
 
 // ---------------------------------------------------------------- 兜底与 CORS
@@ -1006,6 +1019,189 @@ async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Resp
         opts.max_results.unwrap_or(8),
         t0,
     )))
+    .into_response()
+}
+
+/// 中文视觉参考库：列出已经「教过」的目标。
+///
+/// 这些名字可以直接当 `mode=text` 的提示词用（"提交按钮" 而不是 "submit button"），
+/// 走的是图找图那条通道，不依赖英文文本塔。
+async fn prompt_ref_list(State(state): State<Arc<AppState>>) -> Response {
+    let refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
+    let items: Vec<serde_json::Value> = refs
+        .list()
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "box": e.rect,
+                "width": e.width,
+                "height": e.height,
+                "created": e.created,
+            })
+        })
+        .collect();
+    Json(ApiResp {
+        code: 0,
+        msg: if items.is_empty() {
+            "还没有教过任何目标。POST 一张参考图 + 一个框 + 一个中文名就行".to_string()
+        } else {
+            format!(
+                "共 {} 个，可以直接当 /vision/prompt 的 mode=text 提示词用",
+                items.len()
+            )
+        },
+        data: Some(serde_json::json!({
+            "refs": items,
+            "count": items.len(),
+            "dir": refs.dir().display().to_string(),
+        })),
+    })
+    .into_response()
+}
+
+/// 中文视觉参考库：教一个新目标（整张参考图 + 框 + 中文名）。
+async fn prompt_ref_add(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    #[derive(Debug, Deserialize)]
+    struct Req {
+        name: Option<String>,
+        image: Option<String>,
+        /// 参考框，参考图原图坐标
+        #[serde(rename = "box")]
+        box_: Option<Vec<f32>>,
+    }
+
+    let bytes = match to_bytes(req.into_body(), MAX_BODY).await {
+        Ok(v) => v,
+        Err(e) => return ApiError::BadRequest(format!("读取请求体失败: {e}")).into_response(),
+    };
+    let body: Req = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return ApiError::BadRequest(format!(
+                "JSON 解析失败: {e}。需要 {{\"name\":\"提交按钮\",\"image\":\"<base64>\",\"box\":[x1,y1,x2,y2]}}"
+            ))
+            .into_response()
+        }
+    };
+
+    let name = body.name.as_deref().unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return ApiError::BadRequest("缺少 name（给这个目标起个中文名，之后就用它来找）".into())
+            .into_response();
+    }
+    let b64 = body.image.as_deref().unwrap_or("").trim();
+    if b64.is_empty() {
+        return ApiError::BadRequest("缺少 image（参考图的 base64，要整张图不是裁剪块）".into())
+            .into_response();
+    }
+    let raw = match decode_base64_image(b64) {
+        Ok(v) => v,
+        Err(e) => return ApiError::BadRequest(e).into_response(),
+    };
+    let img = match decode_image(&raw) {
+        Ok(v) => v,
+        Err(e) => return ApiError::BadRequest(e).into_response(),
+    };
+    let b = match body.box_.as_deref() {
+        Some(b) if b.len() == 4 => [b[0], b[1], b[2], b[3]],
+        _ => {
+            return ApiError::BadRequest(
+                "box 要是 4 个数 [x1,y1,x2,y2]（参考图左上角为原点）".into(),
+            )
+            .into_response()
+        }
+    };
+
+    let entry = {
+        let mut refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
+        match refs.add(&name, &img, b) {
+            Ok(v) => v,
+            Err(e) => {
+                return super::state::map_engine_err(e).into_response();
+            }
+        }
+    };
+
+    tracing::info!("AI/用户教了新目标：{name}（{}x{}）", entry.width, entry.height);
+    Json(ApiResp {
+        code: 0,
+        msg: format!("已记住「{name}」，之后 /vision/prompt 的 mode=text 直接写这个名字就行"),
+        data: Some(serde_json::json!({
+            "name": entry.name,
+            "box": entry.rect,
+            "width": entry.width,
+            "height": entry.height,
+        })),
+    })
+    .into_response()
+}
+
+/// 中文视觉参考库：忘掉一个目标（按名字）。不存在也返回 0（幂等）。
+///
+/// `name` 从 **query string** 拿（`DELETE /vision/promptref?name=提交按钮`——
+/// curl 和 AI 最自然的写法），也兼容 JSON body `{"name": "..."}`，两者都给时
+/// query 优先。中文名走 percent-encoding，axum/serde_urlencoded 负责解码。
+async fn prompt_ref_del(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+    req: Request,
+) -> Response {
+    #[derive(Debug, Deserialize)]
+    struct Req {
+        name: Option<String>,
+    }
+    let query_name: Option<String> = query
+        .as_deref()
+        .and_then(|q| serde_urlencoded::from_str::<Req>(q).ok())
+        .and_then(|r| r.name);
+    let bytes = match to_bytes(req.into_body(), MAX_BODY).await {
+        Ok(v) => v,
+        Err(e) => return ApiError::BadRequest(format!("读取请求体失败: {e}")).into_response(),
+    };
+    // body 里有内容但解析不了时，只要 query 已经给了 name 就放行（宽容写法优先）。
+    let body_name: Option<String> = if bytes.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<Req>(&bytes) {
+            Ok(v) => v.name,
+            Err(e) => {
+                if query_name.is_some() {
+                    None
+                } else {
+                    return ApiError::BadRequest(format!("JSON 解析失败: {e}")).into_response();
+                }
+            }
+        }
+    };
+    let name = query_name
+        .or(body_name)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return ApiError::BadRequest(
+            "缺少 name（要删掉哪个目标）：query ?name= 或 JSON body {\"name\": ...}".into(),
+        )
+        .into_response();
+    }
+
+    let removed = {
+        let mut refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
+        match refs.remove(&name) {
+            Ok(v) => v,
+            Err(e) => return super::state::map_engine_err(e).into_response(),
+        }
+    };
+    Json(ApiResp {
+        code: 0,
+        msg: if removed {
+            format!("已忘掉「{name}」")
+        } else {
+            format!("没有叫「{name}」的参考目标，无需删除")
+        },
+        data: Some(serde_json::json!({ "name": name, "removed": removed })),
+    })
     .into_response()
 }
 
@@ -1949,7 +2145,11 @@ mod tests {
     /// 那样 404 提示会指错地方。
     #[test]
     fn paths_table_covers_all_endpoints() {
-        assert_eq!(PATHS.len(), 18, "端点数量变了就要同步 PATHS");
+        assert_eq!(
+            PATHS.len(),
+            19,
+            "端点数量变了就要同步 PATHS（还有前端 src/lib/endpoints.ts 与各文档的 18 这个数）"
+        );
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");
         }

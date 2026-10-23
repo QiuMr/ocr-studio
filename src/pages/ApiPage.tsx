@@ -3,7 +3,7 @@ import { Check, ChevronDown, Copy } from "lucide-react";
 import { CodeBlock } from "../components/ui/code-block";
 import { cn } from "../lib/utils";
 import {
-  ENDPOINTS,
+  ENDPOINT_PATH_COUNT,
   GROUP_DESC,
   GROUP_LABEL,
   endpointsOf,
@@ -45,7 +45,7 @@ export function ApiPage() {
             接口
           </h1>
           <p className="mt-2 text-[13px] font-medium leading-5 text-neutral-500">
-            共 {ENDPOINTS.length} 个端点，全部走本机。返回统一是{" "}
+            共 {ENDPOINT_PATH_COUNT} 个端点，全部走本机。返回统一是{" "}
             <code className="selectable rounded bg-neutral-100 px-1 py-0.5 font-mono text-[12px] text-neutral-700">
               {"{ code, msg, data }"}
             </code>

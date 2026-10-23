@@ -87,6 +87,15 @@ pub struct AppConfig {
     /// 默认放行任意网页等于把「截屏 + 识别」交给任何打开着的网页去驱动。
     /// 需要在本地 HTML / Electron 页面里 fetch 时才打开。
     pub allow_browser: bool,
+    /// 是否开放 AI 操控接口（`/ai/v1/*`）。
+    ///
+    /// 默认 **false**：这是会改变程序行为的对外接口，一律让用户显式打开。
+    /// 只绑回环地址，所以能调它的只有跑在本机的 AI。
+    pub ai_enabled: bool,
+    /// AI 接口的连接码（`Authorization: Bearer <码>`）。
+    ///
+    /// 首次启动生成并落盘；用户可在设置页重置（重置后旧码立刻失效）。
+    pub ai_token: String,
 }
 
 impl Default for AppConfig {
@@ -99,7 +108,23 @@ impl Default for AppConfig {
             webview_compat: false,
             detect_models: Vec::new(),
             allow_browser: false,
+            ai_enabled: false,
+            ai_token: String::new(),
         }
+    }
+}
+
+impl AppConfig {
+    /// 确保 AI 连接码存在（没有就生成一个）。返回是否变过（变过要落盘）。
+    ///
+    /// 为什么在加载时补而不是用到再生成：用户一旦看到界面上的连接码，
+    /// 它就必须是稳定能用的 —— 每次启动换一个，粘给 AI 的那份立刻作废。
+    pub fn ensure_ai_token(&mut self) -> bool {
+        if self.ai_token.trim().is_empty() {
+            self.ai_token = crate::api::ai::new_ai_token();
+            return true;
+        }
+        false
     }
 }
 

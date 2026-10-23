@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Gauge,
   Info,
+  KeyRound,
   Loader2,
   Play,
   Plus,
@@ -31,6 +32,10 @@ import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { Slider } from "../components/ui/slider";
 import {
+  aiResetToken,
+  aiSetEnabled,
+  aiStatus,
+  aiTargets,
   detectModels,
   getAutostart,
   getConfig,
@@ -51,6 +56,7 @@ import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
 import {
   DEFAULT_CONFIG,
+  type AiStatus,
   type AppConfig,
   type DetectModel,
   type Device,
@@ -87,6 +93,10 @@ export function SettingsPage() {
   const [confirmReset, setConfirmReset] = useState(false);
   /** 开机自启：状态存在系统注册表里，不来自 config.json，所以单独拉 */
   const [autostart, setAutostartState] = useState<boolean | null>(null);
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [aiTargetsList, setAiTargetsList] = useState<string[]>([]);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiCopied, setAiCopied] = useState(false);
 
   const saveTimer = useRef<number | undefined>(undefined);
 
@@ -107,6 +117,9 @@ export function SettingsPage() {
       setRoot(r);
       setEngines(e);
       setModels(m);
+      const [aiState, targets] = await Promise.all([aiStatus(), aiTargets()]);
+      setAi(aiState);
+      setAiTargetsList(targets);
     } catch (e) {
       setError(String(e));
     }
@@ -121,6 +134,17 @@ export function SettingsPage() {
     void getAutostart()
       .then(setAutostartState)
       .catch(() => setAutostartState(null));
+  }, []);
+
+  // AI 在本机改了服务/配置时，HTTP 层没有 AppHandle 发不了 Tauri 事件；
+  // 用轻量轮询代替（3s 一次，只在设置页打开时跑）。AI 启停服务、改端口后
+  // 「当前监听」徽标和状态会自己变，不用用户手动刷新。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const t = window.setInterval(() => {
+      void aiStatus().then(setAi).catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(t);
   }, []);
 
   const onToggleAutostart = async (on: boolean) => {
@@ -179,6 +203,37 @@ export function SettingsPage() {
     } catch (e) {
       setError(`切换显卡加速失败：${e}`);
     }
+  };
+
+  const onToggleAi = async (enabled: boolean) => {
+    setAiBusy(true);
+    try {
+      setAi(await aiSetEnabled(enabled));
+      setError(null);
+    } catch (e) {
+      setError(`AI 接口开关失败：${e}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const onResetAiToken = async () => {
+    setAiBusy(true);
+    try {
+      setAi(await aiResetToken());
+      setError(null);
+    } catch (e) {
+      setError(`重置 AI 连接码失败：${e}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const copyAiPrompt = async () => {
+    if (!ai) return;
+    await copy(ai.prompt, "ai");
+    setAiCopied(true);
+    window.setTimeout(() => setAiCopied(false), 1400);
   };
 
   const onToggleServer = async () => {
@@ -643,6 +698,76 @@ export function SettingsPage() {
             </Button>
             <span className="text-[12px] leading-4 text-neutral-400">
               列表第一项就是默认模型；类别名会自动从模型里读，不用手写 labels.txt
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ---------------------------------------------------------- AI 控制 */}
+      <Card>
+        <CardHeader>
+          <div className="flex h-8 items-center">
+            <CardTitle className="flex items-center gap-2">
+              <KeyRound className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              AI 控制
+              <Badge variant={ai?.enabled ? "success" : "outline"}>
+                {ai?.enabled ? "已开启" : "默认关闭"}
+              </Badge>
+            </CardTitle>
+          </div>
+          <CardDescription>
+            给本机 AI 一个简单的 HTTP 地址，让它直接调用 OCR、找图、截图和服务控制，不需要安装 MCP。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-3 rounded-lg bg-neutral-50 px-3.5 py-3">
+            <div className="min-w-0">
+              <Label htmlFor="ai-enabled" className="flex items-center gap-1.5 text-[13px] font-medium text-neutral-800">
+                开放 AI 操控接口
+                <Hint>只监听 127.0.0.1，云端网页 AI 无法访问；开启后仍需连接码。</Hint>
+              </Label>
+              <p className="mt-1 text-[12px] leading-4 text-neutral-500">
+                {ai?.enabled ? "已开放，AI 可以按工具清单调用本机服务。" : "关闭状态，AI 请求会被拒绝。"}
+              </p>
+            </div>
+            <Switch
+              id="ai-enabled"
+              checked={!!ai?.enabled}
+              onCheckedChange={(v) => void onToggleAi(v)}
+              disabled={!isTauri() || !ai || aiBusy}
+            />
+          </div>
+
+          {ai && (
+            <div className="flex flex-col gap-2">
+              <Row label="接口地址">
+                <code className="selectable font-mono text-[12px] text-neutral-700">{ai.base_url}/ai/v1</code>
+              </Row>
+              <Row label="连接码">
+                <div className="flex max-w-[330px] items-center gap-2">
+                  <code className="selectable break-all font-mono text-[12px] text-neutral-700">{ai.token}</code>
+                  <Button variant="ghost" size="icon-xs" onClick={() => void copy(ai.token, "token")} title="复制连接码">
+                    {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                  </Button>
+                  <Button variant="outline" size="xs" onClick={() => void onResetAiToken()} disabled={aiBusy}>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    重置
+                  </Button>
+                </div>
+              </Row>
+              <Row label="当前监听">
+                <Badge variant={ai.running ? "success" : "warning"}>{ai.running ? "服务运行中" : "服务未启动"}</Badge>
+              </Row>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2 border-t border-neutral-100 pt-3">
+            <Button variant="outline" size="sm" onClick={() => void copyAiPrompt()} disabled={!ai || !isTauri()}>
+              {aiCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              {aiCopied ? "已复制提示词" : "一键复制给 AI 的提示词"}
+            </Button>
+            <span className="text-[12px] text-neutral-400">
+              已教目标：{aiTargetsList.length ? aiTargetsList.join("、") : "暂无，可用 teach_target 教一次"}
             </span>
           </div>
         </CardContent>

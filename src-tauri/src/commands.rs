@@ -1522,6 +1522,86 @@ pub async fn find_prompt(
 
 // ---------------------------------------------------------------- 日志
 
+// ---------------------------------------------------------------- AI 操控
+
+/// AI 接口的状态（给设置页面板用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AiStatusOut {
+    pub enabled: bool,
+    pub port: u16,
+    pub base_url: String,
+    /// 连接码。面板上要能复制、能重置。
+    pub token: String,
+    /// 「复制给 AI 的提示词」，整段粘给本机 AI 就能用。
+    pub prompt: String,
+    /// 服务当前是否在监听（接口开着但服务没起的话，AI 也调不通）。
+    pub running: bool,
+}
+
+#[tauri::command]
+pub fn ai_status(state: State<'_, Arc<AppState>>) -> AiStatusOut {
+    let (enabled, token, port) = {
+        let cfg = state.cfg.read().unwrap_or_else(|e| e.into_inner());
+        (cfg.ai_enabled, cfg.ai_token.clone(), cfg.port)
+    };
+    let base = format!("http://127.0.0.1:{port}");
+    AiStatusOut {
+        enabled,
+        port,
+        base_url: base.clone(),
+        token: token.clone(),
+        prompt: crate::api::ai::prompt(&base, &token),
+        running: state.is_running(),
+    }
+}
+
+/// 开关 AI 接口。它只是让 `/ai/v1/*` 要不要拒绝请求，不用重启服务。
+#[tauri::command]
+pub fn ai_set_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> AiStatusOut {
+    {
+        let mut cfg = state.cfg.write().unwrap_or_else(|e| e.into_inner());
+        cfg.ai_enabled = enabled;
+        if let Err(e) = cfg.save(&state.data_dir) {
+            tracing::warn!("AI 开关没能落盘：{e}");
+        }
+    }
+    // 重置开关时清掉幂等缓存，免得上一轮的 request_id 串味
+    if !enabled {
+        let mut idem = state.ai_idem.lock().unwrap_or_else(|e| e.into_inner());
+        idem.cache.clear();
+        idem.order.clear();
+        idem.inflight.clear();
+    }
+    tracing::info!("AI 操控接口已{}", if enabled { "开启" } else { "关闭" });
+    ai_status(state)
+}
+
+/// 重置连接码：旧码立刻失效。
+#[tauri::command]
+pub fn ai_reset_token(state: State<'_, Arc<AppState>>) -> AiStatusOut {
+    {
+        let mut cfg = state.cfg.write().unwrap_or_else(|e| e.into_inner());
+        cfg.ai_token = crate::api::ai::new_ai_token();
+        if let Err(e) = cfg.save(&state.data_dir) {
+            tracing::warn!("AI 连接码没能落盘：{e}");
+        }
+        // 同上：换码就当新一轮，幂等缓存清掉
+        let mut idem = state.ai_idem.lock().unwrap_or_else(|e| e.into_inner());
+        idem.cache.clear();
+        idem.order.clear();
+        idem.inflight.clear();
+    }
+    tracing::info!("AI 操控接口的连接码已重置");
+    ai_status(state)
+}
+
+/// 中文参考库里已经教过的目标（给设置页展示，删不掉的东西用户会疑惑）。
+#[tauri::command]
+pub fn ai_targets(state: State<'_, Arc<AppState>>) -> Vec<String> {
+    let refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
+    refs.list().iter().map(|e| e.name.clone()).collect()
+}
+
 /// 最近的后端日志（环形缓冲快照）。
 ///
 /// 前端进「运行日志」页时先调这个补历史，之后靠 `log-lines` 事件增量接收。

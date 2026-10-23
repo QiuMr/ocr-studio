@@ -65,18 +65,18 @@ models/                  模型（缺了会提示「引擎未加载」）
 | 页面 | 作用 |
 |---|---|
 | 服务 | 服务状态（运行中 / 已停止）、地址复制、启停、能力概览、接入代码 |
-| 接口 | 18 个接口的完整文档：参数、返回、错误码、可复制的请求示例 |
+| 接口 | 19 个接口的完整文档：参数、返回、错误码、可复制的请求示例 |
 | 试跑 | 在界面里直接传图验证（识别 / 找图 / 语义找图 / 提示找图 / 扫码），带耗时与框坐标 |
 | 日志 | 后端 tracing 实时日志，按级别过滤、搜索、暂停、复制 |
-| 设置 | 模型档位、推理设备、端口、检测模型管理、开机自启、CORS |
+| 设置 | 模型档位、推理设备、端口、检测模型管理、中文参考库、AI 控制、开机自启、CORS |
 
 侧边栏可收起成图标栏（按钮在标题栏左上角，状态会记住）。
 **关窗口 = 收进托盘**（服务继续跑），真正退出要点托盘菜单的「退出 OCR Studio」。
 
 ## HTTP 接口
 
-服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。**共 18 个端点**
-（认字 5 / 找图 8 / 看图 3 / 状态 2）。完整清单与参数以 `src/lib/endpoints.ts` 为
+服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。**共 19 个端点**
+（认字 5 / 找图 9 / 看图 3 / 状态 2）。完整清单与参数以 `src/lib/endpoints.ts` 为
 **唯一事实源**（首页概览与「接口」页同源），与 `src-tauri/src/api/routes.rs` 的 `PATHS` 一一对应。
 
 | 端点 | 说明 |
@@ -93,6 +93,7 @@ models/                  模型（缺了会提示「引擎未加载」）
 | `POST /ocr/pingmuzhaotu1\|2` | 截**整个屏幕**找图（返回屏幕绝对坐标） |
 | `POST /ocr/yuyizhaotu` | **语义找图**：不用模板图，让检测模型直接找目标（`source` 选 image/screen/window） |
 | `POST /vision/prompt` | **提示找图**：当场给参考图+框（`mode=visual`）或提示词（`mode=text`），换目标不用重导模型 |
+| `GET/POST/DELETE /vision/promptref` | **中文参考库**：教一次（框+中文名）→ 按中文名找，走图找图通道，不依赖文本塔 |
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
 | `POST /vision/qrcode` | **扫码**：读出二维码 / 条形码内容（纯 CPU，与引擎无关） |
@@ -185,16 +186,72 @@ python scripts\fetch_yoloe.py --image assets\bus.png --box 30,230,800,776 --name
 
 两者出参都与模板找图同构。模型由 `scripts/export_yoloe_prompt.py` 导出到 `models/yoloe/`：
 检测器（`*_prompt.onnx`，双输入 `images` + `pe`）、视觉提示编码器（`*_vpe.onnx`）、
-文本提示头（`*_texthead.onnx`）。文本塔走纯 Rust 的 `mobileclip2-b-rs`（直接读 ultralytics 的 `.ts`）。
-**提示词请用英文** —— 文本塔是 CLIP 的英文词表，中文会被拆成字节 token，基本匹配不上。
+文本提示头（`*_texthead.onnx`）。文本塔走纯 Rust的 `mobileclip2-b-rs`（直接读 ultralytics 的 `.ts`）。
+
+**中文可以直接用**（见下节）：内置中英词表先映射，词表覆盖不到的用「中文参考库」教一次。
 
 > 本机导出只走**视觉提示**：文本提示要 ultralytics 的 CLIP fork，而那要拉 git 子模块、
 > 本机 MSYS 的 `sh` fork 是坏的（`0xC0000142`）。详见 docs/PROGRESS.md §7.8。
 
+### 中文目标：词表 + 参考库
+
+语言找图的文本塔（MobileCLIP2-B）是**英文语义空间**，中文原样喂进去会被 BPE 拆成
+UTF-8 字节片，那些 token 在英文语料里几乎没被训练过 —— 实测 19 个常见中文词只有
+「人」偶然撞中（分数还只有英文的 62%），「公交车」「手机」全是 0。
+换中文文本塔（CN-CLIP 等）原理上不可行：特征空间和 YOLOE 的 `texthead` 不对齐，
+喂进去只会输出垃圾。所以走两条工程路子：
+
+| 路子 | 怎么用 | 覆盖 |
+|---|---|---|
+| **内置中英词表** | `mode=text` 直接写中文，如 `"人,公交车"` | COCO 80 类 + 常用 UI/物体词（几百条），零准备 |
+| **中文参考库** | 从截图里框一次目标、起个中文名（如「提交按钮」），之后按名字找 | **任意中文名**，对自家软件里的特定元素比文本提示更准 |
+
+两条路返回的 `class_name` 都是你输入的中文。词表没盖住的词会**明确报错并给建议**
+（相近中文词 / 建议英文词），不会静默返回空。参考库存在本机配置目录
+（`%APPDATA%` 下的 `prompt_refs/`），只存裁剪小图，不上传、不联网：
+
+```bash
+# 教一次：整张参考图 + 图上的一个框 + 中文名
+curl -X POST http://127.0.0.1:8848/vision/promptref \
+  -H "Content-Type: application/json" \
+  -d '{"name":"提交按钮","image":"<base64>","box":[100,200,180,230]}'
+
+# 之后按中文名找（走图找图通道，不需要 242MB 文本塔）
+curl -X POST http://127.0.0.1:8848/vision/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"text","image":"<base64>","words":"提交按钮"}'
+```
+
+`GET /vision/promptref` 看教过哪些，`DELETE /vision/promptref` 按名字忘掉。
+同名重复教会覆盖；名字不存在删也返回成功（`removed=false`），重复删不报错。
+
+## AI 操控接口（给本机 AI 助手用）
+
+设置页 → **AI 控制**：打开开关、复制连接码、一键复制提示词。把提示词粘给任何
+跑在**这台电脑上**的 AI（编程助手、本地脚本、本地模型），它就能直接操控服务：
+
+```
+GET  /ai/v1/tools   工具清单（name / summary / risk 档位 / 参数说明）
+POST /ai/v1/tool    调一个工具：{"tool":"ocr_image","args":{...},"request_id":"..."}
+```
+
+- **不是 MCP**：AI 会发 HTTP 就够了，不用装任何东西。网页版 AI 在云端，
+  访问不到 `127.0.0.1`，只有本机 AI 能用。
+- **鉴权**：每次请求带 `Authorization: Bearer <连接码>`（常数时间比较）；
+  开关关着时直接 403 并提示去哪开。
+- **给 AI 看的返回**：`{ok, summary, data, error}` —— `summary` 是给用户转述的人话，
+  `error` 会告诉 AI 下一步怎么做（缺哪个参数、去看清单、还是让用户去开开关）。
+- **风险档位**：`readonly`（只看）/ `write`（会改状态或读屏幕）/ `dangerous`
+  （启停服务、改端口阈值，会影响正在调接口的其他脚本）。写操作记审计日志
+  （运行日志里能看到 AI 干了什么）。
+- **幂等**：写操作带 `request_id`，同一次意图重试带同一个值，原样回放不执行第二遍。
+- **限流** 120 次/分钟（AI 写错提示词容易进死循环）。
+- **刻意不提供**：退出程序、改开机自启、改 AI 开关与连接码 —— 这些让用户在界面上自己来。
+
 ## 验证
 
 ```powershell
-cargo test                    # 113 个单元测试 + 16 个 API 冒烟
+cargo test                    # 133 个单元测试 + 16 个 API 冒烟 + 7 个 AI 接口端到端
 cargo test -- --ignored       # 29 个重量级：精度基线、真实截图、逐字对齐、跨语言对齐、提示找图
 python scripts/verify_http_contract.py --exe "<OCR Studio.exe>"   # 404/405 与 CORS 信封
 python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"  # 分发包端到端

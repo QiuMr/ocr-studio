@@ -3600,6 +3600,7 @@ dependencies = [
  "rxing",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",

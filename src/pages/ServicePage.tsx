@@ -17,7 +17,7 @@ import { CodeBlock } from "../components/ui/code-block";
 import { getConfig, getHealth, serverStart, serverStatus, serverStop } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
-import { ENDPOINTS, GROUP_DESC, GROUP_LABEL, groupOf, type EndpointGroup } from "../lib/endpoints";
+import { ENDPOINTS, ENDPOINT_PATH_COUNT, GROUP_DESC, GROUP_LABEL, groupOf, type EndpointGroup } from "../lib/endpoints";
 import type { OcrTab } from "../App";
 import type { AppConfig, Health } from "../types";
 
@@ -315,7 +315,7 @@ print(r["data"]["text"])`,
             能调的接口
           </h2>
           <p className="mt-1.5 text-[12px] font-medium text-neutral-500">
-            共 {ENDPOINTS.length} 个。点任意一类看完整参数和示例。
+            共 {ENDPOINT_PATH_COUNT} 个。点任意一类看完整参数和示例。
           </p>
         </div>
         <button

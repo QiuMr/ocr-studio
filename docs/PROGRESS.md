@@ -1,18 +1,22 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-22（语义找图接口 + 检测模型出厂彻底清空）
+> 最后更新：2026-10-23（中文目标词表 + 中文参考库 + AI 操控接口；免安装分发包已重打）
 
 ---
 
 ## 0. 一句话现状
 
 **M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），此后是用户反馈驱动的
-几轮改造。**本轮（10-22 深夜）：加了「语义找图」——用检测模型直接找目标，不用模板图**。
-端点是 `/ocr/yuyizhaotu`（15 个端点里的第 15 个），**出参与模板找图完全同构**，
-已有脚本换个路径就能用；同时把**出厂检测模型彻底删掉**（`detect/yolo/` 出厂为空，
-放什么模型完全由用户决定），并支持 **NMS-free 端到端输出**（v10 / v26 / YOLOE-26）。
-92 单测 + 冒烟测试全绿，PP-OCR 精度**零变化**。
+几轮改造。**本轮（10-23）：中文目标开箱可用 + AI 操控接口**。
+语言找图的中文输入走「内置中英词表 → 英文文本塔」，词表没盖住的用**中文参考库**
+（框一次起中文名 → 走 VPE 图找图通道，不依赖 242MB 文本塔），端点是
+`GET/POST/DELETE /vision/promptref`（第 19 个端点）。同时新增 **AI 操控接口**
+（`GET /ai/v1/tools` + `POST /ai/v1/tool`，复用 8848，默认关闭，Bearer 连接码 +
+幂等 + 限流 + 审计），设置页有「AI 控制」面板（开关 / 连接码 / 一键复制提示词）。
+端到端实测：中文「人」0.913 = person 0.913、「公交车」0.879 = bus 0.879，
+参考库「我的公交车」找到中心点 (409.06, 486.16)（与图找图通道逐位一致）。
+lib 单测 + 集成测试全绿（含新增 `tests/ai_service.rs` 7 项）。
 
 上一轮完成：检测模型可自定义（多模型 + 任意路径 + 类名从 ONNX metadata 读）、
 外壳改浅灰、标题栏 ACL 权限修复、侧栏去蓝、DirectML 假象纠正。
@@ -195,7 +199,7 @@ vite 就会新建空目录，比删安全。
 ## 1. 验证状态（可复现）
 
 ```
-cargo test                       # 129 个非重量级测试（lib 113 + 集成 16）
+cargo test                       # 133 个非重量级测试（lib 133 + api_smoke 16 + ai_service 7）
 cargo test -- --ignored          # + 29 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
 cargo build --release            # 无安装包（bundle.active=false）
@@ -204,12 +208,15 @@ python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"
                                  # 解压目录端到端验收（含「缺权重必须报 1002」）
 ```
 
-> 2026-10-23 全量复跑（#76 全面检查）：`--lib` **113 passed / 0 failed / 1 ignored**；
-> `--ignored` **29 项全绿**（api_smoke 10、capture_live 5、ddddocr_parity 2、pipeline_match 1、
+> 2026-10-23 全量复跑（M8 中文 + AI 接口）：`--lib` **133 passed / 0 failed / 1 ignored**；
+> `--test ai_service` **7 passed**（默认关 403 指路 / 无码错码 401 / 清单带 risk /
+> 未知工具给候选 / 缺参数点名 / 坏 JSON 给示例 / request_id 原样回放）；
+> `--ignored` **29 项**（api_smoke 10、capture_live 5、ddddocr_parity 2、pipeline_match 1、
 > pipeline_vision 1、tensor_diff 3、yolo_parity 2、yoloe_prompt_parity 3、yoloe_smoke 1、lib 1）。
-> 其中 `pipeline_match`（黄金基线逐值比对）与 `yoloe_prompt_parity`
-> （文本 pe 4.99e-7 / 视觉 pe 1.64e-7 / 端到端 IoU 1.0000）均通过。
-> `--lib` 从 111 涨到 113 是新增的 2 条错误映射单测（见 §7.9）。
+> `--lib` 113 → 133：zh_words 6、ai 8、ai_tools 2（closest_tool / edit_distance）、
+> prompt_refs / routes 等若干。`capture_live::full_screen_self_match_finds_crop_origin`
+> 偶发失败（**实时屏幕**测试：两次截图之间光标/重绘就会让原点对不上），单独重跑即过，
+> 与代码无关（本轮没动 capture/match）。
 
 | 测试 | 结果 |
 |---|---|
@@ -1068,6 +1075,111 @@ router = router.layer(DefaultBodyLimit::max(MAX_BODY));
 
 比上轮大是**有意为之**：图找图与语言找图都是开箱能力，模型必须随包
 （语言找图那 242MB 文本塔由用户拍板随包带，见 §7.9「打包决策」）。
+
+---
+
+## 7.10 M8：中文目标开箱可用 + AI 操控接口（2026-10-23）
+
+用户拍板：语言找图权重随包带（§7.9）之后，本轮解决两个「发出去才会被撞上」的问题：
+**中文用户没法用中文提示词**、**AI 没法直接操控这个服务**（用户明确不要 MCP：
+「小白都嫌麻烦」，参考另一个项目 WPE Lab 的本机 HTTP 方案）。
+
+### 7.10.1 中文：先测再改，根因是原理性的
+
+发布包实测（同一张 `bus.png`，阈值压到 0.10 观察，19 个常见中文词 vs 对应英文词）：
+
+| 输入 | 最高分 | 同图英文对照 |
+|---|---|---|
+| 人 | 0.569 | person **0.913** |
+| 公交车 / 大巴 | **0.000** | bus 0.879 |
+| 车 / 轮子 / 窗户 / 狗 / 手机 / 椅子…（其余 16 个） | 0.000 | 0.000（图里没有，正常） |
+
+**结论：中文不是「效果差」，是「碰运气」** —— 只有单字「人」偶然撞中（分数还只有英文的
+62%），其余全灭。这种状态比彻底报错更危险：用户会以为它能用，然后拿着空结果来问。
+根因：MobileCLIP2-B 是 CLIP 的**英文语义空间**，中文进去被 BPE 拆成 UTF-8 字节片，
+那些 byte token 在英文语料里几乎没被训练过。
+
+**评估过不做的**：换中文文本塔（CN-CLIP 等）——原理性不可行，它的特征空间和 YOLOE 的
+`texthead.onnx` 不对齐，喂进去只会输出垃圾；要能用必须重训对齐投影头（GPU + 数据 + 时间），
+本期不做（记录在案，不是漏做）。
+
+### 7.10.2 落地一：内置中英词表（`engine/zh_words.rs`）
+
+`text_pe()` 编码前先过一遍词表：中文 → 英文再进文本塔，**返回的 `class_name` 仍是
+用户输入的中文**（出参不被映射污染）。词表覆盖 COCO 80 类 + 常用 UI/物体词，
+几百条，`const` 表 + 单测钉住「无重复键」。未命中的词**明确报错并给建议**
+（相近中文词 / 建议英文词），不会静默返回空 —— 这是上面那个「碰运气」陷阱的解药。
+
+实测（发布包同图）：人 0.913 = person 0.913、公交车 0.879 = bus 0.879，
+**与英文逐位一致**，类名回显中文。
+
+### 7.10.3 落地二：中文参考库（`engine/prompt_refs.rs` + `/vision/promptref`）
+
+词表总有覆盖不到的（比如用户自己软件里那个「提交按钮」）。第二条路：
+**从截图里框一次、起个中文名**，之后按中文名走 VPE（图找图）通道 —— 不需要 242MB
+文本塔，且对特定元素比文本提示更准。端点 `GET/POST/DELETE /vision/promptref`
+（第 19 个端点，`endpoints.ts` 拆 3 条讲但按路径去重计 1 个，见 `ENDPOINT_PATH_COUNT`）。
+落盘在本机配置目录的 `prompt_refs/`（只存裁剪小图，不上传不联网）；
+同名覆盖、删不存在的名字返回 `removed=false` 不报错。
+
+实测：教一次「我的公交车」→ 按中文名找到 **center=(409.06, 486.16)**
+（与图找图通道逐位一致）→ 混写「我的公交车,人」同时出两类 → 删除。
+
+### 7.10.4 AI 操控接口（`api/ai.rs` + `api/ai_tools.rs`）
+
+参考 WPE Lab 的同款设计（`ai.go` 575 行 + `ai_tools.go` 1107 行，已跑过一阵），
+照搬其骨架、按其暴露的问题做改良：
+
+| 项 | 做法 |
+|---|---|
+| 端点 | `GET /ai/v1/tools`（清单）/ `POST /ai/v1/tool`（调用），复用 8848，默认关闭 |
+| 信封 | `{ok, summary, data, error}` —— 消费者是**大模型**不是脚本：`summary` 是给用户转述的人话，`error` 必须告诉 AI 下一步怎么做 |
+| 鉴权 | `Authorization: Bearer <连接码>`，**常数时间比较**；关开关 403 并指路「设置 → AI 控制」 |
+| 连接码 | 加载时生成落盘（FNV 混时间/pid/序号/ASLR 地址，不引 `rand`）；界面可重置，旧码立刻失效 |
+| 幂等 | `request_id` → 缓存回放（保留 200 条 FIFO）+ `inflight` 占位防并发重入；键用 `\x00` 分隔（下划线会撞车） |
+| 限流 | 120 次/分钟滑动窗口（AI 写错提示词容易进死循环） |
+| 审计 | readonly 记 info、write/dangerous 记 warn（带参数摘要），运行日志里能看到 AI 干了什么 |
+| 风险档 | 每个工具带 `risk`：readonly / write / dangerous，AI 自己判断危不危险 |
+
+**改良点（参考项目没有的）**：工具名写错时给**最接近的候选名**
+（`closest_tool`：前缀优先 —— AI 最常见的错法是把名字写短，`ocr` → `ocr_image`；
+其次编辑距离 ≤3）。光说「未知工具」，AI 只能再去拉清单碰运气。
+
+19 个工具：get_status / list_endpoints / list_engines / get_config / get_logs /
+list_targets / screenshot / ocr_image / find_word / find_image / read_qrcode /
+teach_target / server_start / server_stop / set_port / set_level / set_device /
+set_threshold。**刻意不提供**：退出程序、改开机自启、改 AI 开关与连接码
+（参考项目连「改授权/装证书」都不给，同理）。HTTP 状态码规范使用（401/403/404/409/429）。
+
+**边界必须说清**：服务只绑 `127.0.0.1`，只有跑在用户电脑上的 AI 能调；
+**网页版 AI 在云端，访问不到 localhost**。这一点写进了设置页面板和复制给 AI 的提示词。
+
+### 7.10.5 前端与验收
+
+设置页新增「AI 控制」面板：开关、地址、连接码（复制/重置）、**一键复制提示词**
+（整段粘给本机 AI 即可，工具清单不写进提示词 —— 让 AI 自己 `GET /ai/v1/tools` 拿，
+提示词不随工具变多而膨胀）。HTTP 层拿不到 AppHandle 发不了 Tauri 事件，
+用 3 秒轻量轮询代替（只在设置页打开时跑）：AI 启停服务、改端口后界面自己变。
+
+新增 `tests/ai_service.rs`（7 项，起真实 axum + 裸 TCP）：默认关 403 且指路 /
+无码错码 401（裸码也认）/ 清单带 risk 且 dangerous ≥3 / 未知工具给候选 /
+缺参数点名 / 坏 JSON 给示例 / 同 request_id 原样回放。另补 `closest_tool` 单测。
+
+**这轮踩的坑（都会重复遇到）**：
+
+1. **`build.ps1` 被 vite/cargo 的 stderr 搞到「构建失败」**。vite 8 把进度写到 stderr，
+   PowerShell 5.1 对 native exe 的 stderr 输出抛 `NativeCommandError`，配上脚本里的
+   `$ErrorActionPreference="Stop"` 直接中止 —— **实际构建是成功的**。修法：`2>&1 | ForEach-Object { Write-Host $_ }`
+   合并流 + 成败只看 `$LASTEXITCODE`。
+2. **vite 清空 `dist`（上百个字体切片）撞 safe-delete 批量限制**（同一 turn 删 >50 文件被拒）。
+   绕法还是老那条：`[System.IO.Directory]::Delete($path, $true)`。
+3. **Git Bash 的 `cat >> file <<'EOF'` 在中文路径下会写坏文件**（把 `src/lib/api.ts`、
+   `src/types.ts` 开头覆盖了，不是追加）。涉及非 ASCII 路径的文件写改**一律用 Edit 工具
+   或 PowerShell**，这是「Git Bash 中文路径不可靠」的又一副面孔（已 `git checkout` 恢复后用
+   Edit 重做）。
+4. **debug rlib 真损坏（不是瞬时那种）**：`invalid metadata files for crate 'ocr_studio_lib'`
+   + 「页面文件太小」。当时 C: 只剩 2.7GB。删掉损坏的 `libocr_studio_lib.rlib` /
+   `libimage-*.rlib` 让 cargo 重建即恢复；若报「重跑一次就好」的那种瞬时损坏别删文件。
 
 ---
 

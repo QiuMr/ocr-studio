@@ -65,3 +65,8 @@ scripts/_edgeprofile/
 
 # 重新构建前端时把旧 dist 改名留档用的临时目录
 dist_old_*/
+
+# 运行期配置（AppState 默认 data_dir 为 exe 所在目录，测试跑起来也会生成一份）。
+# 里面有 AI 连接码等机器相关数据，不进仓库。
+src-tauri/config.json
+prompt_refs/

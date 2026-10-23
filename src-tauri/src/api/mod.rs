@@ -3,6 +3,8 @@
 //! 拆分：`dto`（入参出参与错误）、`state`（引擎生命周期）、`routes`（路由与处理器）。
 //! 路由表 1:1 复刻 `docs/PLAN.md` 第 6 节的 `/ocr/*` 接口。
 
+pub mod ai;
+pub mod ai_tools;
 pub mod dto;
 pub mod routes;
 pub mod state;
