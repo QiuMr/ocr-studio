@@ -6,6 +6,18 @@
 - 导航固定 5 项：服务 / 接口 / 试跑 / 日志 / 设置。
 - 端点事实源 `src/lib/endpoints.ts`（首页概览与接口页同源），改后端路由必须同步。目前 **19 个端点**（认字 5 / 找图 9 / 看图 3 / 状态 2）；`/vision/promptref` 一个路径三种方法，前端计数用 `ENDPOINT_PATH_COUNT`（按路径去重）对齐后端 `PATHS`。
 
+## 版本控制与发版（2026-10-23，**改版本号前必读**）
+- 仓库 `github.com/QiuMr/ocr-studio`（**public**，因为 Release 资产要匿名可下载，程序才能自己升级；私有仓库拉资产要 token）。
+- **版本号唯一来源 = `src-tauri/tauri.conf.json` 的 `version`。** 三处引用：`build.rs` 注入 `OCR_STUDIO_VERSION`（→ `version.rs::VERSION`、`/ocr/health.version`）、`pack_exe.ps1` 拼 zip 名、`release.ps1` 拼 tag。**别再往脚本里写 `$version = "x.y.z"`**（曾经有，漏改就导致 zip 名和程序内版本对不上）。`tauri.conf.json` 里没有的 `package.json` 版本没人读，不用管。
+- 发版：改 tauri.conf.json → 提交 → `powershell -File scripts/release.ps1 -Notes "..."`。脚本会拦「工作区未提交 / tag 已存在 / 产物缺失」。
+- **自动更新不用 `tauri-plugin-updater`**：它只认安装器（NSIS/MSI）的签名包，本项目 `bundle.active=false` 发免安装 zip。结论已钉死，别再试。
+- 自研更新 `src/updater.rs`：`releases/latest/download/latest.json`（固定资产路径）→ 比对版本 → 下载校验 size+sha256 → `tar.exe` 解压 → 复制当前 exe 到 `%TEMP%` 当助手 → 主进程退出 → 助手轮询 PID 确认退出后覆盖。
+  - **必须等进程真退出，不能 sleep**：`onnxruntime.dll` 被加载着，覆盖会 `ERROR_SHARING_VIOLATION`，目录半新半旧最难救。
+  - **助手必须在 `tauri::Builder` 之前分流**，否则单实例插件把它当第二个实例踢掉（「点了更新，程序关掉再也没起来」）。
+  - **latest.json 必须无 BOM**：serde_json 遇 BOM 直接解析失败，等于所有人更新检查永久报错。
+  - 版本比较用 `version.rs::cmp_version`（**数值比**，字符串比会让 0.10.0 判成比 0.9.0 旧）。
+- `.gitattributes` 里 `*.ps1 -text`：本机 `core.autocrlf=true`，而 `.ps1` 必须 BOM+CRLF，让 git 一字节都别碰。
+
 ## 前端技术规范（2026-10-21 用户确定）
 - 栈：React + TS + Tailwind + shadcn/ui（Vite，Tauri 2 壳）。Vue 方案已废弃。
 - 字体 MiSans（本地 @font-face）；配色纯白为主、黑为辅、蓝点缀。

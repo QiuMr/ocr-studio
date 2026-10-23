@@ -33,6 +33,24 @@ function Fail([string]$msg) {
 function Info([string]$msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Ok([string]$msg) { Write-Host "[OK]   $msg" -ForegroundColor Green }
 
+# 调 git 并返回 @{ Code; Out }。
+#
+# **必须包这一层**：git 把进度和提示都写到 **stderr**（"Everything up-to-date"、
+# "To https://..."、"branch 'master' set up to track ..." 全是 stderr），
+# 而 `$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误。
+# 结果是「推送其实成功了，脚本却报错退出」——这类假失败最费时间：
+# 输出看着像出错，实际一步都没做错。
+function Invoke-Git([string[]]$gitArgs) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $out = & git -C $root @gitArgs 2>&1
+    return @{ Code = $LASTEXITCODE; Out = (($out | Out-String).Trim()) }
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 # ── 1. 版本号：唯一来源 tauri.conf.json ────────────────────────────────
 # 必须与 Rust 侧 build.rs 注入的 OCR_STUDIO_VERSION 同源，否则会出现
 # 「程序里显示 0.1.0，Release 却叫 v0.2.0」——用户报版本号时两边对不上。
@@ -48,8 +66,9 @@ $gh = (Get-Command gh -ErrorAction SilentlyContinue).Source
 if (-not $gh -and $env:OCR_GH) { $gh = $env:OCR_GH }
 if (-not $gh) { Fail "找不到 gh 命令。装一个，或设环境变量 OCR_GH 指向 gh.exe" }
 
-$remote = (git -C $root remote get-url origin 2>$null)
-if (-not $remote) { Fail "没有 origin 远程，先 git remote add origin <url>" }
+$remoteRes = Invoke-Git @("remote", "get-url", "origin")
+if ($remoteRes.Code -ne 0 -or -not $remoteRes.Out) { Fail "没有 origin 远程，先 git remote add origin <url>" }
+$remote = $remoteRes.Out
 # https://github.com/OWNER/REPO.git 或 git@github.com:OWNER/REPO.git
 if ($remote -match 'github\.com[:/]+([^/]+)/(.+?)(?:\.git)?$') {
   $owner = $Matches[1]
@@ -63,14 +82,14 @@ Info "仓库 $slug"
 # ── 3. 工作区必须干净 ────────────────────────────────────────────────
 # 带着未提交改动发版，等于发布一个「源码里查不到对应版本」的二进制。
 # 这是发版事故里最常见、也最难解释的一类。
-$dirty = git -C $root status --porcelain
+$dirty = (Invoke-Git @("status", "--porcelain")).Out
 if ($dirty) {
   Write-Host $dirty
   Fail "工作区有未提交改动。先提交（或 stash）再发版"
 }
 
 # ── 4. tag 不能已经存在 ──────────────────────────────────────────────
-$exists = git -C $root tag --list $tag
+$exists = (Invoke-Git @("tag", "--list", $tag)).Out
 if ($exists) { Fail "$tag 已存在。发新版请先改 tauri.conf.json 的 version" }
 
 # ── 5. 编译 + 打包 ──────────────────────────────────────────────────
@@ -102,7 +121,7 @@ if ($NotesFile) {
 }
 if (-not $Notes) {
   # 没有手写说明时退化成「看提交记录」，总比空白强
-  $Notes = (git -C $root log -1 --pretty=format:"%s")
+  $Notes = (Invoke-Git @("log", "-1", "--pretty=format:%s")).Out
 }
 
 $latest = [ordered]@{
@@ -122,8 +141,9 @@ Ok "已生成 release/latest.json"
 
 # ── 7. 推送代码 + 建 Release ─────────────────────────────────────────
 Info "推送 master..."
-git -C $root push origin HEAD
-if ($LASTEXITCODE -ne 0) { Fail "推送失败" }
+$pushRes = Invoke-Git @("push", "origin", "HEAD")
+if ($pushRes.Code -ne 0) { Fail "推送失败：$($pushRes.Out)" }
+if ($pushRes.Out -notmatch "Everything up-to-date") { Write-Host $pushRes.Out }
 
 $ghArgs = @(
   "release", "create", $tag,
@@ -135,8 +155,14 @@ $ghArgs = @(
 if ($Draft) { $ghArgs += "--draft" }
 
 Info "创建 Release..."
+# gh 也是把进度写到 stderr 的（上传 225MB 时会刷百分比），
+# 同样不能让它触发 Stop。
+$prevEA = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $gh @ghArgs
-if ($LASTEXITCODE -ne 0) { Fail "创建 Release 失败" }
+$ghCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEA
+if ($ghCode -ne 0) { Fail "创建 Release 失败（gh 退出码 $ghCode）" }
 
 Write-Host ""
 Ok "发布完成：https://github.com/$slug/releases/tag/$tag"
