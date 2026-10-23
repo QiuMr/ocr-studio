@@ -642,6 +642,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         .clone();
     match state.health() {
         Some(info) => Json(ApiResp::ok(HealthDto {
+            version: crate::version::VERSION.to_string(),
             status: "ok".to_string(),
             engine: crate::engine::EngineSpec::ppocr(info.level).key(),
             model: format!("{:?}", info.level).to_lowercase(),
@@ -659,6 +660,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
             if let Some((spec, dev, _caps)) = state.alt_loaded() {
                 let dev = dev.unwrap_or(Device::Cpu);
                 return Json(ApiResp::ok(HealthDto {
+                    version: crate::version::VERSION.to_string(),
                     status: "ok".to_string(),
                     engine: spec.key(),
                     model: spec.variant.clone().unwrap_or_default(),

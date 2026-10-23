@@ -1,25 +1,34 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-23 晚（移除语言提示找图；提示找图只留视觉通道 + 中文参考库）
+> 最后更新：2026-10-23 深夜（上线版本控制：GitHub 仓库 + 版本号收敛 + 自动更新）
 
 ---
 
 ## 0. 一句话现状
 
-**M3 全部完成**（抽象层 / DDDDOCR / 目标检测 / pipeline 串联），此后是用户反馈驱动的
-几轮改造。**本轮（10-23 深夜）：移除语言提示找图**——用户实测后判断「太特定了，没用，
-还占位置」。实测数据支持这个判断：真实界面截图上 12 个中文词最高只有 0.207，
-YOLOE 的文本提示对 UI 细粒度概念本就不可用。
+**本轮（10-23 深夜）：版本控制与自动更新。** 用户的原话是「有没有什么能做版本控制
+的东西……升级了用户能自动升级版本？」——本质是两个问题：代码别丢、用户能升级。
 
-删掉的东西：`mode=text`、MobileCLIP2-B 文本塔（242MB）、CLIP 词表、`*_texthead.onnx`、
-`engine/zh_words.rs`（中英词典）、`engine/text_pe_cache.rs` + `bin/bake_text_pe.rs`
-（PE 预烘焙）、`mobileclip2-b-rs` 依赖、2 项 parity 用例。
+**代码**：仓库推到 <https://github.com/QiuMr/ocr-studio>（public）。34 个提交、`.git` 15MB、
+最大文件 1.67MB，**不需要 Git LFS**。公开而非私有是刻意的：Release 资产匿名可下载，
+自动更新才能做成「零操作」；私有仓库拉资产要 token，程序自己拿不到。
 
-留下的核心：**图找图（VPE）+ 中文参考库**（`/vision/promptref`，框一次起中文名 →
-`mode=ref` 按名字找，走的就是视觉通道）。AI 工具 `find_word` 相应改为 `find_target`
-（只认教过的名字，未命中给「先 teach_target」+ 现有名字列表）。
-`/vision/prompt` 传 `mode=text` 会得到**明确指路**的 400，不是静默失效。
+**版本号三处硬编码收敛为一处**（`tauri.conf.json` 的 `version`）：`build.rs` 注入
+`OCR_STUDIO_VERSION` 给 Rust 侧与 `/ocr/health`；`pack_exe.ps1` 与 `release.ps1` 读同一文件。
+曾经 `pack_exe.ps1` 里有一份独立的 `$version = "0.1.0"`，改版本时漏改就会让 zip 名和
+程序内版本对不上——用户报版本号时两边说的不是一回事。
+
+**自动更新不走 `tauri-plugin-updater`**：那个只认安装器（NSIS/MSI）产出的签名包，
+本项目 `bundle.active = false` 发的是免安装 zip，硬套它会在「找不到安装器」和
+「已是最新」之间反复。改走自研的「下载 → 退出 → 助手替换 → 重启」：
+`updater.rs` 把当前 exe 复制到 `%TEMP%` 当助手，用 `OpenProcess` 轮询 PID 确认旧进程
+真的退出后再覆盖（`onnxruntime.dll` 被占用时覆盖会半途而废，目录停在半新半旧）。
+助手在 `tauri::Builder` **之前**分流，否则单实例插件会把它踢掉。
+
+上一轮：移除语言提示找图（`mode=text` + 242MB 文本塔 + 词表整条链）。
+实测真实界面截图上 12 个中文词最高只有 0.207，YOLOE 的文本提示对 UI 细粒度概念
+本就不可用。留下图找图（VPE）+ 中文参考库（`/vision/promptref` → `mode=ref`）。
 
 上一轮：中文目标开箱（词表 + 参考库）+ **AI 操控接口**
 （`GET /ai/v1/tools` + `POST /ai/v1/tool`，复用 8848，默认关闭，Bearer 连接码 +
@@ -206,13 +215,14 @@ vite 就会新建空目录，比删安全。
 ## 1. 验证状态（可复现）
 
 ```
-cargo test                       # 127 个非重量级测试（lib 127 + api_smoke 17 + ai_service 7）
+cargo test                       # 135 个非重量级测试（lib 135 + api_smoke 17 + ai_service 7）
 cargo test -- --ignored          # + 27 个重量级集成测试（需模型/DLL/真实桌面）
 pnpm build                       # 前端 tsc --noEmit + vite build
 cargo build --release            # 无安装包（bundle.active=false）
 powershell -File scripts/pack_exe.ps1    # 打免安装 zip
 python scripts/verify_packaged.py --exe "release/OCR-Studio/OCR Studio.exe"
                                  # 解压目录端到端验收（含「缺权重必须报 1002」）
+powershell -File scripts/release.ps1 -Notes "..."   # 发版：编译+打包+tag+上传+latest.json
 ```
 
 > 2026-10-23 全量复跑（M8 中文 + AI 接口）：`--lib` **133 passed / 0 failed / 1 ignored**；

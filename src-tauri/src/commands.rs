@@ -620,6 +620,7 @@ fn health_dto(state: &AppState) -> HealthDto {
         .clone();
     match state.health() {
         Some(info) => HealthDto {
+            version: crate::version::VERSION.to_string(),
             status: "ok".to_string(),
             engine: crate::engine::EngineSpec::ppocr(info.level).key(),
             model: format!("{:?}", info.level).to_lowercase(),
@@ -633,6 +634,7 @@ fn health_dto(state: &AppState) -> HealthDto {
             uptime_sec: state.started_at.elapsed().as_secs(),
         },
         None => HealthDto {
+            version: crate::version::VERSION.to_string(),
             status: "no_model".to_string(),
             engine: crate::engine::EngineSpec::ppocr(cfg.level).key(),
             model: format!("{:?}", cfg.level).to_lowercase(),
@@ -1696,4 +1698,72 @@ pub async fn read_image_file(path: String) -> Result<String, String> {
 
     use base64::Engine as _;
     Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
+// ─────────────────────────── 版本与更新 ───────────────────────────
+
+/// 检查是否有新版本。
+///
+/// 网络不通 / 更新源还没发版都**不算错误**：原因放在返回值的 `error` 字段，
+/// `has_update` 为 false。启动时自动检查要**静默**（没网不该弹红字），
+/// 只有用户主动点「检查更新」时才把 `error` 显示出来。
+#[tauri::command]
+pub async fn update_check() -> crate::updater::UpdateCheck {
+    match tauri::async_runtime::spawn_blocking(crate::updater::check).await {
+        Ok(v) => v,
+        Err(e) => crate::updater::UpdateCheck {
+            current: crate::version::VERSION.to_string(),
+            latest: crate::version::VERSION.to_string(),
+            has_update: false,
+            notes: String::new(),
+            url: String::new(),
+            size: 0,
+            sha256: None,
+            error: Some(format!("检查更新任务异常：{e}")),
+        },
+    }
+}
+
+/// 下载并安装更新。成功后**本进程退出**，由临时目录里的助手替换文件并拉起新版。
+///
+/// 为什么这里再查一次、而不是信前端传来的 url：前端那份可能是几小时前查的，
+/// 期间可能已经发了更新的版本；「下载哪个包」必须与服务端当前指针一致，
+/// 否则会装出一个夹在中间的版本。
+#[tauri::command]
+pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter as _;
+
+    let info = tauri::async_runtime::spawn_blocking(crate::updater::check)
+        .await
+        .map_err(|e| format!("检查更新任务异常：{e}"))?;
+    if let Some(e) = info.error.clone() {
+        return Err(e);
+    }
+    if !info.has_update {
+        return Err(format!("已经是最新版本 v{}", info.current));
+    }
+
+    let app2 = app.clone();
+    let mut last_sent: u64 = 0;
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        crate::updater::download_and_prepare(&info, move |done, total| {
+            // 256KB 一个 chunk，224MB 会回调近千次。按 1.5MB 节流，
+            // 否则事件队列本身会拖慢下载（界面还会跟着卡）。
+            if done - last_sent >= 1_500_000 || (total > 0 && done == total) {
+                last_sent = done;
+                let _ = app2.emit(
+                    "update-progress",
+                    serde_json::json!({ "done": done, "total": total }),
+                );
+            }
+        })
+    })
+    .await
+    .map_err(|e| format!("更新任务异常：{e}"))?;
+
+    res?;
+    // 助手已就位。给前端一点时间把「正在重启」画出来，然后让位。
+    std::thread::sleep(Duration::from_millis(600));
+    app.exit(0);
+    Ok(())
 }

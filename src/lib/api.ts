@@ -29,6 +29,8 @@ import type {
   SemanticFindArgs,
   WindowInfo,
   AiStatus,
+  UpdateCheck,
+  UpdateProgress,
 } from "../types";
 
 /** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
@@ -509,5 +511,36 @@ export async function aiResetToken(): Promise<AiStatus> {
 /** 中文参考库里已经教过的目标名。 */
 export async function aiTargets(): Promise<string[]> {
   return invoke<string[]>("ai_targets");
+}
+
+// ---------------------------------------------------------------- 版本与更新
+
+/**
+ * 检查是否有新版本。
+ *
+ * 网络不通不会抛错，原因放在 `error` 里 —— 更新检查是旁路动作，
+ * 没网不该让界面报错。
+ */
+export async function updateCheck(): Promise<UpdateCheck> {
+  return invoke<UpdateCheck>("update_check");
+}
+
+/**
+ * 下载并安装更新。
+ *
+ * **成功后本进程会退出**（由临时目录里的助手替换文件并拉起新版），
+ * 所以调用后不要期待 Promise 正常 resolve 之外还有后续逻辑。
+ */
+export async function updateInstall(): Promise<void> {
+  return invoke<void>("update_install");
+}
+
+/** 订阅下载进度。返回取消订阅函数；浏览器模式给空函数。 */
+export async function subscribeUpdateProgress(
+  onProgress: (p: UpdateProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<UpdateProgress>("update-progress", (e) => onProgress(e.payload));
 }
 

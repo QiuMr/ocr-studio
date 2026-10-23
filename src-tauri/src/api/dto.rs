@@ -462,6 +462,9 @@ pub struct PipelineData {
 /// `/ocr/health` 出参。
 #[derive(Debug, Serialize)]
 pub struct HealthDto {
+    /// 程序版本，如 `"0.1.0"`。与 GitHub Release 的 tag、更新检查比对的是同一个值
+    /// （唯一来源 `tauri.conf.json`）。调用方脚本可据此判断自己适配的版本。
+    pub version: String,
     pub status: String,
     /// 引擎标识：`ppocr:small` / `ddddocr:common`。前端据此显示「正在用哪个引擎」。
     pub engine: String,

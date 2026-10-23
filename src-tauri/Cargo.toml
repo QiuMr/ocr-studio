@@ -96,6 +96,21 @@ rxing = { version = "0.9", default-features = false, features = [
 
 # Windows 原生 API：截图（GDI BitBlt / PrintWindow）、窗口枚举、DPI 感知、
 # 以及「添加检测模型」用的系统文件选择框（GetOpenFileNameW）
+# 更新检查：只在「检查版本 / 下载更新包」时用，不参与推理路径。
+# blocking 版本就够了 —— 更新是用户点一下才走的低频动作，为它拉一整套
+# async 运行时（程序里已有 tokio，但那是给 axum 用的）没有收益。
+# rustls 而不是 native-tls：不依赖系统 schannel，证书链行为在所有机器上一致。
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+    # 解析 latest.json 用。default-features 关掉后必须显式开
+    "json",
+] }
+# 更新包校验。纯 Rust、无 C 依赖，编译快。
+# 为什么要校验：一键更新会**自动替换程序文件**，下到半截或被人动了手脚就
+# 直接覆盖掉能用的程序，用户自己没法恢复。这块成本极低、收益极大。
+sha2 = "0.10"
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
@@ -104,6 +119,9 @@ features = [
   "Win32_Storage_Xps",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Controls_Dialogs",
+  # 更新助手要 OpenProcess 判断旧进程是否真的退出了
+  # （不能只 sleep 几秒：onnxruntime.dll 被占用时覆盖会半途失败）
+  "Win32_System_Threading",
 ]
 
 # 注：windows 依赖在截图/句柄里程碑（M2）加入并单独验证编译

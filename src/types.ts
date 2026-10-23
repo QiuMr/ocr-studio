@@ -101,6 +101,8 @@ export interface BarcodeResult {
 }
 
 export interface Health {
+  /** 程序版本，如 `0.1.0`。与 GitHub Release 的 tag 同源（`tauri.conf.json`） */
+  version: string;
   status: "ok" | "no_model";
   /** 当前引擎标识，如 `ppocr:small` / `ddddocr:common` */
   engine: string;
@@ -388,7 +390,6 @@ export interface DetectModel {
 // ---------------------------------------------------------------- 日志
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
-
 /** 与 Rust 侧 `logbuf::LogLine` 一一对应 */
 export interface LogLine {
   /** Unix 毫秒时间戳（前端格式化成当地时间） */
@@ -397,4 +398,32 @@ export interface LogLine {
   /** 产生日志的模块路径，如 `ocr_studio::api::routes` */
   target: string;
   message: string;
+}
+
+// ---------------------------------------------------------------- 版本与更新
+
+/** 与 Rust 侧 `updater::UpdateCheck` 一一对应。 */
+export interface UpdateCheck {
+  /** 当前编译进去的版本（唯一来源 `tauri.conf.json`） */
+  current: string;
+  /** 远端最新版本；检查失败时等于 current */
+  latest: string;
+  has_update: boolean;
+  notes: string;
+  /** 更新包 zip 的下载地址 */
+  url: string;
+  /** 包大小（字节），0 = 未知 */
+  size: number;
+  /**
+   * 检查失败的原因（没网 / 源还没发版）。
+   * **这不是「有更新」的反面，只是「没查成」** —— 界面上要区分开：
+   * 没更新是常态，查不到不该报错。
+   */
+  error: string | null;
+}
+
+/** `update-progress` 事件的 payload。 */
+export interface UpdateProgress {
+  done: number;
+  total: number;
 }

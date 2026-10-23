@@ -19,6 +19,10 @@ pub mod logbuf;
 #[path = "match.rs"]
 pub mod matcher;
 pub mod ocr;
+/// 版本号（唯一来源 `tauri.conf.json`，由 `build.rs` 注入）。
+pub mod version;
+/// 版本检查与自更新（免安装绿色版，不走官方 updater 插件）。
+pub mod updater;
 
 /// 前端是否已经跑起来并报到。
 ///
@@ -267,6 +271,15 @@ fn build_main_window(app: &tauri::AppHandle, extra_args: Option<&str>) -> tauri:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 更新助手分流，**必须在 Builder 之前**。
+    //
+    // 助手和主程序是同一个 exe（只是从 TEMP 副本启动、命令行带了参数），
+    // 如果先注册了 single-instance 插件，它会被当成「用户又双击了一次」，
+    // 转交控制权后立刻退出 —— 表现是「点了更新，程序关掉就再也没起来」。
+    if let Some(code) = updater::run_apply_if_requested() {
+        std::process::exit(code);
+    }
+
     tauri::Builder::default()
         // 单实例插件**必须是第一个**注册的插件（官方要求），否则初始化顺序会出错。
         // 场景：用户双击两次图标，或从托盘已隐藏时又点了一次 exe。
@@ -431,6 +444,8 @@ pub fn run() {
             commands::ai_set_enabled,
             commands::ai_reset_token,
             commands::ai_targets,
+            commands::update_check,
+            commands::update_install,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

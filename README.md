@@ -58,6 +58,62 @@ models/                  模型（缺了会提示「引擎未加载」）
 `generate_context!` 在**编译期**把 `dist` 嵌进 exe。改完前端只跑 `pnpm build`
 是不够的，必须重新 `cargo build`，否则 exe 里还是旧界面。
 
+## 版本与自动更新
+
+**版本号只有一个来源：`src-tauri/tauri.conf.json` 的 `version`。**
+
+发版时只改这一处，其余三处会自动跟随：
+
+| 用到版本号的地方 | 怎么拿到 |
+|---|---|
+| 程序里显示 / `/ocr/health` 的 `version` | `build.rs` 读配置注入 `OCR_STUDIO_VERSION`（见 `src-tauri/src/version.rs`） |
+| zip 文件名 `OCR-Studio-<版本>-win64.zip` | `pack_exe.ps1` 读同一个文件 |
+| GitHub Release 的 tag `v<版本>` | `release.ps1` 读同一个文件 |
+
+写死过的代价：曾经 `pack_exe.ps1` 里有一份 `$version = "0.1.0"`，改版本时忘了它，
+结果 zip 名字和程序内版本对不上——用户报版本号时两边说的不是一回事。
+
+### 发一条版本
+
+```powershell
+# 1. 改 src-tauri/tauri.conf.json 的 version（例如 0.2.0）
+# 2. 提交
+git add -A; git commit -m "release: v0.2.0"
+# 3. 一条命令：编译 → 打包 → 打 tag → 上传 → 生成 latest.json
+powershell -File scripts/release.ps1 -Notes "修了找图偏移；新增 xxx"
+```
+
+脚本会先拦下三种发版事故：工作区有未提交改动、tag 已存在、产物缺失。
+
+### 自动更新怎么工作
+
+程序**不走** `tauri-plugin-updater`——那个只认安装器（NSIS/MSI）产出的签名更新包，
+本项目是免安装 zip，硬套会在「找不到安装器」和「已是最新」之间反复。
+
+自己走一条更简单的路：
+
+```
+程序启动 / 点「检查更新」
+        ↓  GET releases/latest/download/latest.json
+   比对 version（**按数值比，不是字符串**，否则 0.10.0 会被判成比 0.9.0 旧）
+        ↓  有新版 → 下载 zip → 校验 size + sha256 → 解压到 %TEMP%
+   把当前 exe 复制一份到 %TEMP% 当「更新助手」，主进程退出
+        ↓
+   助手等旧进程真的消失 → 覆盖安装目录 → 启动新 exe
+```
+
+> **为什么必须「退出后再替换」**：Windows 不允许覆盖正在运行的 exe，
+> 而且 `onnxruntime.dll` 被主进程加载着，进程没退干净就覆盖会
+> `ERROR_SHARING_VIOLATION`，目录停在半新半旧——这是最难救的一种状态。
+> 所以助手用 `OpenProcess` 轮询 PID 而不是 `sleep` 几秒。
+
+> **为什么助手要在 `tauri::Builder` 之前分流**：它和主程序是同一个 exe，
+> `tauri-plugin-single-instance` 会把它当成「用户又双击了一次」踢掉，
+> 表现为「点了更新，程序关掉再也没起来」。
+
+用户数据在 `%APPDATA%\com.ocrstudio.app\`（配置、教过的目标、日志），不在包里，
+覆盖时不会丢。
+
 ## 界面
 
 产品是「API 工具」，界面只是它的控制面板 —— 导航固定 5 项：

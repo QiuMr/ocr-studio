@@ -17,7 +17,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$version = "0.1.0"
+# 版本号的唯一来源是 `src-tauri/tauri.conf.json` 的 version。
+# 这里**不写死**：写死过一次就会跟程序内显示的版本、GitHub Release 的 tag 漂开，
+# 而发出去的包没法远程改版本号。Rust 侧由 build.rs 从同一个文件注入
+# `OCR_STUDIO_VERSION`（见 src-tauri/src/version.rs）。
+# 用 -Encoding UTF8 显式读：本机 Get-Content 默认按 ANSI(GBK) 解，中文会乱。
+$confPath = Join-Path $root "src-tauri\tauri.conf.json"
+$confRaw = [System.IO.File]::ReadAllText($confPath, [System.Text.UTF8Encoding]::new($false))
+if ($confRaw -notmatch '"version"\s*:\s*"([^"]+)"') {
+  throw "在 tauri.conf.json 里找不到顶层 version 字段：$confPath"
+}
+$version = $Matches[1]
+Write-Host "[INFO] 版本号（来自 tauri.conf.json）: $version"
 
 # 打包只搬文件，不编译（编译走 build.ps1）。这里不设 cargo env，
 # 免得以后有人以为「打包会顺手 build」。

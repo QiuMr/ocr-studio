@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Copy,
   Cpu,
+  Download,
   ExternalLink,
   FileText,
   FolderOpen,
@@ -16,6 +17,7 @@ import {
   Loader2,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   ScanSearch,
   Server,
@@ -55,6 +57,9 @@ import {
   setAutostart,
   setDevice,
   setLevel,
+  subscribeUpdateProgress,
+  updateCheck,
+  updateInstall,
 } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
@@ -69,6 +74,8 @@ import {
   type Health,
   type ModelLevel,
   type PromptAssets,
+  type UpdateCheck,
+  type UpdateProgress,
 } from "../types";
 
 /*
@@ -106,6 +113,15 @@ export function SettingsPage() {
   const [aiTargetsList, setAiTargetsList] = useState<string[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiCopied, setAiCopied] = useState(false);
+
+  /** 更新检查结果。null = 还没查过 */
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  /** 正在请求版本信息（按钮转圈用） */
+  const [checking, setChecking] = useState(false);
+  /** 正在下载安装 —— 一旦进入就不可取消，进程会在替换前退出 */
+  const [installing, setInstalling] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   const saveTimer = useRef<number | undefined>(undefined);
 
@@ -157,6 +173,63 @@ export function SettingsPage() {
     }, 3000);
     return () => window.clearInterval(t);
   }, []);
+
+  // ── 版本与更新 ────────────────────────────────────────────────
+  // 进页面静默查一次。**查不到不是错误**：没网、还没发版都会走到这里，
+  // 而这两种情况是常态 —— 只有用户主动点「检查更新」时，原因才显示出来。
+  const checkUpdate = useCallback(async (manual: boolean) => {
+    if (!isTauri()) return;
+    if (manual) setChecking(true);
+    try {
+      const r = await updateCheck();
+      setUpdate(r);
+      setUpdateError(manual ? r.error : null);
+    } catch (e) {
+      if (manual) setUpdateError(String(e));
+    } finally {
+      if (manual) setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkUpdate(false);
+  }, [checkUpdate]);
+
+  // 下载进度由后端按 1.5MB 节流推事件
+  useEffect(() => {
+    if (!isTauri()) return;
+    let un: (() => void) | undefined;
+    let disposed = false;
+    void subscribeUpdateProgress((p) => setUpdateProgress(p)).then((f) => {
+      if (disposed) f();
+      else un = f;
+    });
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
+
+  const onInstallUpdate = async () => {
+    setInstalling(true);
+    setUpdateError(null);
+    try {
+      // 成功后本进程会退出（临时目录里的助手替换文件并拉起新版），
+      // 所以这里通常不会再往下走 —— 界面停在「正在重启」是对的。
+      await updateInstall();
+    } catch (e) {
+      setInstalling(false);
+      setUpdateError(String(e));
+    }
+  };
+
+  // 进度百分比：总大小优先用事件里的（服务端给了 Content-Length 才准），
+  // 其次用 latest.json 里的 size。都没有就按 0 显示，不瞎猜。
+  const updateTotal = updateProgress?.total || update?.size || 0;
+  const updatePct =
+    updateTotal > 0
+      ? Math.min(100, ((updateProgress?.done ?? 0) / updateTotal) * 100)
+      : 0;
 
   const onToggleAutostart = async (on: boolean) => {
     try {
@@ -856,6 +929,96 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* ---------------------------------------------------- 版本与更新 */}
+      {/*
+        为什么单独一张卡：绿色版用户最常问的两件事就是「现在什么版本」和
+        「有新版本怎么办」。放在高级信息里会被折叠掉，等于没写。
+      */}
+      <Card>
+        <CardHeader>
+          <div className="flex h-8 items-center">
+            <CardTitle className="flex items-center gap-2">
+              <Download className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              版本与更新
+              <Badge variant="outline" className="font-mono">
+                v{update?.current ?? health?.version ?? "—"}
+              </Badge>
+            </CardTitle>
+          </div>
+          <CardDescription>
+            免安装版没有安装步骤，更新只是替换程序文件；设置和教过的目标都存在用户目录里，不会丢。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3 rounded-lg bg-neutral-50 px-3.5 py-3">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-neutral-800">
+                {update?.has_update ? `有新版本 v${update.latest}` : "已是最新版本"}
+              </p>
+              <p className="mt-1 whitespace-pre-wrap text-[12px] leading-4 text-neutral-500">
+                {update?.has_update
+                  ? update.notes ||
+                    "点「立即更新」自动下载、替换并重启，不用手动解压。"
+                  : "打开这一页会自动查一次，也可以点右边手动再查。"}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void checkUpdate(true)}
+              disabled={!isTauri() || checking || installing}
+            >
+              {checking ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              检查更新
+            </Button>
+          </div>
+
+          {update?.has_update && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => void onInstallUpdate()} disabled={installing}>
+                {installing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {installing ? "正在下载" : "立即更新"}
+              </Button>
+              <span className="text-[12px] text-neutral-400">
+                {formatBytes(update.size)}
+                {installing
+                  ? " · 下载完成后会自动退出并重启，别手动关"
+                  : " · 下载完自动替换并重启"}
+              </span>
+            </div>
+          )}
+
+          {installing && (
+            <div className="flex flex-col gap-1.5">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-200">
+                <div
+                  className="h-full rounded-full bg-blue-600 transition-all duration-200"
+                  style={{ width: `${updatePct}%` }}
+                />
+              </div>
+              <p className="font-mono text-[11px] text-neutral-500">
+                {updatePct.toFixed(0)}% · {formatBytes(updateProgress?.done ?? 0)} /{" "}
+                {formatBytes(updateProgress?.total || update?.size || 0)}
+              </p>
+            </div>
+          )}
+
+          {updateError && (
+            <Callout variant="warn" icon={<Info className="h-4 w-4" />}>
+              {updateError}
+            </Callout>
+          )}
+        </CardContent>
+      </Card>
+
       {/* ---------------------------------------------------------- 高级 */}
       <Card>
         <button
@@ -961,6 +1124,24 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <span className="min-w-0 text-right">{children}</span>
     </div>
   );
+}
+
+/**
+ * 人类可读的体积。
+ *
+ * 用 1024 进制（MB 而不是 MiB 的标注方式）——用户看到的是文件管理器里的数字，
+ * 跟系统保持一致比跟 SI 标准一致更不容易引起「怎么对不上」的疑问。
+ */
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 /**
