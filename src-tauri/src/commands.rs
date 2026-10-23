@@ -670,6 +670,59 @@ pub fn list_engines(state: State<'_, Arc<AppState>>) -> EngineListOut {
     }
 }
 
+/// 设置页「模型」卡片：提示找图（YOLOE）资产的安装状态。
+///
+/// 与 `list_engines` 的区别：那份表只扫 **OCR 引擎**（ppocr/ddddoc/yolo），
+/// 提示找图三件套和 242MB 文本塔走另一套 `discover_assets`，
+/// 不在这里露出来，设置页就只能显示「引擎清单」而说不清找图模型装没装。
+/// 只扫目录、不加载模型 —— 与引擎清单同一纪律。
+#[derive(Debug, Serialize)]
+pub struct PromptAssetsOut {
+    /// 检测器在不在（整套功能可用的判据）
+    pub detector: bool,
+    /// 视觉提示编码器：图找图、中文参考库都走它
+    pub vpe: bool,
+    /// 文本提示头：英文语言找图用
+    pub text_head: bool,
+    /// 文本塔权重（242MB MobileCLIP2-B）：纯英文语言找图才需要
+    pub text_weights: bool,
+    /// 文本塔文件大小（MB）；没装是 None
+    pub text_weights_mb: Option<f64>,
+    /// 资产目录约定（缺东西时告诉用户该放哪）
+    pub dir: String,
+    /// 中文词表是用户自带的（zh_words.json）还是内置表
+    pub zh_words_custom: bool,
+}
+
+#[tauri::command]
+pub fn prompt_assets_status(state: State<'_, Arc<AppState>>) -> PromptAssetsOut {
+    use crate::engine::prompt::discover_assets;
+    let root = &state.models_root;
+    let dir = root.join("yoloe").display().to_string();
+    let Some(a) = discover_assets(root) else {
+        return PromptAssetsOut {
+            detector: false,
+            vpe: false,
+            text_head: false,
+            text_weights: false,
+            text_weights_mb: None,
+            dir,
+            zh_words_custom: false,
+        };
+    };
+    PromptAssetsOut {
+        detector: true,
+        vpe: a.vpe.is_some(),
+        text_head: a.text_head.is_some(),
+        text_weights: a.text_weights.is_some(),
+        text_weights_mb: a.text_weights.as_ref().and_then(|p| {
+            std::fs::metadata(p).ok().map(|m| m.len() as f64 / 1048576.0)
+        }),
+        dir,
+        zh_words_custom: a.zh_words.is_some(),
+    }
+}
+
 // ---------------------------------------------------------------- 检测模型
 
 /// 设置页「目标检测模型」卡片的一条记录。

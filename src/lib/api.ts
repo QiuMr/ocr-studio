@@ -21,6 +21,7 @@ import type {
   LogLine,
   ModelLevel,
   PipelineResult,
+  PromptAssets,
   RecognizeResult,
   RegionOcrResult,
   BarcodeResult,
@@ -48,6 +49,25 @@ export async function listEngines(): Promise<EngineList> {
     return { models_root: "-", default_engine: "ppocr:small", engines: [] };
   }
   return invoke<EngineList>("list_engines");
+}
+
+/**
+ * 提示找图（YOLOE）资产状态：三件套 + 242MB 文本塔装没装。
+ * 只扫目录不加载模型，设置页「模型」卡片用。
+ */
+export async function promptAssets(): Promise<PromptAssets> {
+  if (!isTauri()) {
+    return {
+      detector: false,
+      vpe: false,
+      text_head: false,
+      text_weights: false,
+      text_weights_mb: null,
+      dir: "-",
+      zh_words_custom: false,
+    };
+  }
+  return invoke<PromptAssets>("prompt_assets_status");
 }
 
 export async function getConfig(): Promise<AppConfig> {

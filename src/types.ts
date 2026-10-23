@@ -352,6 +352,30 @@ export interface EngineList {
 }
 
 /**
+ * 设置页「模型」卡片用：提示找图（YOLOE）资产的安装状态。
+ *
+ * 与 `EngineList` 分工：那份表只扫 OCR 引擎，这份扫提示找图三件套 +
+ * 242MB 文本塔。**中文找图（词表 + 参考库）不依赖文本塔**——
+ * 只有纯英文语言找图才需要它，界面上要把这点讲清楚。
+ */
+export interface PromptAssets {
+  /** 检测器在不在（整套功能可用的判据） */
+  detector: boolean;
+  /** 视觉提示编码器：图找图、中文参考库都走它 */
+  vpe: boolean;
+  /** 文本提示头：英文语言找图用 */
+  text_head: boolean;
+  /** 文本塔权重（242MB MobileCLIP2-B）：纯英文语言找图才需要 */
+  text_weights: boolean;
+  /** 文本塔文件大小（MB）；没装是 null */
+  text_weights_mb: number | null;
+  /** 资产目录约定（缺东西时告诉用户该放哪） */
+  dir: string;
+  /** 中文词表是用户自带的（zh_words.json）还是内置表 */
+  zh_words_custom: boolean;
+}
+
+/**
  * 一个可用的目标检测模型。
  *
  * 检测模型是「用户自己的」：既可以是 `models/detect/yolo/` 下扫到的，

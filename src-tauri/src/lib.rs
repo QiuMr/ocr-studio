@@ -406,6 +406,7 @@ pub fn run() {
             commands::get_health,
             commands::list_engines,
             commands::detect_models,
+            commands::prompt_assets_status,
             commands::pick_detect_model,
             commands::add_detect_model,
             commands::remove_detect_model,

@@ -6,10 +6,13 @@ import {
   Copy,
   Cpu,
   ExternalLink,
+  FileText,
   FolderOpen,
   Gauge,
+  HardDrive,
   Info,
   KeyRound,
+  Languages,
   Loader2,
   Play,
   Plus,
@@ -20,6 +23,7 @@ import {
   Shield,
   Square,
   Trash2,
+  Type,
   Zap,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -43,6 +47,7 @@ import {
   listEngines,
   modelsRoot,
   pickDetectModel,
+  promptAssets,
   removeDetectModel,
   saveConfig,
   serverStart,
@@ -64,14 +69,18 @@ import {
   type EngineList,
   type Health,
   type ModelLevel,
+  type PromptAssets,
 } from "../types";
 
 /*
- * 设置页的信息架构（2026-10-22 重做）：
+ * 设置页的信息架构（2026-10-23 重做「模型」卡）：
  *
- *   常用   —— 小白真的会动的三样：识别快慢、要不要用显卡、找图像不像
+ *   模型   —— 一眼看清「程序靠什么干活」：认字（自带/选快慢）、提示找图（自带/
+ *             三条能力各自装没装）、你自己的检测模型（要自己加）。放最前面，
+ *             因为小白最先问的就是「我还缺不缺东西」。
+ *   常用   —— 剩下两样真的会动的：要不要用显卡、找图要多像
  *   服务   —— 给脚本用的人：开关、地址、端口
- *   模型   —— 自己的检测模型
+ *   AI     —— 给本机 AI 的入口
  *   高级   —— 引擎清单、目录、窗口渲染、关于（默认收起，看的人自己展开）
  *
  * 改动**自动保存**，不再要求用户去右上角找「保存」按钮。
@@ -83,6 +92,7 @@ export function SettingsPage() {
   const [root, setRoot] = useState("-");
   const [engines, setEngines] = useState<EngineList | null>(null);
   const [models, setModels] = useState<DetectModel[]>([]);
+  const [assets, setAssets] = useState<PromptAssets | null>(null);
   const [picking, setPicking] = useState(false);
   const [running, setRunning] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,13 +113,14 @@ export function SettingsPage() {
   const loadAll = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const [c, h, s, r, e, m] = await Promise.all([
+      const [c, h, s, r, e, m, pa] = await Promise.all([
         getConfig(),
         getHealth(),
         serverStatus(),
         modelsRoot(),
         listEngines(),
         detectModels(),
+        promptAssets(),
       ]);
       setCfg(c);
       setHealth(h);
@@ -117,6 +128,7 @@ export function SettingsPage() {
       setRoot(r);
       setEngines(e);
       setModels(m);
+      setAssets(pa);
       const [aiState, targets] = await Promise.all([aiStatus(), aiTargets()]);
       setAi(aiState);
       setAiTargetsList(targets);
@@ -364,6 +376,228 @@ export function SettingsPage() {
         </Callout>
       )}
 
+      {/* ------------------------------------------------------------ 模型 */}
+      <Card>
+        <CardHeader>
+          <div className="flex h-8 items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Boxes className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              模型
+            </CardTitle>
+            <Badge variant={assets === null || assets.detector ? "success" : "warning"}>
+              {assets === null
+                ? "读取中…"
+                : assets.detector
+                  ? "认字与找图已就绪"
+                  : "提示找图未安装"}
+            </Badge>
+          </div>
+          <CardDescription>
+            程序靠模型干活。认字和找图的模型已随程序带好，通常不用管；
+            只有「检测你自己的物体」需要加模型。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {/* 组 1：文字识别——自带，这里只选快慢 */}
+          <ModelGroup
+            icon={<FileText className="h-3.5 w-3.5" />}
+            title="文字识别"
+            badge="已就绪"
+            desc="认字的主力：检测、识别、方向矫正三件套加一本字典（约 31MB）。随程序带好，装在哪个盘都不用动。"
+          >
+            <div className="flex flex-col gap-2">
+              <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
+                识别快慢
+                <Hint>
+                  「快」用的模型小，几乎秒出，适合界面文字清晰的截图；「均衡」是默认推荐；
+                  「准」最准也最慢，适合字小、模糊、背景花的图。换完引擎会重载几秒。
+                </Hint>
+              </Label>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { v: "tiny" as ModelLevel, title: "快", desc: "秒出，够用" },
+                    { v: "small" as ModelLevel, title: "均衡", desc: "推荐" },
+                    { v: "medium" as ModelLevel, title: "准", desc: "慢一点，最准" },
+                  ]
+                ).map((it) => (
+                  <button
+                    key={it.v}
+                    type="button"
+                    onClick={() => void onLevel(it.v)}
+                    disabled={!isTauri()}
+                    className={cn(
+                      "flex flex-col items-start rounded-md border-2 px-3 py-2 text-left transition-colors",
+                      cfg.level === it.v
+                        ? "border-[#2563EB] bg-[#EFF4FF]"
+                        : "border-neutral-200 bg-white hover:border-neutral-300",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "flex items-center gap-1.5 text-[13px] font-bold",
+                        cfg.level === it.v ? "text-[#2563EB]" : "text-neutral-800",
+                      )}
+                    >
+                      {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                      {it.title}
+                    </span>
+                    <span className="mt-0.5 text-[12px] text-neutral-500">{it.desc}</span>
+                  </button>
+                ))}
+              </div>
+              {health && (
+                <p className="flex items-center gap-1.5 text-[12px] text-neutral-400">
+                  <Cpu className="h-3 w-3" />
+                  当前实际使用：{health.model} · {health.actual_device === "directml" ? "显卡" : "处理器"}
+                </p>
+              )}
+            </div>
+          </ModelGroup>
+
+          {/* 组 2：提示找图——自带，三种找法各自装没装 */}
+          <ModelGroup
+            icon={<ScanSearch className="h-3.5 w-3.5" />}
+            title="提示找图"
+            badge={assets?.detector ? "已就绪" : "未安装"}
+            badgeVariant={assets?.detector ? "success" : "warning"}
+            desc="在屏幕上找目标。三种找法各走各的模型文件，缺哪个补哪个，不用改任何设置。"
+          >
+            <div className="flex flex-col gap-1.5">
+              <AssetRow
+                icon={<ScanSearch className="h-3.5 w-3.5" />}
+                name="图找图"
+                desc="截一块目标当参考图，找屏幕上长得一样的"
+                ok={!!assets?.detector && !!assets?.vpe}
+              />
+              <AssetRow
+                icon={<Languages className="h-3.5 w-3.5" />}
+                name="中文找图"
+                desc="写中文词，或教一次起个中文名——走的和图找图同一条路"
+                ok={!!assets?.detector && !!assets?.vpe}
+              />
+              <AssetRow
+                icon={<Type className="h-3.5 w-3.5" />}
+                name="英文语言找图"
+                desc={
+                  assets?.text_weights
+                    ? `直接写英文句子就能找（已带文本塔${assets.text_weights_mb ? `，${Math.round(assets.text_weights_mb)}MB` : ""}）`
+                    : "需要额外 242MB 文本塔，当前未装。中文找图不受影响"
+                }
+                ok={!!assets?.detector && !!assets?.text_head && !!assets?.text_weights}
+              />
+            </div>
+            {assets && !assets.detector && (
+              <p className="text-[12px] leading-4 text-amber-600">
+                缺检测器，整套用不了。把导出好的 onnx 放进下面的模型目录即可。
+              </p>
+            )}
+          </ModelGroup>
+
+          {/* 组 3：你自己的检测模型——唯一要用户动手的一组 */}
+          <ModelGroup
+            icon={<Boxes className="h-3.5 w-3.5" />}
+            title="你自己的检测模型"
+            badge={models.length > 0 ? `${models.length} 个` : "未添加"}
+            badgeVariant={models.length > 0 ? "success" : "outline"}
+            desc="检测「你自己的物体」：把训练导出的 onnx 加进来，识别页就能选它。v5~v12、v26 和 YOLOE 开放词汇模型都认。不加也能认字、找图。"
+          >
+            {models.length === 0 ? (
+              <div className="rounded-md bg-white px-3 py-2.5 text-[12px] leading-5 text-neutral-500">
+                还没有检测模型。两种加法：把 .onnx 丢进下面的「模型目录」，
+                或点「添加模型」指向任意位置的文件（只记路径、不复制）。
+                加好之后，识别页的「识别方式」里会多出「找物体」这一项。
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {models.map((m, i) => {
+                  // 类名藏在 ONNX metadata 里，只有加载过才知道；没加载过就如实说
+                  const nClasses =
+                    engines?.engines.find((e) => e.name === m.engine)?.capabilities.classes.length ?? 0;
+                  return (
+                    <div
+                      key={m.path}
+                      className="flex items-start gap-3 rounded-md bg-white px-3 py-2.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="truncate text-[13px] font-medium text-neutral-800">
+                            {m.id}
+                          </span>
+                          {i === 0 && <Badge variant="default">默认</Badge>}
+                          <Badge variant={m.external ? "secondary" : "outline"}>
+                            {m.external ? "外部路径" : "模型目录"}
+                          </Badge>
+                          <Badge variant={nClasses > 0 ? "secondary" : "outline"}>
+                            {nClasses > 0 ? `${nClasses} 类` : "类数未知"}
+                          </Badge>
+                          <code className="font-mono text-[11px] text-neutral-400">{m.file_name}</code>
+                        </div>
+                        <p className="mt-1 break-all font-mono text-[11px] leading-4 text-neutral-500">
+                          {m.path}
+                        </p>
+                      </div>
+                      {m.external && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void onRemoveModel(m.path)}
+                          title="从列表移除（不删除磁盘上的文件）"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          移除
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => void onAddModel()} disabled={picking || !isTauri()}>
+                <Plus className="h-3.5 w-3.5" />
+                {picking ? "选择中…" : "添加模型"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void onOpenFolder()}
+                disabled={!isTauri()}
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                打开模型目录
+              </Button>
+              <span className="text-[12px] leading-4 text-neutral-400">
+                列表第一项就是默认模型；类别名会自动从模型里读，不用手写 labels.txt
+              </span>
+            </div>
+          </ModelGroup>
+
+          {/* 模型目录：前面三组都指着它，单独给一行 */}
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-neutral-50/70 px-3.5 py-2.5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[13px] font-medium text-neutral-800">
+                <HardDrive className="h-3.5 w-3.5 text-neutral-400" />
+                模型目录
+              </div>
+              <code className="selectable break-all font-mono text-[11px] leading-4 text-neutral-500">
+                {root}
+              </code>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void onOpenFolder()}
+              disabled={!isTauri()}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              打开
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ------------------------------------------------------------ 常用 */}
       <Card>
         <CardHeader>
@@ -373,59 +607,9 @@ export function SettingsPage() {
               常用
             </CardTitle>
           </div>
-          <CardDescription>这三样决定了「快不快、准不准」，换完立刻生效。</CardDescription>
+          <CardDescription>这两样决定了跑得多快、找图多严，换完立刻生效。</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
-          {/* 识别精度：三段按钮比下拉直观，选中的一眼看得出来 */}
-          <div className="flex flex-col gap-2">
-            <Label className="flex items-center gap-1.5 text-[12px] text-neutral-600">
-              识别精度
-              <Hint>
-                「快」用的模型小，几乎秒出，适合界面文字清晰的截图；「均衡」是默认推荐；
-                「准」最准也最慢，适合字小、模糊、背景花的图。换完引擎会重载几秒。
-              </Hint>
-            </Label>
-            <div className="grid grid-cols-3 gap-2">
-              {(
-                [
-                  { v: "tiny" as ModelLevel, title: "快", desc: "秒出，够用" },
-                  { v: "small" as ModelLevel, title: "均衡", desc: "推荐" },
-                  { v: "medium" as ModelLevel, title: "准", desc: "慢一点，最准" },
-                ]
-              ).map((it) => (
-                <button
-                  key={it.v}
-                  type="button"
-                  onClick={() => void onLevel(it.v)}
-                  disabled={!isTauri()}
-                  className={cn(
-                    "flex flex-col items-start rounded-md border-2 px-3 py-2 text-left transition-colors",
-                    cfg.level === it.v
-                      ? "border-[#2563EB] bg-[#EFF4FF]"
-                      : "border-neutral-200 bg-white hover:border-neutral-300",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex items-center gap-1.5 text-[13px] font-bold",
-                      cfg.level === it.v ? "text-[#2563EB]" : "text-neutral-800",
-                    )}
-                  >
-                    {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
-                    {it.title}
-                  </span>
-                  <span className="mt-0.5 text-[12px] text-neutral-500">{it.desc}</span>
-                </button>
-              ))}
-            </div>
-            {health && (
-              <p className="flex items-center gap-1.5 text-[12px] text-neutral-400">
-                <Cpu className="h-3 w-3" />
-                当前实际使用：{health.model} · {health.actual_device === "directml" ? "显卡" : "处理器"}
-              </p>
-            )}
-          </div>
-
           {/* 显卡加速 */}
           <div className="flex items-start justify-between gap-4 rounded-lg bg-neutral-50 px-3.5 py-3">
             <div className="min-w-0">
@@ -613,96 +797,6 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* ------------------------------------------------------ 目标检测模型 */}
-      <Card>
-        <CardHeader>
-          <div className="flex h-8 items-center justify-between gap-2">
-            <CardTitle className="flex items-center gap-2">
-              <ScanSearch className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              我自己的检测模型
-            </CardTitle>
-            <Badge variant={models.length > 0 ? "success" : "outline"}>
-              {models.length > 0 ? `${models.length} 个` : "未添加"}
-            </Badge>
-          </div>
-          <CardDescription>
-            程序**不预置**检测模型——这是你自己的模型工作台。把导出的 onnx 加进来，
-            识别页就能选它找物体（v5~v12、v26，以及 YOLOE 开放词汇模型都行）。
-            没有模型也不影响认字。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          {models.length === 0 ? (
-            <div className="rounded-lg bg-neutral-50/70 px-3 py-4 text-[12px] leading-5 text-neutral-500">
-              还没有检测模型。两种加法：把 .onnx 丢进下面的「模型目录」，
-              或点「添加模型」指向任意位置的文件（只记路径、不复制）。
-              加好之后，识别页的「识别方式」里会多出「找物体」这一项。
-            </div>
-          ) : (
-            models.map((m, i) => {
-              // 类名藏在 ONNX metadata 里，只有加载过才知道；没加载过就如实说
-              const nClasses =
-                engines?.engines.find((e) => e.name === m.engine)?.capabilities.classes.length ?? 0;
-              return (
-                <div
-                  key={m.path}
-                  className="flex items-start gap-3 rounded-lg bg-neutral-50/70 px-3 py-2.5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="truncate text-[13px] font-medium text-neutral-800">
-                        {m.id}
-                      </span>
-                      {i === 0 && <Badge variant="default">默认</Badge>}
-                      <Badge variant={m.external ? "secondary" : "outline"}>
-                        {m.external ? "外部路径" : "模型目录"}
-                      </Badge>
-                      <Badge variant={nClasses > 0 ? "secondary" : "outline"}>
-                        {nClasses > 0 ? `${nClasses} 类` : "类数未知"}
-                      </Badge>
-                      <code className="font-mono text-[11px] text-neutral-400">{m.file_name}</code>
-                    </div>
-                    <p className="mt-1 break-all font-mono text-[11px] leading-4 text-neutral-500">
-                      {m.path}
-                    </p>
-                  </div>
-                  {m.external && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => void onRemoveModel(m.path)}
-                      title="从列表移除（不删除磁盘上的文件）"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      移除
-                    </Button>
-                  )}
-                </div>
-              );
-            })
-          )}
-
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={() => void onAddModel()} disabled={picking || !isTauri()}>
-              <Plus className="h-3.5 w-3.5" />
-              {picking ? "选择中…" : "添加模型"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void onOpenFolder()}
-              disabled={!isTauri()}
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              打开模型目录
-            </Button>
-            <span className="text-[12px] leading-4 text-neutral-400">
-              列表第一项就是默认模型；类别名会自动从模型里读，不用手写 labels.txt
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* ---------------------------------------------------------- AI 控制 */}
       <Card>
         <CardHeader>
@@ -876,6 +970,65 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <div className="flex items-start justify-between gap-4">
       <span className="shrink-0 text-[12px] text-neutral-500">{label}</span>
       <span className="min-w-0 text-right">{children}</span>
+    </div>
+  );
+}
+
+/**
+ * 「模型」卡里的一组：图标 + 标题 + 状态徽标 + 一句人话 + 子内容。
+ *
+ * 组容器是 lg(10) 圆角，里面的行/空态用 md(8)——子比父小一档。
+ */
+function ModelGroup({
+  icon,
+  title,
+  badge,
+  badgeVariant = "success",
+  desc,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  badge?: string;
+  badgeVariant?: "default" | "secondary" | "success" | "warning" | "outline";
+  desc: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-2.5 rounded-lg bg-neutral-50/70 px-3.5 py-3">
+      <div className="flex h-8 items-center gap-2">
+        <span className="flex items-center gap-2 text-[13px] font-semibold text-neutral-900">
+          <span className="text-neutral-400">{icon}</span>
+          {title}
+        </span>
+        {badge && <Badge variant={badgeVariant}>{badge}</Badge>}
+      </div>
+      <p className="text-[12px] leading-4 text-neutral-500">{desc}</p>
+      {children}
+    </section>
+  );
+}
+
+/** 一行「装没装」：能力名 + 一句话 + 右侧徽标。白底，与父组的灰底区分。 */
+function AssetRow({
+  icon,
+  name,
+  desc,
+  ok,
+}: {
+  icon: React.ReactNode;
+  name: string;
+  desc: string;
+  ok: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2.5 rounded-md bg-white px-3 py-2">
+      <span className="shrink-0 text-neutral-400">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-medium text-neutral-800">{name}</div>
+        <div className="text-[11px] leading-4 text-neutral-500">{desc}</div>
+      </div>
+      <Badge variant={ok ? "success" : "outline"}>{ok ? "已装" : "未装"}</Badge>
     </div>
   );
 }
