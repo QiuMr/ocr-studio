@@ -1005,7 +1005,7 @@ export function SettingsPage() {
                 />
               </div>
               <p className="font-mono text-[11px] text-neutral-500">
-                {updatePct.toFixed(0)}% · {formatBytes(updateProgress?.done ?? 0)} /{" "}
+                {updatePct.toFixed(0)}% · {formatBytes(updateProgress?.done ?? 0, "0 B")} /{" "}
                 {formatBytes(updateProgress?.total || update?.size || 0)}
               </p>
             </div>
@@ -1131,9 +1131,12 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
  *
  * 用 1024 进制（MB 而不是 MiB 的标注方式）——用户看到的是文件管理器里的数字，
  * 跟系统保持一致比跟 SI 标准一致更不容易引起「怎么对不上」的疑问。
+ *
+ * `zero` 决定 0 怎么显示：下载刚开始时「已下载」应该是 `0 B`（确实下了 0），
+ * 而「总大小」未知时应该显示 `—`（真的不知道）。两者含义不同，不能共用一个写法。
  */
-function formatBytes(n: number): string {
-  if (!n || n <= 0) return "—";
+function formatBytes(n: number, zero: string = "—"): string {
+  if (!n || n <= 0) return zero;
   const units = ["B", "KB", "MB", "GB"];
   let v = n;
   let i = 0;

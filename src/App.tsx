@@ -68,6 +68,14 @@ export default function App() {
   const [page, setPage] = useState<PageKey>("service");
   const [ocrTab, setOcrTab] = useState<OcrTab>("ocr");
   /**
+   * 侧边栏底部显示的版本号。
+   *
+   * 从 `/ocr/health` 拿，**不写死**：写死过一次（`v0.1`），结果发了 0.1.1
+   * 之后界面上还显示 0.1 —— 用户报版本号时说的是错的，排查全靠猜。
+   * 拿不到时显示空，宁可不显示也不要显示错的。
+   */
+  const [version, setVersion] = useState<string>("");
+  /**
    * 每次自增 = 「请试跑页把文件选择框弹出来」。
    *
    * 用户在服务台点「传张图试试」，意思是「我现在就要跑一次」，
@@ -86,6 +94,15 @@ export default function App() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
   }, [page]);
+
+  // 版本号只拉一次：它在本进程生命周期内不会变（换版本必然重启进程）
+  useEffect(() => {
+    if (!isTauri()) return;
+    void import("./lib/api")
+      .then((m) => m.getHealth())
+      .then((h) => setVersion(h.version ?? ""))
+      .catch(() => setVersion(""));
+  }, []);
 
   const toggleSidebar = useCallback(() => {
     setCollapsed((prev) => {
@@ -160,14 +177,14 @@ export default function App() {
                * （实测只剩一个小圆点）。原生 title 足够。
                */}
               <div
-                title="OCR Studio v0.1 · MIT"
+                title={version ? `OCR Studio v${version} · MIT` : "OCR Studio · MIT"}
                 className={cn(
                   "flex items-center gap-2 rounded-lg px-2 py-1.5 text-[11px] font-medium leading-none text-neutral-400",
                   collapsed && "justify-center px-0",
                 )}
               >
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300" />
-                {!collapsed && <span className="truncate">v0.1</span>}
+                {!collapsed && version && <span className="truncate">v{version}</span>}
               </div>
             </div>
           </aside>
