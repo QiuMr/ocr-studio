@@ -21,7 +21,21 @@
 ## 托盘菜单（2026-10-23 重做，**改托盘前必读**）
 - **不用 `tauri::menu::Menu`**（系统原生菜单，白底黑字无图标、样式改不了）。改成自己画的无边框浮层窗口：label=`tray`，URL `index.html#tray`（`main.tsx` 按 hash 切 `TrayMenu`），transparent + always_on_top + skip_taskbar + shadow。**body 必须透明**（`body.tray-mode`），否则圆角外露白底、比原生菜单还丑。
 - 菜单内容：头部（产品名 + 版本徽标 + 服务状态绿点）、打开界面、启停服务、检查更新、退出。**有更新时「检查更新」变蓝色高亮条目**（`有更新 v0.1.3` + 蓝点）—— 这是原生菜单做不到的。
-- **三个已踩过的坑**：
+- **第一红线：`Click` 事件按下和抬起各来一次**（2026-10-24 用户实测「右键点一下瞬间闪没」）。
+  两次都调 show → 第二次撞上「已可见就收起」的 toggle 分支 → 菜单自己把自己关掉。
+  **排查方向别跑到焦点上去**，我第一次就是被带偏的。三道闸：只认
+  `MouseButtonState::Up` / 150ms 去重 / `TRAY_SHOWN_AT` 400ms 内不参与 toggle。
+  双击不再单独处理（双击前必然已有 Click(Up)）。
+- **失焦隐藏要「焦点稳定」才启用**：show 后 800ms 复核 `is_focused()`，
+  还在才允许失焦关闭。老逻辑「拿到过焦点就算」会被 `Focused(true)`→`Focused(false)`
+  的抖动击穿。判定拿不到焦点时菜单**保持显示**，改用 `GetAsyncKeyState`
+  轮询「点击菜单外部」关闭 —— 没焦点时前端连 Esc 都收不到（键盘消息只给前台窗口）。
+- 弹菜单统一 `run_on_main_thread`（托盘事件在托盘线程，抢不到前台）+ Win32 `SetForegroundWindow`。
+  **tauri 的 HWND 与本项目 windows crate 的不是同一类型**，用 `HWND(raw.0)` 重新包。
+- 外观两条：① 卡片外面**别留 padding**（透明窗口上 CSS 阴影会染出一圈灰边，
+  看着像套了个框），阴影交给 `.shadow(true)`（画在窗口矩形外，不占内容区）；
+  ② 量高必须量**最外层**（含 padding/border），量内层会切掉底部一截，
+  `body.tray-mode` 还要 `margin:0`，前后端都 `ceil`。
   1. **失焦隐藏不能照单全收**：`show()` 后 Windows 先抛一个假的 `Focused(false)`，直接隐藏会让菜单永远弹不出来（窗口建好、位置也对，但 `IsWindowVisible` 恒为 0）。现方案：`TRAY_HAD_FOCUS` 标记（先拿到过焦点才允许失焦隐藏）+ 600ms 宽限后用 `is_focused()` 复核。
   2. **弹菜单后别再动主窗口**：`--debug-tray` 路径弹完菜单必须 return，否则 single-instance 回调接着 show/set_focus 主窗口，菜单立刻失焦被收。
   3. **托盘窗口要跟上主窗口的渲染参数**（`WEBVIEW_ARGS`），否则主窗口切软件合成后托盘窗口会白。
