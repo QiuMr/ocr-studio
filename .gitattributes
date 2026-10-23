@@ -1,0 +1,26 @@
+# Windows 脚本：UTF-8 **带 BOM** + CRLF 是硬要求。
+# PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI（本机 GBK）解码，
+# 中文注释会被撕碎、引号错位，报一堆「表达式或语句中包含意外的标记」。
+# 用 -text 让 git 完全不做换行转换（BOM 本来就不会被动，这里连 CRLF 也钉住），
+# 避免 core.autocrlf=true 在 commit/checkout 往返中改动这些文件。
+*.ps1 -text
+*.bat -text
+*.cmd -text
+
+# 二进制资源：不做 diff、不做换行转换
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.icns binary
+*.onnx binary
+*.dll  binary
+*.exe  binary
+*.zip  binary
+*.f32  binary
+
+# 这些是文本，但不想因换行产生噪音 diff
+*.rs   text
+*.ts   text
+*.tsx  text
+*.json text
+*.md   text
