@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // 注：托盘**不再**用 `tauri::menu::Menu`（系统原生菜单，样式改不了），
 // 改成自己画的无边框窗口，见 `setup_tray`。
@@ -152,22 +152,50 @@ pub(crate) const TRAY_MENU_LABEL: &str = "tray";
 /// 托盘菜单宽度（逻辑像素）。高度由内容决定，前端量完再回调改。
 pub(crate) const TRAY_MENU_WIDTH: f64 = 272.0;
 
-/// 托盘菜单是否已经拿到过一次焦点。
+/// 托盘菜单的焦点是否「稳定地」拿到了。
 ///
-/// 新窗口 `show()` 的瞬间，Windows 常常**先抛一个 `Focused(false)`**（还没排到前台），
-/// 紧接着才给焦点。要是在第一次 `Focused(false)` 就隐藏，菜单会**永远弹不出来** ——
-/// 实测正是这样：窗口被创建、定位全对（288x219），但 `IsWindowVisible` 一直是 0，
-/// 表现为「点了托盘什么都没有」。所以只有拿到过焦点之后的失焦才算数。
-static TRAY_HAD_FOCUS: AtomicBool = AtomicBool::new(false);
+/// 注意这里问的不是「有没有拿到过焦点」，而是「**稳不稳**」。
+/// 前一版用的是「拿到过就算」，结果用户实测到的就是**菜单闪一下就没了**：
+///
+/// 点托盘图标时前台还在 explorer 手里，我们的窗口 show 出来之后
+/// 焦点被抢回去，于是 `Focused(true)` 后面紧跟一个 `Focused(false)`，
+/// 按「拿到过就算」的逻辑就直接收起了。窗口是对的、位置也是对的，
+/// 只是活了几百毫秒 —— 用户看到的就是「点了什么都没发生」。
+///
+/// 所以改成：show 之后等一小会儿再问一次焦点还在不在，
+/// **还在**才允许「失焦即收起」。拿不到焦点的机器上菜单就一直挂着，
+/// 靠再点一次托盘 / Esc / 点菜单项来关 —— 菜单挂着只是不好看，
+/// 菜单看不见才是真的坏。
+static TRAY_FOCUS_STABLE: AtomicBool = AtomicBool::new(false);
 
-/// 菜单刚弹出时的失焦宽限（见 `TRAY_HAD_FOCUS` 的注释）。
-const TRAY_BLUR_GRACE: Duration = Duration::from_millis(600);
+/// 菜单弹出后等多久判定焦点是否稳定。
+///
+/// 太短会把「焦点还没排到」误判成「拿不到焦点」；太长则用户点别处时
+/// 菜单会赖着不走。800ms 是实测下来两边都不难受的点。
+const TRAY_FOCUS_SETTLE: Duration = Duration::from_millis(800);
 
 /// 上次点击托盘图标的屏幕物理坐标。
 ///
 /// 菜单是「贴着托盘图标弹出」的，而高度要等前端把内容渲染完才知道，
 /// 所以锚点得留着，量完高度再重新定位一次 —— 否则菜单会朝上长到屏幕外面去。
 static TRAY_ANCHOR: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// 托盘点击去重：同一次点击被重复投递时只认第一次。
+///
+/// 150ms 是刻意的短间隔 —— 人手连点两次（想用 toggle 收起菜单）间隔通常
+/// 在 200ms 以上，不会误伤；而同一个物理点击被重复投递几乎都是紧挨着的。
+fn tray_click_debounce() -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let now = Instant::now();
+    let mut g = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = *g {
+        if now.duration_since(t) < Duration::from_millis(150) {
+            return false;
+        }
+    }
+    *g = Some(now);
+    true
+}
 
 /// 系统托盘：常驻入口。
 ///
@@ -199,10 +227,29 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // 就会看到两套完全不同的菜单（一次现代的、一次老旧的）——
         // 那比一直用老菜单更出戏。
         match event {
-            tauri::tray::TrayIconEvent::Click { position, .. }
-            | tauri::tray::TrayIconEvent::DoubleClick { position, .. } => {
+            tauri::tray::TrayIconEvent::Click {
+                position,
+                button_state,
+                ..
+            } => {
+                // **只在按键抬起时弹**。
+                //
+                // `Click` 事件按下和抬起各来一次。两次都处理的话，第二次会撞上
+                // 「已经可见就收起」的 toggle 分支，菜单刚 show 出来就被自己
+                // 关掉 —— 用户看到的就是「右键点一下瞬间闪没」。
+                // 这一条跟焦点无关，前面按焦点排查被带偏过一次。
+                if button_state != tauri::tray::MouseButtonState::Up {
+                    return;
+                }
+                // 再挡一层重复投递：某些环境（远程桌面、部分输入法）下同一次
+                // 点击会被送两次，效果跟上面一样是闪没。
+                if !tray_click_debounce() {
+                    return;
+                }
                 show_tray_menu(tray.app_handle(), position);
             }
+            // 双击不单独处理：双击之前必然已经有过 Click(Up)，再弹一次会变成
+            // toggle 收起，反而闪。
             _ => {}
         }
     });
@@ -213,7 +260,31 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 /// 弹出（或复用）托盘菜单窗口，定位到托盘图标上方。
+///
+/// 入口统一走主线程（见下），真正的实现在 `show_tray_menu_inner`。
 fn show_tray_menu(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
+    // 托盘的事件回调跑在**托盘自己的消息线程**上，不是主线程。
+    // 在那个线程上建窗口、抢前台会失败：Windows 的前台锁要求调用线程本身
+    // 有资格设置前台窗口，托盘线程没有。失败了窗口照样能 show 出来，
+    // 但焦点拿不到 —— 这正是「菜单闪一下就没」的直接原因之一。
+    let app2 = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || show_tray_menu_inner(&app2, pos)) {
+        tracing::warn!("托盘菜单投递到主线程失败: {e}；退回当前线程");
+        show_tray_menu_inner(app, pos);
+    }
+}
+
+/// 菜单上次弹出的时刻。
+///
+/// 用途：`show_tray_menu` 里的 toggle 判断要区分「用户想关掉菜单」和
+/// 「同一次物理点击被处理了两次」。后者会表现为菜单瞬间闪没，
+/// 是本模块踩过两次的坑，所以宁可多一道时间闸。
+static TRAY_SHOWN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// 托盘菜单：这个时间内不认为「再点一次 = 关闭」。
+const TRAY_TOGGLE_GUARD: Duration = Duration::from_millis(400);
+
+fn show_tray_menu_inner(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
     *TRAY_ANCHOR
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some((pos.x, pos.y));
@@ -254,20 +325,161 @@ fn show_tray_menu(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64>) {
     // 已经开着就收起来：再点一次托盘 = 关闭。
     // 这条同时是「菜单拿不到焦点时怎么关掉」的兜底 —— 没有它，
     // 万一某台机器上菜单既没焦点也没收到失焦事件，就再也关不掉了。
-    if win.is_visible().unwrap_or(false) {
+    //
+    // **刚弹出来的不算**：同一次点击被重复处理时，第二次会走到这里把菜单
+    // 关掉，用户看到的就是「闪一下就没」。就算上面那两道闸（只认按键抬起、
+    // 150ms 去重）都被绕过，这一道也能兜住。
+    let just_shown = {
+        let g = TRAY_SHOWN_AT.lock().unwrap_or_else(|e| e.into_inner());
+        g.map(|t| t.elapsed() < TRAY_TOGGLE_GUARD).unwrap_or(false)
+    };
+    if win.is_visible().unwrap_or(false) && !just_shown {
         let _ = win.hide();
         return;
     }
+    *TRAY_SHOWN_AT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 
-    // 焦点标记要先清零：show() 会先来一个假的 Focused(false)，
-    // 不清零的话会被上一次的残留状态误判成「真的失去焦点」。
-    TRAY_HAD_FOCUS.store(false, Ordering::SeqCst);
+    // 每次弹出都重新判定焦点，别信上一次的结论
+    TRAY_FOCUS_STABLE.store(false, Ordering::SeqCst);
     if let Err(e) = place_tray_menu(&win) {
         tracing::warn!("托盘菜单定位失败: {e}");
     }
     let _ = win.show();
     let _ = win.set_focus();
+    // Tauri 的 set_focus 在托盘场景下常被前台锁挡掉，用 Win32 再抢一次。
+    // 抢不到也不打紧 —— 下面会据此判定「焦点不稳定」，菜单改成手动关闭。
+    force_foreground(&win);
+
+    // 延迟判定焦点是否真的稳住了（判定逻辑见 TRAY_FOCUS_STABLE 的注释）
+    let w = win.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(TRAY_FOCUS_SETTLE);
+        // 期间用户可能已经把它关掉了（点了菜单项 / 又点了一次托盘）
+        if !w.is_visible().unwrap_or(false) {
+            return;
+        }
+        let stable = w.is_focused().unwrap_or(false);
+        TRAY_FOCUS_STABLE.store(stable, Ordering::SeqCst);
+        if stable {
+            return;
+        }
+        tracing::warn!("托盘菜单没能稳定拿到前台焦点，改用轮询检测「点击菜单外部」关闭");
+        spawn_click_outside_watch(w);
+    });
 }
+
+/// 焦点**不稳**时的兜底：轮询鼠标键，点在菜单外面就收起。
+///
+/// 为什么非得有它：菜单拿不到前台焦点的时候，既收不到 `Focused(false)`，
+/// 前端也收不到 Esc 的 keydown（键盘消息只发给前台窗口）。这样最直觉的
+/// 两条退路都断了，只剩「再点一次托盘图标」——用户不知道这条隐藏规则，
+/// 只会觉得菜单卡死了。
+///
+/// 用轮询而不是 `SetWindowsHookEx` 全局钩子：钩子要跑消息循环，会跟 Tauri
+/// 的事件循环抢主线程；`GetAsyncKeyState` 读的是物理按键状态，
+/// 不依赖本窗口是否在前台 —— 正好适合这个场景。
+fn spawn_click_outside_watch(win: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        // 先等用户把刚才点托盘那一下松开，否则开局的按键会被当成「点外面」
+        for _ in 0..12 {
+            if !mouse_down() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        loop {
+            std::thread::sleep(Duration::from_millis(60));
+            // 后来又拿到焦点了：交回正常的失焦逻辑，别让两套机制打架
+            if win.is_focused().unwrap_or(false) {
+                TRAY_FOCUS_STABLE.store(true, Ordering::SeqCst);
+                return;
+            }
+            if !win.is_visible().unwrap_or(false) {
+                return;
+            }
+            if mouse_down() && !cursor_in_window(&win) {
+                let _ = win.hide();
+                return;
+            }
+        }
+    });
+}
+
+/// 鼠标左键或右键当前是否按着。
+#[cfg(windows)]
+fn mouse_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    unsafe {
+        // 0x8000 = 这一刻正处于按下状态
+        let l = GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0;
+        let r = GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 != 0;
+        l || r
+    }
+}
+
+#[cfg(not(windows))]
+fn mouse_down() -> bool {
+    false
+}
+
+/// 光标此刻是否在窗口矩形内（物理像素）。
+#[cfg(windows)]
+fn cursor_in_window(win: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut p = POINT::default();
+    unsafe {
+        // 注意是 Result 不是 BOOL：0.58 起这类函数把 GetLastError 包进了返回值
+        if GetCursorPos(&mut p).is_err() {
+            return true; // 拿不到坐标就当在窗口内，宁可不关也别误关
+        }
+    }
+    let Ok(pos) = win.outer_position() else { return true };
+    let Ok(size) = win.outer_size() else { return true };
+    let (x, y) = (p.x, p.y);
+    x >= pos.x
+        && x <= pos.x + size.width as i32
+        && y >= pos.y
+        && y <= pos.y + size.height as i32
+}
+
+#[cfg(not(windows))]
+fn cursor_in_window(_win: &tauri::WebviewWindow) -> bool {
+    true
+}
+
+/// 把托盘菜单窗口推到前台（Windows）。
+///
+/// `WebviewWindow::set_focus()` 走的是 Chromium 自己的激活路径，在托盘场景里
+/// 经常被系统的前台锁挡掉：窗口显示出来了，但 `GetForegroundWindow()` 还不是它，
+/// 于是紧接着就被 explorer 收走焦点 —— 用户看到就是「闪一下就没」。
+///
+/// 这里补一次 Win32 的 `SetForegroundWindow`；失败再退到
+/// `AttachThreadInput` 的老办法（把自己挂到前台线程上再抢）。
+#[cfg(windows)]
+fn force_foreground(win: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+    let Ok(raw) = win.hwnd() else { return };
+    // tauri 暴露的 HWND 来自它自己锁定的 windows 版本，跟本项目 Cargo.toml 里
+    // 声明的可能不是同一个类型（直接传会给 `Param<HWND>` 报 trait 不满足）。
+    // 两者都是 `*mut c_void` 的新类型包装，用裸指针重新包一层即可。
+    let hwnd = HWND(raw.0);
+    unsafe {
+        if !SetForegroundWindow(hwnd).as_bool() {
+            // 抢不到前台不算错误：下面会判定「焦点不稳定」，
+            // 菜单改成靠「点击外部」关闭，而不是让它闪没。
+            tracing::warn!("SetForegroundWindow 未生效，托盘菜单可能拿不到前台焦点");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn force_foreground(_win: &tauri::WebviewWindow) {}
 
 /// 把菜单窗口贴到托盘图标上方。放不下就翻到下方。
 pub(crate) fn place_tray_menu(win: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -378,9 +590,9 @@ pub fn run() {
             if argv.iter().any(|a| a == "--debug-tray") {
                 show_tray_menu(app, tauri::PhysicalPosition::new(1400.0, 820.0));
                 // **必须在这里返回**：下面那三行会把焦点抢给主窗口，
-                // 菜单刚 show 出来就收到 Focused(false) 被收掉（实测踩到：
-                // 窗口建好了、位置也对，但 visible 一直是 0）。
-                // 真实点击托盘不会走这里，所以这只是调试路径要注意的事。
+                // 菜单刚 show 出来就被收掉。实测踩到过两次——第一次是
+                // 菜单直接 focus 不到（visible 一直 0），第二次是弹出来
+                // 又立刻失焦。真实点击托盘不走这里，但调试路径得靠它抓图。
                 return;
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -580,22 +792,19 @@ pub fn run() {
             // （窗口建好了、位置也对，就是 visible 一直是 0）。
             if let WindowEvent::Focused(got) = event {
                 if window.label() == TRAY_MENU_LABEL {
-                    if *got {
-                        TRAY_HAD_FOCUS.store(true, Ordering::SeqCst);
-                    } else if TRAY_HAD_FOCUS.swap(false, Ordering::SeqCst) {
-                        // 延迟确认再收起。
-                        //
-                        // 失焦事件有时是**抖**出来的：窗口刚 show，焦点还没排到它，
-                        // 系统先给一个 Focused(false)。照单全收的话菜单会闪一下就没了
-                        // —— 用户看到的是「点了托盘什么都没发生」，比菜单一直挂着糟得多。
-                        // 所以等一小会儿，再问一次焦点到底在不在。
-                        let w = window.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(TRAY_BLUR_GRACE);
-                            if !w.is_focused().unwrap_or(false) {
-                                let _ = w.hide();
-                            }
-                        });
+                    // 只有「焦点已经稳定拿到」之后，失焦才收起。
+                    //
+                    // 拿不到焦点的机器（前台锁、远程桌面、某些输入法/安全软件环境）
+                    // 上菜单会一直挂着，靠 Esc / 点菜单项 / 再点一次托盘关掉。
+                    // 宁可让它赖着不走，也不能让它闪没了 —— 后者用户没法用。
+                    if !*got && TRAY_FOCUS_STABLE.load(Ordering::SeqCst) {
+                        let _ = window.hide();
+                    }
+                } else if *got {
+                    // 主窗口被激活（用户去点界面了）：菜单别挡在上面。
+                    // 这条同时是「菜单拿不到焦点、不会自动收起」时的兜底退路。
+                    if let Some(w) = window.get_webview_window(TRAY_MENU_LABEL) {
+                        let _ = w.hide();
                     }
                 }
             }

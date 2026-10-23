@@ -122,6 +122,8 @@ features = [
   # 更新助手要 OpenProcess 判断旧进程是否真的退出了
   # （不能只 sleep 几秒：onnxruntime.dll 被占用时覆盖会半途失败）
   "Win32_System_Threading",
+  # 托盘菜单拿不到前台焦点时，靠 GetAsyncKeyState 轮询左键做到「点外面就关」
+  "Win32_UI_Input_KeyboardAndMouse",
 ]
 
 # 注：windows 依赖在截图/句柄里程碑（M2）加入并单独验证编译
