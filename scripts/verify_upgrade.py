@@ -8,6 +8,7 @@
 安全边界：全程只点 OCR Studio 自己窗口里的按钮，不碰别的程序；
 升级完成后进程是同一个 exe 路径，只是版本号变了。
 """
+import io
 import json
 import pathlib
 import subprocess
@@ -24,7 +25,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 cfg = json.loads(CFG.read_text(encoding="utf-8"))
 ai = Ai(f"http://127.0.0.1:{cfg['port']}", cfg["ai_token"])
 
-TARGET = "0.1.7"
+TARGET = "0.1.9"
 
 
 def health_version():
@@ -116,12 +117,17 @@ def scroll_until(hwnd, keyword, rounds=12):
     return None
 
 
-def click_text(hwnd, keyword, expect=None, tries=5):
+def click_text(hwnd, keyword, expect=None, tries=5, rightmost=False):
     """找到关键词并点它，点完还要确认页面真的换了（expect 出现了）。
 
     为什么必须验证：点击发出去只代表「事件送到了」，不代表界面响应了。
     第一次实测就踩到 —— 点完立刻截图，看到的还是旧页面，脚本误判成点击失败。
     对自动化来说「点了没反应」和「点歪了」必须分开处理，所以点完必须复核。
+
+    rightmost：同词多处时取最右的。侧栏导航和正文里会出现同一个词
+    （比如「设置」），而**正文的大标题才是最靠右的那个** —— 拿它当
+    「页面换成功了」的判据，比挑一个可能首屏看不到的词（「AI 控制」在
+    设置页很下面）稳得多。
     """
     for _ in range(tries):
         ai.call("wait", ms=250)
@@ -129,7 +135,7 @@ def click_text(hwnd, keyword, expect=None, tries=5):
         hits = (r.get("data") or {}).get("matches") or []
         if not hits:
             continue
-        hits.sort(key=lambda m: m["center_x"])
+        hits.sort(key=lambda m: m["center_x"], reverse=rightmost)
         m = hits[0]
         st, r = ai.call("click_at", x=m["center_x"], y=m["center_y"])
         if not r.get("ok"):
@@ -139,7 +145,13 @@ def click_text(hwnd, keyword, expect=None, tries=5):
         for _ in range(8):
             ai.call("wait", ms=300)
             st, r = ai.call("find_text", keyword=expect, source="window", hwnd=hwnd)
-            if (r.get("data") or {}).get("matches"):
+            hits = (r.get("data") or {}).get("matches") or []
+            if hits:
+                if rightmost:
+                    hits.sort(key=lambda x: x["center_x"], reverse=True)
+                    if hits[0]["center_x"] > 300:  # 右侧正文区才算换页成功
+                        return m
+                    continue
                 return m
     return None
 
@@ -169,7 +181,7 @@ def main() -> int:
     # 先看设置页在不在（残留页面可能是测试台），不在就点侧栏「设置」
     st, r = ai.call("find_text", keyword="检查更新", source="window", hwnd=hwnd)
     if not ((r.get("data") or {}).get("matches")):
-        m = click_text(hwnd, "设置", expect="版本与更新")
+        m = click_text(hwnd, "设置", expect="设置", rightmost=True)
         print(f"[4] 点侧栏「设置」: {'OK' if m else 'FAIL'}")
         if not m:
             shot(hwnd, "4_settings_failed.png")
@@ -236,7 +248,26 @@ def main() -> int:
             print(f"[OK] 升级成功：{v0} → {v}")
             return 0
     print("[FAIL] 3 分钟内没变成 " + TARGET + f"（最后看到 {last}）")
+    dump_helper_log()
     return 1
+
+
+def dump_helper_log():
+    """把更新助手的日志打出来。
+
+    助手的 tracing 没有 subscriber（它在 tauri::Builder 之前就分流了），
+    以前它的日志全丢，表现就是「点了更新，程序关了，再也没起来」而零线索。
+    updater.rs 现在把每步写进 TEMP 下的 ocr-studio-update/helper.log，
+    这里负责在验收失败时把它亮出来。
+    """
+    import os
+    p = os.path.join(os.environ.get("TEMP", ""), "ocr-studio-update", "helper.log")
+    if not os.path.exists(p):
+        print("    （没有 helper.log，助手可能根本没起来）")
+        return
+    print("    ---- helper.log ----")
+    for line in io.open(p, encoding="utf-8", errors="replace").read().splitlines()[-25:]:
+        print("    " + line[:200])
 
 
 if __name__ == "__main__":

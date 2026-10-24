@@ -298,6 +298,11 @@ fn extract(zip: &Path, out: &Path) -> Result<(), String> {
 }
 
 /// 复制当前 exe 到临时目录并拉起它，让它替我们在主进程退出后覆盖文件。
+///
+/// 给助手的参数：`<暂存目录> <安装目录> <旧进程PID> <旧进程exe路径>`。
+/// 第 4 个参数是为了让助手能校验「PID 还是不是原来那个进程」——
+/// Windows 会复用 PID，只等 PID 消失会被复用坑到超时（实测过一次：
+/// 助手傻等 120 秒后放弃更新，界面上什么提示都没有）。
 fn launch_helper(staging: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -329,6 +334,7 @@ fn launch_helper(staging: &Path) -> Result<(), String> {
         .arg(staging)
         .arg(&install_dir)
         .arg(std::process::id().to_string())
+        .arg(&cur)
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("拉起更新助手失败：{e}"))?;
@@ -344,8 +350,8 @@ pub fn run_apply_if_requested() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
     let pos = args.iter().position(|a| a == APPLY_FLAG)?;
     let rest: Vec<&String> = args.iter().skip(pos + 1).collect();
-    if rest.len() < 3 {
-        eprintln!("{APPLY_FLAG} 参数不足：需要 <暂存目录> <安装目录> <旧进程PID>");
+    if rest.len() < 4 {
+        eprintln!("{APPLY_FLAG} 参数不足：需要 <暂存目录> <安装目录> <旧进程PID> <旧exe路径>");
         return Some(2);
     }
     let (staging, install, pid) = (
@@ -353,25 +359,35 @@ pub fn run_apply_if_requested() -> Option<i32> {
         PathBuf::from(rest[1]),
         rest[2].parse::<u32>().unwrap_or(0),
     );
-    Some(apply(staging, install, pid))
+    let old_exe = PathBuf::from(rest[3]);
+    Some(apply(staging, install, pid, old_exe))
 }
 
 /// 助手主逻辑：等旧进程退出 → 覆盖 → 拉起新版。
-fn apply(staging: PathBuf, install: PathBuf, old_pid: u32) -> i32 {
-    tracing::info!(
-        staging = %staging.display(),
-        install = %install.display(),
+///
+/// 全程写 `%TEMP%\ocr-studio-update\helper.log`。助手是 exe 最早分流的代码，
+/// tracing 的 subscriber 还没初始化，它的日志本来是全丢的 ——
+/// 结果是「点了更新，程序关了，再也没起来，而没有任何痕迹」。
+fn apply(staging: PathBuf, install: PathBuf, old_pid: u32, old_exe: PathBuf) -> i32 {
+    hlog(&format!(
+        "==== 助手开始 staging={} install={} old_pid={} old_exe={}",
+        staging.display(),
+        install.display(),
         old_pid,
-        "更新助手开始工作"
-    );
-    if !wait_pid_gone(old_pid, WAIT_EXIT) {
+        old_exe.display()
+    ));
+    if !wait_pid_gone(old_pid, &old_exe, WAIT_EXIT) {
         // 关键决策：宁可失败也不要在旧进程还活着时覆盖。
         // DLL 被占用时覆盖会得到半个新半个旧的目录，比不更新难救得多。
-        tracing::error!("等待旧进程退出超时，已放弃覆盖（目录保持原样）");
+        hlog(&format!(
+            "等待旧进程退出超时（{}s），放弃覆盖，目录保持原样",
+            WAIT_EXIT.as_secs()
+        ));
         return 3;
     }
+    hlog("旧进程已退出，开始覆盖文件");
     if let Err(e) = copy_tree(&staging, &install) {
-        tracing::error!("覆盖文件失败: {e}");
+        hlog(&format!("覆盖文件失败: {e}"));
         return 4;
     }
     // 清掉解压目录与 zip（失败无所谓，TEMP 会被系统回收）。
@@ -380,27 +396,51 @@ fn apply(staging: PathBuf, install: PathBuf, old_pid: u32) -> i32 {
     if let (Some(parent), Some(name)) = (staging.parent(), staging.file_name()) {
         let _ = std::fs::remove_file(parent.join(format!("{}.zip", name.to_string_lossy())));
     }
+    hlog("文件覆盖完成，尝试启动新版本");
 
-    let exe = install.join(EXE_NAME);
-    match std::process::Command::new(&exe).spawn() {
+    // 启动**旧进程那个路径**的 exe，而不是 `install\OCR Studio.exe`：
+    // 开发机上跑的是 cargo 产物 `ocr-studio.exe`（连字符），分发包里叫
+    // `OCR Studio.exe`（带空格），照名字拼会拉起一个从没运行过的文件。
+    match std::process::Command::new(&old_exe).spawn() {
         Ok(_) => {
-            tracing::info!("新版本已启动: {}", exe.display());
+            hlog(&format!("新版本已启动: {}", old_exe.display()));
             0
         }
         Err(e) => {
-            tracing::error!("新版本启动失败（文件已替换成功，请手动双击）: {e}");
+            hlog(&format!(
+                "新版本启动失败（文件已替换成功，请手动双击）: {e}"
+            ));
             5
         }
     }
 }
 
+/// 助手日志：一行一条追加到 `%TEMP%\ocr-studio-update\helper.log`。
+/// 写不进去就静默放弃 —— 日志本身不能把更新搞失败。
+fn hlog(msg: &str) {
+    let path = std::env::temp_dir().join("ocr-studio-update").join("helper.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{now}] {msg}");
+    }
+}
+
 /// 轮询 PID 是否消失。用 `OpenProcess` 而不是 tasklist：
 /// tasklist 会起控制台进程、要解析输出，还要处理中文本地化。
-fn wait_pid_gone(pid: u32, limit: Duration) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
+///
+/// **必须校验进程身份**：Windows 会复用 PID。旧进程退出后，别的程序抢到
+/// 同一个 PID，`OpenProcess` 会一直成功，助手就傻等到超时放弃更新 ——
+/// 界面表现为「点了更新，程序关了，再也没起来」。所以比对进程镜像路径，
+/// 路径变了（或取不到）就认定旧进程已经不在了。
+fn wait_pid_gone(pid: u32, old_exe: &Path, limit: Duration) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+
     if pid == 0 {
         return true;
     }
@@ -410,8 +450,19 @@ fn wait_pid_gone(pid: u32, limit: Duration) -> bool {
         let alive = unsafe {
             match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
                 Ok(h) => {
+                    let mut buf = [0u16; MAX_PATH as usize + 1];
+                    let mut len = buf.len() as u32;
+                    let path_ok = windows::Win32::System::Threading::QueryFullProcessImageNameW(
+                        h,
+                        windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+                        windows::core::PWSTR(buf.as_mut_ptr()),
+                        &mut len,
+                    );
                     let _ = CloseHandle(h);
-                    true
+                    // 路径取不到（进程正在退出）也当它还在，宁可多等一轮
+                    path_ok.is_ok()
+                        && String::from_utf16_lossy(&buf[..len as usize])
+                            .eq_ignore_ascii_case(&old_exe.to_string_lossy())
                 }
                 // 打不开通常是「进程已退出」（PID 不存在）
                 Err(_) => false,
