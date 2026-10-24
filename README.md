@@ -167,8 +167,8 @@ powershell -File scripts/release.ps1 -Notes "修了找图偏移；新增 xxx"
 
 ## HTTP 接口
 
-服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。**共 19 个端点**
-（认字 5 / 找图 9 / 看图 3 / 状态 2）。完整清单与参数以 `src/lib/endpoints.ts` 为
+服务只监听 `127.0.0.1`，默认端口 8848（可在设置里改）。**共 20 个端点**
+（认字 5 / 找图 9 / 看图 3 / 文档 1 / 状态 2）。完整清单与参数以 `src/lib/endpoints.ts` 为
 **唯一事实源**（首页概览与「接口」页同源），与 `src-tauri/src/api/routes.rs` 的 `PATHS` 一一对应。
 
 | 端点 | 说明 |
@@ -189,6 +189,7 @@ powershell -File scripts/release.ps1 -Notes "修了找图偏移；新增 xxx"
 | `POST /vision/detect` | **通用目标检测**（`engine: "yolo"`，返回类别框 + 置信度；OCR 引擎调它会得到 code 1002） |
 | `POST /vision/pipeline` | **检测 + 识别串联**：检测引擎找区域 → PP-OCR 框内认字（`detect_engine` 缺省 `yolo`） |
 | `POST /vision/qrcode` | **扫码**：读出二维码 / 条形码内容（纯 CPU，与引擎无关） |
+| `POST /ocr/biaoge` | **表格识别**：表格图 → HTML/TSV + 每个格子的坐标和文字（`mode` 选 auto/structure/detect） |
 
 请求体支持 JSON（`{"image": "<base64>"}`）与 multipart（文件字段 `image`），上限 32MB。
 

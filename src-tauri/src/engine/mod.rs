@@ -21,6 +21,7 @@ pub mod catalog;
 pub mod ddddocr;
 pub mod prompt;
 pub mod prompt_refs;
+pub mod table;
 pub mod yolo;
 
 use std::fmt;

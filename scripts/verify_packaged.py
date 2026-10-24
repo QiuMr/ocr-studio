@@ -44,6 +44,18 @@ ROOT = Path(__file__).resolve().parent.parent
 # 没装这套模型时相关断言直接跳过（标 SKIP，不算失败）。
 PROMPT_OK = False
 
+
+def _table_image() -> str:
+    """验收用的 3x3 表格图（assets/sheet.png）的 base64。
+
+    自己造而不是用真实文档截图：这张图的格子数、行列数都是确定的，
+    断言才能钉死「3 行 3 列、9 个格子」。
+    """
+    p = ROOT / "assets" / "sheet.png"
+    if not p.is_file():
+        raise SystemExit(f"[FAIL] 缺少验收用的表格图：{p}")
+    return base64.b64encode(p.read_bytes()).decode()
+
 # 本机若开着系统代理，127.0.0.1 也会被代理拦成 502，必须显式绕开
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -368,6 +380,42 @@ def main() -> int:
         st, body = req("POST", f"{base}/ai/v1/tool", b'{"tool":"get_status"}',
                        {"Content-Type": "application/json"})
         check("AI tool 未授权被拒（401/403）", st in (401, 403), f"status={st}")
+
+        # ---------- 7. 表格：模型没装时必须指路，装了要能真出 HTML ----------
+        print("\n=== /ocr/biaoge（表格） ===")
+        table_model = Path(exe).parent / "models" / "table" / "structure.onnx"
+        sheet = _table_image()
+        st, body = req("POST", f"{base}/ocr/biaoge",
+                       json.dumps({"image": sheet}).encode(),
+                       {"Content-Type": "application/json"})
+        text = body.decode("utf-8", "replace")
+        if not table_model.is_file():
+            # 缺模型是「还没装」，不是「服务坏了」：必须是 503 + 明确指路，
+            # 拍 500 会让调用方去查服务日志而不是去下载模型
+            check("表格模型未装时明确报错（503 引擎未就绪，不是 500）",
+                  st == 503, f"status={st}")
+            check("报错文案指路「模型库」",
+                  "模型库" in text, text[:160])
+            print("[SKIP] 表格识别模型未安装（主包按需下载），结构断言跳过")
+        else:
+            check("表格识别返回 200", st == 200, f"status={st} {text[:120]}")
+            try:
+                j = json.loads(body)
+            except Exception:
+                j = {}
+            d = j.get("data") or {}
+            tb = (d.get("tables") or [{}])[0]
+            check("识别出表格", d.get("count", 0) >= 1, f"count={d.get('count')}")
+            check("HTML 是 table 片段",
+                  str(tb.get("html", "")).startswith("<table>"), str(tb.get("html"))[:80])
+            check("行列数合理（3x3 的测试表）",
+                  tb.get("rows") == 3 and tb.get("cols") == 3,
+                  f"{tb.get('rows')}x{tb.get('cols')}")
+            check("格子数量对得上", len(tb.get("cells") or []) == 9,
+                  f"{len(tb.get('cells') or [])} 个")
+            check("文字填进了格子",
+                  any((c.get("text") or "").strip() for c in (tb.get("cells") or [])),
+                  "全部格子文字为空")
 
     finally:
         stop()

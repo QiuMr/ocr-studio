@@ -82,8 +82,17 @@
 - **粗筛也用 NCC 不用 SQDIFF**（SQDIFF 对亮度漂移敏感会漏检）。金字塔 ≤4 层，`MIN_TPL_SIDE=6`。纯色模板方差 0 → 拒命中。
 - 性能基线（release，1080p + 64px 模板）：60ms。
 
-## 截图与坐标（易错）
-- `GetWindowRect` 必须配 `GetWindowDC`/`PrintWindow`（原点=窗口左上角含边框）；`PrintWindow` 有「返回 TRUE 但全黑」假成功，要检测回退 BitBlt。
+## 表格识别（2026-10-24，**改前处理前必读**）
+- 模块 `src-tauri/src/engine/table.rs`：`detect.onnx`（PicoDet 表格定位，7.06MB）+ `structure.onnx`（SLANet-plus 结构，7.4MB），都在 `models/table/`，走模型库按需下载（id=`table`，13.3MB）。
+- 端点 `/ocr/biaoge` 一个三种 `mode`：`auto`（默认，先检测再逐张识别；**一张都没检测到要退回整图**并置 `fallback:true`）/ `structure` / `detect`。桌面端 `ocr_biaoge` 命令走同一个 `recognize_page`，两条通道必须给一样的结果。
+- **SLANet 前处理三条铁律**（错一条就是满屏 `colspan` 乱码）：① pad 填 **0** 不是 127.5（PaddleOCR 的 `PaddingTableImage` 是 zeros，paddlex 那套 127.5 是这个模型的毒药）；② 顺序是 resize 长边 488 → **归一化** → pad 成 488×488 → CHW；③ **BGR** 通道序配 **RGB 顺序**的 mean/std（PaddleOCR 的历史错配，别「顺手修正」）。
+- **bbox 两个轴都乘 `max(原图宽, 原图高)`**。图被 pad 成方形，输出坐标是相对那个方形的，按「x 乘宽、y 乘高」会得到压扁的框。
+- **解码不是 CTC**：逐位置 argmax + 遇 `eos` 停 + **不去重**；字符表 = `["sos"] + metadata["character"].split("\n") + ["eos"]`（该模型 48+2=50，正好等于输出通道数）。每个 `<td`/`<td></td>` 吃掉一个 bbox。
+- **PicoDet 的分数已经是概率，不要再 sigmoid**。再套一层会把背景的 0 变成 0.50，一次 detect 返回 4093 个框，auto 挨个去识别 → 六核满载 3500 CPU 秒、请求永不返回。判据：修好后阈值 0.5 只剩真正那一两个框，检测分 0.83~0.97。
+- `SLANet` 的输出位置数有限（实测 19/32 位置），**单元格太多的表会被截断** → `truncated: true` 必须显式返回，不能让人拿半张表当数据用。
+- DirectML 上 SLANet 预热会失败（Loop/Cast 算子不支持），自动降级 CPU，正常。
+
+## 截图与坐标（易错）- `GetWindowRect` 必须配 `GetWindowDC`/`PrintWindow`（原点=窗口左上角含边框）；`PrintWindow` 有「返回 TRUE 但全黑」假成功，要检测回退 BitBlt。
 - 命中坐标换算偏移只能由后端返回（`origin_x/origin_y`），不能前端反推（多显示器虚拟屏原点可能为负）。
 - find 类接口截图必须与匹配用**同一份像素**（`find_image` 返回 `preview`）。
 - 无人值守截图流程：杀进程 → `explorer.exe <exe>` → `scripts/shot_window.py "OCR Studio" out.png` → `scripts/ui_probe.py x y out.png`。被遮挡用 `scripts/win_capture.py`（PrintWindow + `PW_RENDERFULLCONTENT`）；`SetForegroundWindow` 受前台锁会静默失败。

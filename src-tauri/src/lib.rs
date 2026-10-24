@@ -745,6 +745,7 @@ pub fn run() {
             commands::vision_detect,
             commands::vision_pipeline,
             commands::vision_qrcode,
+            commands::ocr_biaoge,
             commands::get_health,
             commands::list_engines,
             commands::detect_models,

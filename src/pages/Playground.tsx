@@ -16,6 +16,7 @@ import {
   ScanLine,
   Settings2,
   Sparkles,
+  Table2,
   Type,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -38,6 +39,7 @@ import { Hint } from "../components/ui/hint";
 import { ImageViewer } from "../components/ImageViewer";
 import { FindPanel } from "../components/FindPanel";
 import { ScanPanel } from "../components/ScanPanel";
+import { TablePanel } from "../components/TablePanel";
 import {
   fileToBase64,
   detectImage,
@@ -102,9 +104,11 @@ export function Playground({
               ? "丢一张图进去，看 /ocr/shibie 返回什么。放进来就自动跑，不用点按钮。"
               : tab === "scan"
                 ? "丢一张图进去，把里面的二维码、条形码内容扫出来。放进来就自动扫。"
-                : // 三种找图模式的「要找什么」不一样（小图 / 模型 / 参考图或提示词），
-                  // 这里别写死某一个端点路径。
-                  "给一张大图，再告诉它要找什么——一张小图、一个检测模型，或一句提示。"}
+                : tab === "table"
+                  ? "丢一张表格图片进去，变成能复制进 Excel 的表格。整页文档也能自动找到表格。"
+                  : // 三种找图模式的「要找什么」不一样（小图 / 模型 / 参考图或提示词），
+                    // 这里别写死某一个端点路径。
+                    "给一张大图，再告诉它要找什么——一张小图、一个检测模型，或一句提示。"}
           </p>
         </div>
 
@@ -115,6 +119,7 @@ export function Playground({
               { v: "ocr" as OcrTab, label: "文字识别", icon: <Type className="h-3.5 w-3.5" /> },
               { v: "find" as OcrTab, label: "找图定位", icon: <Crosshair className="h-3.5 w-3.5" /> },
               { v: "scan" as OcrTab, label: "扫码", icon: <ScanLine className="h-3.5 w-3.5" /> },
+              { v: "table" as OcrTab, label: "表格", icon: <Table2 className="h-3.5 w-3.5" /> },
             ]
           ).map((it) => (
             <button
@@ -139,6 +144,8 @@ export function Playground({
         <OcrPanel onImageLoaded={setB64} pickToken={pickToken} />
       ) : tab === "scan" ? (
         <ScanPanel />
+      ) : tab === "table" ? (
+        <TablePanel />
       ) : (
         <FindPanel inheritedImage={b64} />
       )}

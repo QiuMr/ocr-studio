@@ -431,3 +431,21 @@
     overflow: hidden;
   }
 }
+
+/* 表格识别的 HTML 渲染。
+   模型只吐 <table><tr><td>（带 colspan/rowspan），不带任何样式，
+   所以边框、内边距、字号全靠这里。 */
+.table-render table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.table-render td {
+  padding: 3px 6px;
+  border: 1px solid #e5e5e5;
+  color: #262626;
+  vertical-align: top;
+  word-break: break-all;
+  min-width: 2em;
+}

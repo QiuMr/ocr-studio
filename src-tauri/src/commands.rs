@@ -69,6 +69,8 @@ pub async fn ocr_recognize(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let boxes = state
         .recognize_lines(&opts, img)
@@ -161,6 +163,8 @@ pub async fn ocr_quyuocr(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let crop = img.crop_imm(x0 as u32, y0 as u32, cw as u32, ch as u32);
     let mut boxes = state
@@ -268,6 +272,8 @@ pub async fn vision_detect(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -352,6 +358,8 @@ pub async fn vision_pipeline(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: opts.conf.unwrap_or(0.25),
@@ -439,6 +447,66 @@ pub struct BarcodeOut {
     pub width: u32,
     pub height: u32,
     pub elapsed_ms: u128,
+}
+
+/// 表格识别：与 HTTP 的 `/ocr/biaoge` 等价。
+///
+/// 两条通道必须给出一模一样的结果 —— 界面试跑和脚本联调看到的不一样是最难查的
+/// 一类问题，所以核心逻辑都在 `engine::table::recognize_page` 里，这里只做取参
+/// 和出参转换。
+///
+/// 文字识别失败**不让整个调用失败**：结构和坐标已经拿到了，没文字的表格
+/// 对「先看结构对不对」这个阶段仍然有用。
+#[tauri::command]
+pub async fn ocr_biaoge(
+    state: State<'_, Arc<AppState>>,
+    image: String,
+    mode: Option<String>,
+    with_text: Option<bool>,
+    conf: Option<f32>,
+) -> Result<crate::api::dto::TableData, String> {
+    let t0 = Instant::now();
+    let bytes = decode_base64_image(&image)?;
+    let img = decode_image(&bytes)?;
+    let (w, h) = (img.width(), img.height());
+
+    let Some(tmode) = crate::engine::table::Mode::parse(mode.as_deref().unwrap_or("auto")) else {
+        return err("mode 只能是 auto / structure / detect".to_string());
+    };
+    let c = conf.unwrap_or(0.5).clamp(0.05, 0.95);
+    let want_text = with_text.unwrap_or(true);
+
+    let root = state.models_root.clone();
+    let page = img.clone();
+    let (fallback, mut hits) = tokio::task::spawn_blocking(move || {
+        crate::engine::table::recognize_page(&root, &page, Device::Directml, tmode, c)
+    })
+    .await
+    .map_err(|e| format!("表格识别任务异常终止：{e}"))?
+    .map_err(|e| e.to_string())?;
+
+    if want_text && hits.iter().any(|h| h.result.is_some()) {
+        // 空白 opts = 用当前的 PP-OCR 配置
+        let opts = OcrOptions {
+            image: String::new(),
+            ..Default::default()
+        };
+        match state.recognize_lines(&opts, img).await {
+            Ok(lines) => routes::fill_table_text(&mut hits, &lines),
+            Err(e) => tracing::warn!("表格文字识别失败，结构与坐标照常返回: {e:?}"),
+        }
+    }
+
+    let tables = routes::to_table_dtos(hits);
+    Ok(crate::api::dto::TableData {
+        mode: if fallback { "structure" } else { tmode.as_str() }.to_string(),
+        fallback,
+        count: tables.len(),
+        tables,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    })
 }
 
 /// 二维码 / 条码识别：与 HTTP 的 `/vision/qrcode` 等价。
@@ -555,6 +623,8 @@ pub async fn ocr_danzijson(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let details = state
         .recognize_details(&opts, img)
@@ -1344,6 +1414,8 @@ pub async fn find_semantic(
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
     let detect = crate::engine::DetectOptions {
         conf_thresh: conf,

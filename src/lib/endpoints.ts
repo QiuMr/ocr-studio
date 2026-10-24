@@ -8,7 +8,7 @@
  * 改后端路由时**必须**同步这里。
  */
 
-export type EndpointGroup = "ocr" | "find" | "vision" | "status";
+export type EndpointGroup = "ocr" | "find" | "vision" | "doc" | "status";
 
 export interface Endpoint {
   method: "GET" | "POST" | "DELETE";
@@ -27,6 +27,7 @@ export const GROUP_LABEL: Record<EndpointGroup, string> = {
   ocr: "认字",
   find: "找图",
   vision: "看图",
+  doc: "文档",
   status: "状态",
 };
 
@@ -34,6 +35,7 @@ export const GROUP_DESC: Record<EndpointGroup, string> = {
   ocr: "把图片里的文字提取成字符串或坐标",
   find: "在一张大图里找东西的位置，返回坐标。模板找图比像素，语义找图靠模型认目标，提示找图当场给参考图或提示词",
   vision: "目标检测、先框区域再认字、扫码",
+  doc: "把文档图片变成结构化数据：表格出 HTML、单元格带坐标和文字",
   status: "查服务和引擎当前状态，脚本启动时先探一下",
 };
 
@@ -292,6 +294,26 @@ export const ENDPOINTS: Endpoint[] = [
       "count、codes[{text, format, points[[x,y]…], x, y, width, height}]、width、height、elapsed_ms；format 用 ZXing 规范名（QR_CODE / CODE_128 / EAN_13 …）",
   },
 
+  // ------------------------------------------------------------------ 文档
+  {
+    method: "POST",
+    path: "/ocr/biaoge",
+    title: "表格识别：图片里的表格变成 HTML 和数据",
+    note:
+      "一张图三种用法，靠 mode 选：auto（默认）先在整页里找表格再逐张识别，一张都没找到会退回「整图当一张表格」并给 fallback:true；" +
+      "structure 直接把整图当一张表格（图本来就是裁好的表格时最准）；detect 只给表格位置、不做识别。" +
+      "返回里的 text 是列间 Tab、行间换行的纯文本，可以直接粘进 Excel。",
+    params: [
+      { name: "image", required: true, desc: "图片 base64，或 multipart 的 file 字段" },
+      { name: "mode", desc: "auto（默认）/ structure / detect" },
+      { name: "with_text", desc: "是否给单元格填文字，默认 true。关掉只出结构，快一倍" },
+      { name: "conf", desc: "检测表格的置信度下限，默认 0.5" },
+      { name: "device", desc: "directml / cpu，默认 directml（不可用时自动降级）" },
+    ],
+    returns:
+      "mode、fallback、count、tables[]（每张表含 x/y/width/height、html、text、rows/cols、truncated、cells[]）",
+  },
+
   // ------------------------------------------------------------------ 状态
   {
     method: "GET",
@@ -330,6 +352,8 @@ export function groupOf(path: string): EndpointGroup {
   // 找图喂中文名的），在 ENDPOINTS 里也写在「找图」那一段。不特判的话它们会被
   // 前缀规则划进「看图」，接口页上就跑到别组去了（注释和实际分组对不上）。
   if (path === "/vision/prompt" || path === "/vision/promptref") return "find";
+  // 表格也是 /ocr 前缀，但它是「文档解析」不是「认字」，单独一组
+  if (path === "/ocr/biaoge") return "doc";
   if (path.startsWith("/vision")) return "vision";
   if (path.includes("zhaotu")) return "find";
   if (path.startsWith("/ocr/") && path !== "/ocr/health") return "ocr";

@@ -99,6 +99,16 @@ pub struct OcrOptions {
     /// 关掉更快，但一维码容易漏。
     #[serde(default)]
     pub try_harder: Option<bool>,
+    /// 表格识别分支（**仅 `/ocr/biaoge` 会读**）：
+    /// - `auto`（缺省）先检测页面里的表格，再逐张识别；一张都没检测到就退回整图
+    /// - `structure` 把整张图当成一张表格（图本来就是裁好的表格时用这个最准）
+    /// - `detect` 只找表格位置，不做结构识别（想自己裁图时用）
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 是否给单元格填文字（**仅 `/ocr/biaoge` 会读**），缺省 true。
+    /// 关掉只出结构和坐标，快一到两倍。
+    #[serde(default)]
+    pub with_text: Option<bool>,
 }
 
 /// `/vision/qrcode` 出参：一个识别到的码。
@@ -123,6 +133,64 @@ pub struct BarcodeData {
     /// 找到几个码
     pub count: usize,
     pub codes: Vec<BarcodeHitDto>,
+    pub width: u32,
+    pub height: u32,
+    pub elapsed_ms: u128,
+}
+
+// ---------------------------------------------------------------- 表格
+
+/// 一个单元格（`/ocr/biaoge` 出参）。
+///
+/// 坐标是**原图像素**，不是表格局部坐标 —— 整页识别出多个表格时，
+/// 前端/脚本拿它直接画框就能对上位置，不用自己加偏移。
+#[derive(Debug, Clone, Serialize)]
+pub struct TableCellDto {
+    pub row: usize,
+    pub col: usize,
+    pub rowspan: usize,
+    pub colspan: usize,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// 格内文字。`with_text=false` 时为空
+    pub text: String,
+}
+
+/// 一张识别出来的表格。
+#[derive(Debug, Clone, Serialize)]
+pub struct TableDto {
+    /// 在整页里的位置。`mode=structure` 时就是整张图（0,0,width,height）
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// 检测置信度。`mode=structure` 时固定 1.0（没走检测）
+    pub detect_score: f32,
+    /// 结构 token 的平均置信度
+    pub structure_score: f32,
+    pub rows: usize,
+    pub cols: usize,
+    /// 单元格太多没识别完（模型输出位置有限）
+    pub truncated: bool,
+    /// `<table>` 片段，带 colspan/rowspan 和格内文字
+    pub html: String,
+    /// 纯文本版：列间 `\t`、行间 `\n`，可以直接粘进 Excel
+    pub text: String,
+    pub cells: Vec<TableCellDto>,
+}
+
+/// `/ocr/biaoge` 出参。
+#[derive(Debug, Serialize)]
+pub struct TableData {
+    /// 实际走的分支：`auto` / `structure` / `detect`
+    pub mode: String,
+    /// `auto` 一个表格都没检测到、退回「整图当一张表格」时为 true。
+    /// 显式给出来，否则用户会以为检测模型正常工作只是图里没表
+    pub fallback: bool,
+    pub count: usize,
+    pub tables: Vec<TableDto>,
     pub width: u32,
     pub height: u32,
     pub elapsed_ms: u128,

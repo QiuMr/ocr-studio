@@ -1,32 +1,39 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-23 深夜（上线版本控制：GitHub 仓库 + 版本号收敛 + 自动更新）
+> 最后更新：2026-10-24（表格识别：表格图 → HTML/TSV，整页自动找表格）
 
 ---
 
 ## 0. 一句话现状
 
-**本轮（10-23 深夜）：版本控制与自动更新。** 用户的原话是「有没有什么能做版本控制
-的东西……升级了用户能自动升级版本？」——本质是两个问题：代码别丢、用户能升级。
+**本轮（10-24）：表格识别。** 用户否掉了 YOLO26n（「才一点点类别，没用」），
+要「两个表格的」——正好是一对配套模型：
 
-**代码**：仓库推到 <https://github.com/QiuMr/ocr-studio>（public）。34 个提交、`.git` 15MB、
-最大文件 1.67MB，**不需要 Git LFS**。公开而非私有是刻意的：Release 资产匿名可下载，
-自动更新才能做成「零操作」；私有仓库拉资产要 token，程序自己拿不到。
+- `detect.onnx` **7.06MB**（PicoDet，`PP-DocLayout-S` 系列的 table-only 版）：
+  在整页文档里找表格在哪
+- `structure.onnx` **7.4MB**（SLANet-plus）：把一张表格图变成 HTML + 每个格子
 
-**版本号三处硬编码收敛为一处**（`tauri.conf.json` 的 `version`）：`build.rs` 注入
-`OCR_STUDIO_VERSION` 给 Rust 侧与 `/ocr/health`；`pack_exe.ps1` 与 `release.ps1` 读同一文件。
-曾经 `pack_exe.ps1` 里有一份独立的 `$version = "0.1.0"`，改版本时漏改就会让 zip 名和
-程序内版本对不上——用户报版本号时两边说的不是一回事。
+两个都走模型库（id=`table`，13.3MB），主包体积**不变**（仍 50MB）。
 
-**自动更新不走 `tauri-plugin-updater`**：那个只认安装器（NSIS/MSI）产出的签名包，
-本项目 `bundle.active = false` 发的是免安装 zip，硬套它会在「找不到安装器」和
-「已是最新」之间反复。改走自研的「下载 → 退出 → 助手替换 → 重启」：
-`updater.rs` 把当前 exe 复制到 `%TEMP%` 当助手，用 `OpenProcess` 轮询 PID 确认旧进程
-真的退出后再覆盖（`onnxruntime.dll` 被占用时覆盖会半途而废，目录停在半新半旧）。
-助手在 `tauri::Builder` **之前**分流，否则单实例插件会把它踢掉。
+端点 `/ocr/biaoge` 一个三种 `mode`：`auto`（默认，先检测再逐张识别；一张都没
+检测到就退回整图，并置 `fallback:true`）/ `structure`（整图当一张表）/ `detect`
+（只要位置）。出参同时给三份：`html`（带 colspan/rowspan）、`text`（Tab 分隔，
+直接粘 Excel）、`cells`（每个格子的坐标和文字）。试跑页新增「表格」页，
+识别结果直接渲染成表、图上叠格子框。
 
-上一轮：移除语言提示找图（`mode=text` + 242MB 文本塔 + 词表整条链）。
+三个必须照抄的前处理/后处理细节（踩了两次才全对）：
+1. **pad 填 0 不是 127.5** —— 填 127.5 会输出 500 个 `colspan` 垃圾 token。
+2. **bbox 两个轴都乘 `max(宽, 高)`** —— 图被 pad 成方形，坐标是相对方形的。
+3. **PicoDet 的分数已经是概率，不要再 sigmoid** —— 再套一层会让背景的 0 变成
+   0.50，一次检测返回 4093 个框，auto 挨个去识别把六核跑满 3500 CPU 秒、请求
+   永不返回。这一条是「以为在做推理其实在死循环」的典型。
+
+上一轮：版本控制与自动更新。仓库推到 <https://github.com/QiuMr/ocr-studio>（public）。
+版本号收敛到 `tauri.conf.json` 一处；自动更新自研（不走 `tauri-plugin-updater`，
+它只认安装器），流程是「下载 → 校验 → 退出 → 助手替换 → 拉起新版」。
+
+更早：移除语言提示找图（`mode=text` + 242MB 文本塔 + 词表整条链）。
 实测真实界面截图上 12 个中文词最高只有 0.207，YOLOE 的文本提示对 UI 细粒度概念
 本就不可用。留下图找图（VPE）+ 中文参考库（`/vision/promptref` → `mode=ref`）。
 

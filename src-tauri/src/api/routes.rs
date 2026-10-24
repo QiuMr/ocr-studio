@@ -31,7 +31,7 @@ use super::dto::{
     Box4, CharDto, DanziData, DanziLineDto, DetectData, DetectHitDto, DuohangData, FindData,
     FindHitDto, FindOptions, HealthDto, LineDto, OcrOptions, PipelineData, PipelineRegionDto,
     RegionOcrData, ShibieData, ZhaoziData, CODE_ENGINE_NOT_READY, CODE_METHOD_NOT_ALLOWED,
-    CODE_NOT_FOUND, EngineItemDto, EngineListData,
+    CODE_NOT_FOUND, EngineItemDto, EngineListData, TableCellDto, TableData, TableDto,
 };
 use super::state::AppState;
 use crate::capture::{self, ScreenRegion};
@@ -124,6 +124,7 @@ pub fn build_router_with(allow_browser: bool) -> Router<Arc<AppState>> {
         .route(P_DETECT, post(vision_detect))
         .route(P_PIPELINE, post(vision_pipeline))
         .route(P_QRCODE, post(vision_qrcode))
+        .route(P_BIAOGE, post(biaoge))
         .route(P_PROMPT, post(vision_prompt))
         .route(
             P_PROMPTREF,
@@ -181,11 +182,14 @@ const P_QRCODE: &str = "/vision/qrcode";
 const P_PROMPT: &str = "/vision/prompt";
 /// 中文视觉参考库：把「一个中文名」绑到「一块参考图区域」，之后按中文名找
 const P_PROMPTREF: &str = "/vision/promptref";
+/// 表格：整页找表格 + 表格图出 HTML。一个端点三种模式（`mode`）
+const P_BIAOGE: &str = "/ocr/biaoge";
 
 /// 全部端点（给 404 提示与自检用）。
 pub const PATHS: &[&str] = &[
     P_SHIBIE, P_ZHAOZI, P_DUOHANG, P_DANZI, P_QUYU, P_TU1, P_TU2, P_JU1, P_JU2, P_PINGMU1,
     P_PINGMU2, P_YUYI, P_HEALTH, P_ENGINES, P_DETECT, P_PIPELINE, P_QRCODE, P_PROMPT, P_PROMPTREF,
+    P_BIAOGE,
 ];
 
 // ---------------------------------------------------------------- 兜底与 CORS
@@ -394,6 +398,8 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
         region: fields.get("region").and_then(|s| parse_region_str(s)),
         barcode_formats: fields.get("barcode_formats").and_then(|s| parse_str_list(s)),
         try_harder: fields.get("try_harder").and_then(|s| parse_bool(s)),
+        mode: None,
+        with_text: None,
     };
     Ok((img, opts))
 }
@@ -852,6 +858,196 @@ async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Res
         elapsed_ms: t0.elapsed().as_millis(),
     }))
     .into_response()
+}
+
+/// POST /ocr/biaoge —— 表格识别。
+///
+/// 一个端点三种模式，靠 `mode` 区分（不按来源分端点，和找图那边一个规矩）：
+/// - `auto`（缺省）：先在整页里找表格，再逐张识别。一张都没找到时**退回整图**
+///   并置 `fallback: true` —— 用户拍的往往就是一张裁好的表格，检测模型在这种
+///   「满屏都是表格」的图上反而可能给空结果。
+/// - `structure`：整图当一张表格。图本来就是表格时最准。
+/// - `detect`：只给位置，不做结构识别。适合「我自己裁图再调 structure」的脚本。
+///
+/// 出参的 `text` 是列间 `\t`、行间 `\n` 的纯文本，可以直接粘进 Excel；
+/// `html` 是带 colspan/rowspan 的 `<table>` 片段；`cells` 给需要精确坐标的场景。
+///
+/// 文字识别失败**不让整个请求失败**：结构和坐标已经拿到了，没文字的表格
+/// 对「先看结构对不对」这个阶段仍然有用。失败只记日志。
+async fn biaoge(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let t0 = Instant::now();
+    let (img, opts) = match parse_recognize(req).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let (w, h) = (img.width(), img.height());
+
+    let Some(tmode) = crate::engine::table::Mode::parse(opts.mode.as_deref().unwrap_or("auto"))
+    else {
+        return ApiError::BadRequest(format!(
+            "mode 只能是 auto / structure / detect，收到「{}」",
+            opts.mode.as_deref().unwrap_or("")
+        ))
+        .into_response();
+    };
+
+    // 缺省跟项目其它地方一致：优先 DirectML，模型层会自动降级到 CPU
+    let device = match opts
+        .device
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cpu") => Device::Cpu,
+        _ => Device::Directml,
+    };
+    // 检测阈值：太低会把表格里的格线当表格，太高会漏。0.5 是 PicoDet 的常规值
+    let conf = opts.conf.unwrap_or(0.5).clamp(0.05, 0.95);
+    let with_text = opts.with_text.unwrap_or(true);
+
+    let root = state.models_root.clone();
+    let page = img.clone();
+
+    // 检测和结构识别都是同步的 CPU/GPU 活，整段挪出 async 线程
+    let task = tokio::task::spawn_blocking(move || {
+        crate::engine::table::recognize_page(&root, &page, device, tmode, conf)
+    })
+    .await;
+
+    let (fallback, mut hits) = match task {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            // 缺模型不是「服务故障」：拍 500 会让调用方以为是 bug 去查服务，
+            // 实际要做的是去设置页下一个模型。EngineNotReady 给 503 + 明确文案。
+            return match e {
+                crate::engine::VisionError::NotReady(m) => {
+                    ApiError::EngineNotReady(m).into_response()
+                }
+                other => super::state::map_engine_err_ctx(other, Some("表格识别"))
+                    .into_response(),
+            };
+        }
+        Err(e) => {
+            return ApiError::Internal(format!("表格识别任务异常终止: {e}")).into_response()
+        }
+    };
+
+    // 整图 OCR 一次，再把每行文字按中心点塞进对应单元格。
+    // 逐格 OCR 会慢好几倍，而且表格线会被当成字符笔画。
+    if with_text && hits.iter().any(|h| h.result.is_some()) {
+        match state.recognize_lines(&opts, img).await {
+            Ok(lines) => fill_table_text(&mut hits, &lines),
+            Err(e) => tracing::warn!("表格文字识别失败，结构与坐标照常返回: {e:?}"),
+        }
+    }
+
+    let tables = to_table_dtos(hits);
+
+    Json(ApiResp::ok(TableData {
+        // 回退时实际走的是 structure，如实说，不要让调用方以为检测跑通了
+        mode: if fallback { "structure" } else { tmode.as_str() }.to_string(),
+        fallback,
+        count: tables.len(),
+        tables,
+        width: w,
+        height: h,
+        elapsed_ms: t0.elapsed().as_millis(),
+    }))
+    .into_response()
+}
+
+/// 把引擎层的识别结果转成出参。HTTP 与桌面端命令共用，保证两边字段一致。
+pub(crate) fn to_table_dtos(hits: Vec<crate::engine::table::PageHit>) -> Vec<TableDto> {
+    hits.into_iter()
+        .map(|hit| {
+            let (structure_score, rows, cols, truncated, html, text, cells) = match hit.result {
+                Some(r) => {
+                    let rows = r.cells.iter().map(|c| c.row + c.rowspan).max().unwrap_or(0);
+                    let tsv = r.to_tsv();
+                    let cells = r
+                        .cells
+                        .iter()
+                        .map(|c| TableCellDto {
+                            row: c.row,
+                            col: c.col,
+                            rowspan: c.rowspan,
+                            colspan: c.colspan,
+                            x: c.x,
+                            y: c.y,
+                            width: c.width,
+                            height: c.height,
+                            text: c.text.clone(),
+                        })
+                        .collect();
+                    (r.score, rows, r.cols, r.truncated, r.html, tsv, cells)
+                }
+                None => (0.0, 0, 0, false, String::new(), String::new(), Vec::new()),
+            };
+            TableDto {
+                x: hit.area.x,
+                y: hit.area.y,
+                width: hit.area.width,
+                height: hit.area.height,
+                detect_score: hit.area.score,
+                structure_score,
+                rows,
+                cols,
+                truncated,
+                html,
+                text,
+                cells,
+            }
+        })
+        .collect()
+}
+
+/// 把整图 OCR 的每行文字按中心点归到单元格。
+///
+/// 「包含点」而不是「相交」：一行字通常完整落在格内，用中心点判定最简单也最稳；
+/// 跨格的长文本本来就会被 OCR 切成多行，按中心点分开反而是对的。
+/// 同一格里多行按 `line` 的原顺序拼，空格分隔（不换行，粘 Excel 时一行一格）。
+pub(crate) fn fill_table_text(hits: &mut [crate::engine::table::PageHit], lines: &[TextLine]) {
+    for hit in hits.iter_mut() {
+        let Some(res) = hit.result.as_mut() else {
+            continue;
+        };
+        for line in lines {
+            let cx = line.points.iter().map(|p| p.0).sum::<f64>() / 4.0;
+            let cy = line.points.iter().map(|p| p.1).sum::<f64>() / 4.0;
+
+            // 命中多个格子时取面积最小的那个：嵌套表/合并格的边界上，
+            // 小格才是真正装这行字的容器
+            let mut best: Option<usize> = None;
+            for (i, c) in res.cells.iter().enumerate() {
+                let inside = cx >= c.x as f64
+                    && cx <= (c.x + c.width) as f64
+                    && cy >= c.y as f64
+                    && cy <= (c.y + c.height) as f64;
+                if !inside {
+                    continue;
+                }
+                match best {
+                    Some(b) => {
+                        let cur = res.cells[b].width as u64 * res.cells[b].height as u64;
+                        let now = c.width as u64 * c.height as u64;
+                        if now < cur {
+                            best = Some(i);
+                        }
+                    }
+                    None => best = Some(i),
+                }
+            }
+            if let Some(i) = best {
+                let slot = &mut res.cells[i].text;
+                if !slot.is_empty() {
+                    slot.push(' ');
+                }
+                slot.push_str(&line.text);
+            }
+        }
+        // 文字填完要重建 HTML（HTML 里带格内文字）
+        res.refresh();
+    }
 }
 
 /// POST /vision/prompt —— 运行时提示找图：图找图 / 按名字找。
@@ -1655,6 +1851,8 @@ async fn yuyizhaotu(State(state): State<Arc<AppState>>, req: Request) -> Respons
         region: None,
         barcode_formats: None,
         try_harder: None,
+        mode: None,
+        with_text: None,
     };
 
     let dets = match state

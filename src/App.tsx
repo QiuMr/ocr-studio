@@ -13,7 +13,7 @@ import { writeCachedUpdate } from "./lib/update";
 
 export type PageKey = "service" | "api" | "playground" | "logs" | "settings";
 /** 试跑页的三个 tab：认字 / 找图 / 扫码 */
-export type OcrTab = "ocr" | "find" | "scan";
+export type OcrTab = "ocr" | "find" | "scan" | "table";
 
 /**
  * 导航文案原则：**用用户想干的事，不用程序里的模块名**。

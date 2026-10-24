@@ -79,6 +79,19 @@ ENTRIES = [
         "endpoints": ["/vision/prompt", "/vision/promptref"],
         "recommended": True,
     },
+    {
+        # 一个能力两个模型，所以打成一个包：只下结构模型的话「在整页里找表格」
+        # 就用不了，只下检测模型的话根本出不了 HTML —— 拆开卖只会让人下成半残。
+        "id": "table",
+        "name": "表格识别",
+        "group": "doc",
+        "note": "表格图片直接出 HTML 表格，每个单元格带坐标和文字；也能在整页文档里自动找到表格位置。",
+        "dir": "table",
+        "src": ["dir:table"],
+        "requires": ["structure.onnx", "detect.onnx"],
+        "endpoints": ["/ocr/biaoge"],
+        "recommended": True,
+    },
 ]
 
 

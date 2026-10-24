@@ -460,3 +460,51 @@ export interface ModelProgress {
   /** download / verify / extract / done */
   phase: "download" | "verify" | "extract" | "done";
 }
+
+// ---------------------------------------------------------------- 表格
+
+/** 表格里的一格。坐标是**原图像素**，整页多个表格时不用自己加偏移。 */
+export interface TableCell {
+  row: number;
+  col: number;
+  rowspan: number;
+  colspan: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+}
+
+/** 一张识别出来的表格。 */
+export interface TableItem {
+  /** 在整页里的位置 */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  detect_score: number;
+  structure_score: number;
+  rows: number;
+  cols: number;
+  /** 单元格太多没识别完（模型输出位置有限） */
+  truncated: boolean;
+  /** 带 colspan/rowspan 的 `<table>` 片段 */
+  html: string;
+  /** 列间 Tab、行间换行的纯文本，可直接粘进 Excel */
+  text: string;
+  cells: TableCell[];
+}
+
+/** `/ocr/biaoge` 的出参。 */
+export interface TableResult {
+  /** 实际走的分支 */
+  mode: "auto" | "structure" | "detect";
+  /** auto 一个表格都没检测到、退回整图时为 true */
+  fallback: boolean;
+  count: number;
+  tables: TableItem[];
+  width: number;
+  height: number;
+  elapsed_ms: number;
+}

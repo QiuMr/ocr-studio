@@ -74,6 +74,24 @@
         "yoloe26n_vpe.onnx"
       ],
       "recommended": true
+    },
+    {
+      "id": "table",
+      "name": "表格识别",
+      "group": "doc",
+      "note": "表格图片直接出 HTML 表格，每个单元格带坐标和文字；也能在整页文档里自动找到表格位置。",
+      "file": "table-v1.zip",
+      "dir": "table",
+      "size": 13983611,
+      "sha256": "e2a769212f92d7e65ecaba69a6ae41f87668e0abf9b651bfb0aee344cc157373",
+      "endpoints": [
+        "/ocr/biaoge"
+      ],
+      "requires": [
+        "structure.onnx",
+        "detect.onnx"
+      ],
+      "recommended": true
     }
   ]
 }

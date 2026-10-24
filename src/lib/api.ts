@@ -33,6 +33,7 @@ import type {
   UpdateProgress,
   OptionalModel,
   ModelProgress,
+  TableResult,
 } from "../types";
 
 /** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
@@ -232,6 +233,45 @@ export async function regionOcr(
     throw new Error(json.msg || `HTTP ${res.status}`);
   }
   return json.data as RegionOcrResult;
+}
+
+/**
+ * 表格识别（`/ocr/biaoge`）。
+ *
+ * 三种模式：
+ * - `auto`（默认）先在整页里找表格，再逐张识别；一张都没找到会退回整图
+ * - `structure` 把整图当成一张表格（图本来就是裁好的表格时最准）
+ * - `detect` 只给表格位置
+ *
+ * 需要先在「设置 → 模型库」下载「表格识别」，否则会收到 1002 + 指路文案。
+ */
+export async function recognizeTable(
+  image: string,
+  opts?: { mode?: "auto" | "structure" | "detect"; withText?: boolean; conf?: number },
+): Promise<TableResult> {
+  if (isTauri()) {
+    return invoke<TableResult>("ocr_biaoge", {
+      image,
+      mode: opts?.mode ?? null,
+      with_text: opts?.withText ?? null,
+      conf: opts?.conf ?? null,
+    });
+  }
+  const res = await fetch(`${HTTP_BASE}/ocr/biaoge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image,
+      ...(opts?.mode ? { mode: opts.mode } : {}),
+      ...(opts?.withText === undefined ? {} : { with_text: opts.withText }),
+      ...(opts?.conf === undefined ? {} : { conf: opts.conf }),
+    }),
+  });
+  const json = await res.json();
+  if (json.code !== 0) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.data as TableResult;
 }
 
 /**

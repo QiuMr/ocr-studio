@@ -32,6 +32,12 @@ pub fn ort_env() -> OrtResult<&'static Environment> {
         return Ok(env);
     }
     let env = ort::init().with_name("ocr-studio").build()?;
+    // ONNX Runtime 的日志会整条转发进 tracing。SLANet 的输入维度是动态的，
+    // 每推理一次就刷几十条 "Expected shape from model of {} does not match"
+    // 的 WARN —— 实测一天写出 120 万行日志，真正有用的 INFO 全被埋掉，
+    // 而且同步写盘会拖慢推理。只留 ERROR：DML 注册失败、算子不支持这类
+    // 关键信息本身就是 ERROR 级，不会丢。
+    env.set_log_level(ort::logging::LogLevel::Error);
     let _ = ORT_ENV.set(env);
     Ok(ORT_ENV.get().expect("ORT_ENV 刚被设置"))
 }
