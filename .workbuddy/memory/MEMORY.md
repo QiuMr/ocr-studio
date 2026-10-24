@@ -38,6 +38,7 @@
 - **safe-delete 按 turn 累计**：同 turn 删 >50 文件被拒，连 `Remove-Item -Recurse` 也拦；绕法 `[System.IO.Directory]::Delete(绝对路径, $true)`。
 - **debug target 的 rlib 会瞬时损坏**（`invalid metadata files for crate 'test'` + `link.exe exit 1102`）→ **重跑一次即恢复**，别改代码。
 - **Bash 的 python ≠ PowerShell 的 python**：带依赖（PIL/cv2/numpy）的脚本一律用 PowerShell 跑。**管道让退出码失真**：判 `test result:` 行 / `[PASS] 产物` + `[结论] 资源已嵌入`。
+- **验收脚本（`verify_upgrade.py`）撞出来的 OCR 坑**：① 侧栏 12px 小字识别不稳，实测把「服务」认成「设置」→ 侧栏点击改为「取侧栏最下面一项」（布局固定）；② OCR 会在窗口底部黑边/任务栏区域产生**幻觉文字**（实测 "•Wo.r.n"，y=834 远超窗高 729）→ 取最下项必须排除底部 120px；③ 找蓝底白字按钮（「立即更新」）用颜色兜底时，要取**最靠下且中心在左 62%** 的蓝团 —— 设置页有 4 个蓝按钮（模型卡 3 个「下载」+ 更新卡 1 个「立即更新」），取「最密集」会命中下载按钮，点下去开始下模型、升级什么都没发生；④ 换页验证用正文大标题（26px）且阈值 `center_x > 240`（写 300 会漏：窗口贴左时正文标题才 279）。
 - **git push 在 bash 里必失败**（凭据 helper 取不到 gh，报 `could not read Username`）；用 PowerShell 推（stderr 进度会被 PS 当成 error record，看 `..HEAD -> master` 判断成功）。
 
 ## 精度基线（改前处理前必读）
@@ -94,6 +95,45 @@
   - 键鼠注入在 `src/input.rs`（SendInput + 虚拟屏绝对坐标归一化 + SetForegroundWindow）；AI 拿到的坐标一律是**屏幕绝对坐标**，可直接喂 `click_at`。**35 个工具**（只读 10 / 读屏幕 11 / 动手 14），`risk_counts()`/`highlights()` 是设置页工具数的唯一来源。
   - **AI 操控四条实测限制**（docs/AI.md §7.5）：① PP-OCR small 对**白字彩底按钮**连检测框都不出（蓝底「立即更新」直接搜不到）→ 兜底是截图后按颜色聚类定位主按钮；② 12px 小灰字识别率差；③ 滚轮内容要先 `scroll`，而**等元素出现期间不能滚屏**（会把元素滚出视野，造成「出来了却搜不到」的误判）；④ 点击返回 ok ≠ 界面响应，自动化必须点完复核。
   - **验收脚本**：`scripts/verify_ai.py`（35 工具全表 + 参数校验 + 401/404，`--inject` 真注入记事本回环）、`scripts/verify_upgrade.py`（用 AI 接口操作自己界面完成升级，实测 0.1.6→0.1.7）。
+
+## 界面返工 / 自动升级 / 焦点抢占（2026-10-24 深夜，v0.1.8~0.1.12）
+
+**表格接口曾在界面文档里静默消失**（v0.1.8 修）：`groupOf()` 把 `/ocr/biaoge`
+归到 `doc` 组，但 `ApiPage` 的 `ORDER` 与 `ServicePage` 的 `GROUPS` 各是一份
+**手写组数组**，加组时漏改 → TypeScript 不报错（普通数组不是 Record），
+而页面「共 20 个端点」又是对的，肉眼看不出少了一组。
+根治：组顺序收成 `endpoints.ts` 的 `GROUP_ORDER`（唯一事实源，两页派生）；
+首页图标必须 `Record<EndpointGroup, ...>`（加组忘配图标直接编译报错）；
+`scripts/check_endpoints.py` 挂进 `build.ps1` Step 3（静态比对前端 ENDPOINTS
+与后端 PATHS、GROUP_ORDER 覆盖所有组、两页真的派生）。**加新组/新端点后必跑。**
+
+**自动更新两大坑**（v0.1.10/0.1.11 修，实测两次升级成功）：
+- 助手等旧进程退出用 `OpenProcess` 轮询 PID 会被 **PID 复用**坑到超时
+  （旧进程退出后别的程序抢到同 PID，`OpenProcess` 一直成功，助手傻等 120s 放弃，
+  界面表现为「点了更新程序关了再也没起来」）。必须比对
+  `QueryFullProcessImageNameW` 镜像路径做身份校验。
+- 助手在 `tauri::Builder` 之前分流，**tracing subscriber 还没初始化，日志全丢**。
+  现在写 `%TEMP%/ocr-studio-update/helper.log`（每步一行）。
+- 助手启动新版本要用**旧进程的 exe 路径**：开发机是 `ocr-studio.exe`（连字符），
+  分发包是 `OCR Studio.exe`（带空格），照 `install.join(EXE_NAME)` 拼会拉起另一个文件。
+
+**`focus_window` 抢不到前台**（v0.1.11 修）：Windows 前台锁不允许后台进程
+`SetForegroundWindow`（静默失败），而输入只进前台窗口 → `click_at`/`type_text`
+全部打空。三道：空 ALT 键 → `AttachThreadInput` 贴输入线程借身份前置 →
+前置后读 `GetForegroundWindow` 复核（该 API 有时成功也返回 false）。
+实测 5/5（修复前 0/8）。
+
+**模型库必须包含出厂自带的 `ppocr-small`**（v0.1.12 修）：分发包带
+`models/small`、识别开箱即用，但 catalog 里没这一项 → 界面显示「5 个可选模型
+全部未安装」而识别明明好的，用户只会以为程序坏了。清单 6 项，small 排第一。
+上传 catalog 后要核对线上条目数（GitHub release 资产有 CDN 缓存，且别把
+`release/models/` 下的旧 catalog 传上去 —— 实测踩过：assets 里是新的、
+上传的是旧的）。
+
+**AI 接口坐标口径**：`find_text`/`ocr_image` 返回的 `center_x/center_y`
+**始终是屏幕绝对坐标**（带不带 `region` 都一样，`line_json` 里加了 origin）——
+曾误判 region 路径是相对坐标而多加一次 origin，白绕一圈。对比实测：
+同一行带 region 199、不带 196。
 
 ## 模型根目录解析（开发机陷阱）
 - `resolve_models_root()` 顺序：`OCR_MODELS_ROOT` → exe 旁 `models/` → exe 向上 1~4 级 → `workspace_root()/models` → cwd；**第一个含 `small/det.onnx` 的胜出**。开发机跑 `D:\rust-target\release\*.exe` 时 exe 旁没有 models，会一路回退到**仓库根 models**（所以开发态什么模型都在）。
