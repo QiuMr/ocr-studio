@@ -129,10 +129,22 @@
 - **AI 服务** `api/ai.rs` + `api/ai_tools.rs`（复用 8848，默认关）：Bearer 连接码、120 次/分限流、`request_id` 幂等、写操作审计、readonly/write/dangerous 三档；信封 `{ok,summary,data,error}`；未知工具给 `closest_tool` 候选；`/ai/v1/*` **刻意不进 `PATHS`**（那是用户脚本清单）。工具 `find_target`/`teach_target`/`list_targets`（原名 `find_word` 已改）。设置页「AI 控制」面板管理开关/连接码/提示词。
 
 ## 打包与分发
-- `scripts/pack_exe.ps1` 产 `release/OCR-Studio-<ver>-win64.zip`（免安装）。剔掉：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、`inspect.json`、整个 `models/_fixtures/`、`models/small/dump/`、`models/detect/yolo/` 下除 README 外全部。**新增夹具目录要同步加进来**。
+- **主包只带 PP-OCRv6 small，体积基线 50MB**（2026-10-24 起）。其余模型全部走设置页
+  「模型库」按需下载。zips 从 225.4MB 砍到 50.3MB。**不要再往回加模型**——
+  `pack_exe.ps1` 只拷 `models/small`（5 个文件）+ `detect/yolo/README.txt`。
+- 可选模型：`scripts/build_models.py` 一条命令打包 + 生成清单 + 上传（`--upload`）。
+  模型挂固定 tag `models` 的 Release，**必须 `--prerelease`**：正式 release 会抢走
+  `releases/latest`，`latest.json` 404，自动更新全线报废。
+- **`rename` 跨卷会失败**（`ERROR_NOT_SAME_DEVICE`）：解压暂存目录必须和目标**同级**
+  （`models/.tmp_<id>`）。放 `%APPDATA%` 再 rename 到 D: 会把「包下好了、校验过了、
+  解压也成了」全卡在最后一步，界面停在「正在校验」不动。
+- 一个可选条目 = 一个 zip（PP-OCRv6 一档 5 个文件，逐个下发无法判断「装没装全」）。
+- 清单三层：网络 → 本地缓存(1h) → 内置 `src-tauri/assets/catalog.json`（`include_str!`）。
+- `scripts/pack_exe.ps1` 产 `release/OCR-Studio-<ver>-win64.zip`（免安装）。剔掉：`*.pt`、`*.bak`、`ref_*.json`、`reference_*.json`、`inspect.json`。**新增夹具目录要同步加进来**。
 - `.gitignore` 必须有 `models/**/*.ts`（MobileCLIP2-B 权重后缀 `.ts` 会被当 TS 源码，253MB）。不能裸写 `*.ts`。另需忽略 `src-tauri/config.json`（运行期配置，含 AI 连接码）与 `prompt_refs/`。
 - 信封键是 **`msg`** 不是 `message`（`ApiResp { code, msg, data }`）。
-- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑「不该带什么」体积防线 + health/shibie/quyuocr/qrcode/prompt(visual) + `mode=text` 必须 400 指路 + `mode=ref` 未教过必须拒 + 参考库教/找/删 + >2MB 大图 multipart + AI 默认 403。改打包流程或模型清单后必须复跑。
+- **验收脚本 `scripts/verify_packaged.py`**：从解压目录起服务跑「不该带什么」体积防线 + health/shibie/quyuocr/qrcode + prompt 相关（模型没装时标 `[SKIP]`，靠 `PROMPT_OK` 判断）+ `mode=text` 必须 400 指路 + >2MB 大图 multipart + AI 未授权。改打包流程或模型清单后必须复跑。
+- **用户可见的错误文案不许让用户去跑 Python 脚本**（分发包里没有源码）。缺模型一律指路「设置 → 模型库」。
 - **界面验收脚本 `scripts/verify_ui_zh.py`**：explorer 拉起 exe → **从截图里量左侧导航 5 项行位置**（不写死比例，写死过一次导致点在正文区、两张图同页、被误读成「找图不准」）→ 教「左侧侧边栏」→ 同图 + 跨页按名字找。调用 400 响应必须当正常响应读（urllib 默认抛 HTTPError）。
 - **请求体上限 32MB 靠 `DefaultBodyLimit` 显式放开**（`routes.rs` 的 `build_router_with`）：
   axum 0.8 默认只给 **2MB**，且只作用于 `Multipart` extractor（JSON 路径自己用
