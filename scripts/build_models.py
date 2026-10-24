@@ -32,6 +32,21 @@ REPO = "QiuMr/ocr-studio"
 # 每个条目 = 一个 zip。src 里列的文件/目录会被放进 zip 根目录。
 ENTRIES = [
     {
+        # **出厂自带的那一档**。分发包里带着 models/small，用户装完就能识别，
+        # 所以清单里必须有这一条 —— 少了它，模型库会显示「5 个可选模型全未安装」，
+        # 而界面上的识别结果明明好好的，用户只会以为程序坏了。
+        # 万一用户（或清理工具）把 small 目录删了，这里还能从模型库装回来。
+        "id": "ppocr-small",
+        "name": "PP-OCRv6 均衡",
+        "group": "ocr",
+        "note": "出厂就带着，装完即用。速度和精度都居中，日常首选。",
+        "dir": "small",
+        "src": ["dir:small"],
+        "requires": ["det.onnx", "rec.onnx", "cls.onnx"],
+        "endpoints": ["/ocr/ocr"],
+        "recommended": True,
+    },
+    {
         "id": "ppocr-medium",
         "name": "PP-OCRv6 高精度",
         "group": "ocr",
@@ -113,8 +128,14 @@ def collect(entry: dict) -> list[tuple[Path, str]]:
             if not d.is_dir():
                 raise SystemExit(f"[FAIL] 目录不存在：{d}")
             for p in sorted(d.rglob("*")):
-                if p.is_file() and p.name not in ("inspect.json",) and not p.name.startswith("reference_"):
-                    pairs.append((p, str(p.relative_to(d))))
+                if not p.is_file():
+                    continue
+                if p.name in ("inspect.json",) or p.name.startswith("reference_"):
+                    continue
+                # dump/ 是调参考输出时留下的转储，对用户没用，别塞进下载包
+                if "dump" in p.relative_to(d).parts:
+                    continue
+                pairs.append((p, str(p.relative_to(d))))
         elif spec.startswith("files:"):
             for rel in spec.split(":", 1)[1].split(","):
                 p = MODELS / rel

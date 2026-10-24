@@ -2,6 +2,25 @@
   "version": 1,
   "models": [
     {
+      "id": "ppocr-small",
+      "name": "PP-OCRv6 均衡",
+      "group": "ocr",
+      "note": "出厂就带着，装完即用。速度和精度都居中，日常首选。",
+      "dir": "small",
+      "requires": [
+        "det.onnx",
+        "rec.onnx",
+        "cls.onnx"
+      ],
+      "endpoints": [
+        "/ocr/ocr"
+      ],
+      "recommended": true,
+      "file": "ppocr-small-v1.zip",
+      "size": 27561749,
+      "sha256": "937a61dbcca2eef08e386aa340c19d8df43de6fb1ea8bd9d421191be0d83986f"
+    },
+    {
       "id": "ppocr-medium",
       "name": "PP-OCRv6 高精度",
       "group": "ocr",

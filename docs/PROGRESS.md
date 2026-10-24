@@ -1,11 +1,46 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-24 晚（AI 操控补全：17 → 35 个工具，AI 能真的动手了）
+> 最后更新：2026-10-24 深夜（界面返工：表格接口露出、自动升级与焦点抢占实测修复）
 
 ---
 
 ## 0. 一句话现状
+
+**本轮（10-24 深夜）：界面返工 + 两个实测修复。** 用户问「为什么没看见表格的接口」，
+查出三件事，全部是「能跑但看不见/点不动」类：
+
+1. **表格接口在界面文档里静默消失**（v0.1.8 修）。`groupOf()` 把 `/ocr/biaoge`
+   归到新增的 `doc` 组，但 `ApiPage` 的 `ORDER` 和 `ServicePage` 的 `GROUPS`
+   各是一份**手写组数组**，加组时只改了 endpoints.ts 的类型/标签/描述。
+   TypeScript 不报错（普通数组不是 Record），而页面上「共 20 个端点」又是对的，
+   肉眼完全看不出少了一组。根治：组顺序收成 `GROUP_ORDER` 唯一事实源，两页派生；
+   首页图标改 `Record<EndpointGroup,…>`（加组忘配图标直接编译报错）；
+   新增 `scripts/check_endpoints.py` 挂进 `build.ps1` Step 3，实测把 doc 从
+   GROUP_ORDER 删掉立刻 FAIL。
+2. **自动升级点了没反应**（v0.1.10 / v0.1.11 修）。0.1.8→0.1.9 实测失败：
+   程序关了再也没起来，且**零日志**（助手在 `tauri::Builder` 之前分流，
+   tracing 的 subscriber 还没初始化，它的日志本来全丢）。根因：助手等旧进程退出
+   用 `OpenProcess` 轮询 PID，而 **Windows 会复用 PID** —— 旧进程退出后别的程序
+   抢到同一个 PID，助手傻等 120 秒超时放弃。修复：比对
+   `QueryFullProcessImageNameW` 的镜像路径做身份校验 + 助手全程写
+   `%TEMP%/ocr-studio-update/helper.log` + 启动时用旧进程的 exe 路径
+   （开发机叫 `ocr-studio.exe`，分发包叫 `OCR Studio.exe`，照名字拼会拉起另一个文件）。
+   0.1.10→0.1.11 实测升级成功。
+3. **AI 抢不到窗口焦点**（v0.1.11 修）。`focus_window` 十次九次 `foreground:false`
+   —— Windows 前台锁不允许后台进程 `SetForegroundWindow`，而输入只进前台窗口，
+   所以 `click_at`/`type_text` 全部打不到目标。修复三道：空 ALT 键 →
+   `AttachThreadInput` 贴输入线程借身份前置 → 前置后读 `GetForegroundWindow` 复核。
+   实测 5/5 抢到（修复前 0/8）。
+
+另修一个**UX 说谎**：分发包自带 `models/small`、识别开箱即用，但模型库清单里
+**没有 small 这一项**，界面显示「5 个可选模型全部未安装」，用户只会以为程序坏了。
+已补 `ppocr-small` 条目（26.3MB，zip 与 catalog 已上传 models 库），并把
+`dump/` 调试卷从下载包里排除。
+
+`verify_upgrade.py` 的 TARGET 改为从线上 `latest.json` 读；验收脚本踩过的坑都
+写进了注释（换页判据要用正文大标题且阈值 240 而非 300；颜色兜底要取**最靠下、
+左半侧**的蓝团 —— 设置页有 4 个蓝按钮，取最密集的会命中模型卡的「下载」）。
 
 **本轮（10-24 晚）：AI 操控补全。** 用户的要求是「能操控得越多越好」。原来 AI 只能
 「看」（截图/认字/找图），不能动手，也不能读表格、不能按文字定位、不能碰模型库 ——

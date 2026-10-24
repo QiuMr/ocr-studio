@@ -314,8 +314,18 @@ def run(ai: Ai) -> None:
         names_now = [t["name"] for t in (r.get("data") or {}).get("targets", [])]
         check("list_targets 能看到新教的", "验收目标" in names_now)
 
-        st, r = ai.call("find_target", names="验收目标", image_path=shot, conf=0.1)
-        check("find_target 不报错", r.get("ok") is True, r.get("error", ""))
+        # 提示找图模型是按需下载的。解压版/干净机器上没装，这时候报「缺模型」
+        # 是**正确行为**，不该判 FAIL —— 否则每台没装 yoloe 的机器验收都是红的。
+        st, rm = ai.call("list_models")
+        has_yoloe = any(
+            m.get("id") == "yoloe-prompt" and m.get("installed")
+            for m in ((rm.get("data") or {}).get("models") or [])
+        )
+        if not has_yoloe:
+            skip("find_target 不报错", "没装「提示找图」模型（按需下载），报缺模型是正确行为")
+        else:
+            st, r = ai.call("find_target", names="验收目标", image_path=shot, conf=0.1)
+            check("find_target 不报错", r.get("ok") is True, r.get("error", ""))
 
         st, r = ai.call("forget_target", name="验收目标")
         check("forget_target 删掉了", (r.get("data") or {}).get("removed") is True, r.get("summary", ""))

@@ -100,17 +100,27 @@ def find_blue_button(hwnd):
                 ys.append(y)
     if len(xs) < 200:
         return None
-    # 只保留最密集的那一坨（图标也会带点蓝，但面积小得多）
+    # 按 40px 横带聚类后，取**最靠下的那一坨**，且要求它在页面左半侧。
+    #
+    # 为什么不是「最密集的」：设置页上同时有 4 个蓝按钮 —— 模型卡里三个
+    # 「下载」（在最右侧）和更新卡里一个「立即更新」（左侧，页面最底部）。
+    # 实测取最密集的那坨会命中上面的下载按钮，点下去开始下模型，
+    # 升级什么都没发生，脚本还以为点过了。「立即更新」是这页最后一个
+    # 交互元素，位置特征比颜色面积可靠。
     import collections
 
     bands = collections.Counter(y // 40 * 40 for y in ys)
-    band = bands.most_common(1)[0][0]
-    sel = [(x, y) for x, y in zip(xs, ys) if band <= y < band + 40]
-    if len(sel) < 200:
-        return None
-    cx = sum(x for x, _ in sel) // len(sel)
-    cy = sum(y for _, y in sel) // len(sel)
-    return {"center_x": ox + cx, "center_y": oy + cy, "votes": len(sel)}
+    # 横带按 y 从大到小试，第一个「够蓝且在左半侧」的就是它
+    for band in sorted(bands, reverse=True):
+        sel = [(x, y) for x, y in zip(xs, ys) if band <= y < band + 40]
+        if len(sel) < 120:
+            continue
+        cx = sum(x for x, _ in sel) // len(sel)
+        if cx > w * 0.62:
+            continue  # 右半侧是模型卡的「下载」按钮，不是更新
+        cy = sum(y for _, y in sel) // len(sel)
+        return {"center_x": ox + cx, "center_y": oy + cy, "votes": len(sel)}
+    return None
 
 
 def scroll_until(hwnd, keyword, rounds=12):
@@ -168,7 +178,10 @@ def click_text(hwnd, keyword, expect=None, tries=5, rightmost=False):
             if hits:
                 if rightmost:
                     hits.sort(key=lambda x: x["center_x"], reverse=True)
-                    if hits[0]["center_x"] > 300:  # 右侧正文区才算换页成功
+                    # 正文大标题在窗口内约 x=253（侧栏导航只到约 211）。
+                    # 阈值取 240：窗口贴左边缘时正文 279、侧栏 211，分得开；
+                    # 写成 300 会把这个标题判成侧栏，换页验证永远不命中。
+                    if hits[0]["center_x"] > 240:
                         return m
                     continue
                 return m
@@ -189,7 +202,14 @@ def main() -> int:
     hwnd = w["hwnd"]
     print(f"[2] 窗口: {w['title']} hwnd={hwnd}")
 
+    # 抢焦点：AI 是后台进程，直接 SetForegroundWindow 会被前台锁静默拒绝。
+    # 但**鼠标点击是用户输入，不受前台锁限制** —— 点一下窗口标题栏，
+    # Windows 自己就把窗口带到前台了。这一步比任何 API 都可靠。
     st, r = ai.call("focus_window", hwnd=hwnd)
+    if not (r.get("data") or {}).get("foreground"):
+        ai.call("click_at", x=w["x"] + 200, y=w["y"] + 12)  # 标题栏（不是关闭按钮）
+        ai.call("wait", ms=600)
+        st, r = ai.call("focus_window", hwnd=hwnd)
     if not (r.get("data") or {}).get("foreground"):
         print("[FAIL] 没抢到前台焦点，点击会打到别的窗口，中止")
         return 1
