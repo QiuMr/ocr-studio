@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEINPUT, MOUSEEVENTF_ABSOLUTE,
@@ -29,7 +30,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
+    ShowWindow, SW_RESTORE,
 };
 
 /// 按下与抬起之间的停顿（毫秒）。
@@ -215,9 +217,13 @@ pub fn cursor_pos() -> (i32, i32) {
 
 /// 把窗口提到前台（最小化的先还原）。
 ///
-/// `SetForegroundWindow` 受前台锁限制会**静默失败**（返回 false）—— 系统不允许
-/// 后台进程随便抢焦点。这里如实返回错误，让调用方改用「点任务栏 / 用点击坐标」
-/// 之类的替代方案，而不是以为前置成功了。
+/// `SetForegroundWindow` 受**前台锁**限制会静默失败（返回 false）—— 系统只允许
+/// 前台进程设置前台窗口，后台进程直接调必然被拒（实测：每次都被拒，`foreground`
+/// 恒为 false）。解法是 `AttachThreadInput`：把自己的输入线程临时贴到**当前
+/// 前台窗口**的输入线程上，借它的身份设置前台，用完立刻解开。
+///
+/// 另外先发一次空的 ALT 键。Windows 把「用户按了键」当成有焦点变更意图，
+/// 这一步能过掉一部分前台锁超时还没恢复的场景（老程序惯用 hack，仍有效）。
 pub fn focus_window(hwnd: isize) -> Result<bool, String> {
     if hwnd == 0 {
         return Err("窗口句柄是 0，先调 list_windows 拿 hwnd 或 title".to_string());
@@ -228,8 +234,23 @@ pub fn focus_window(hwnd: isize) -> Result<bool, String> {
             let _ = ShowWindow(h, SW_RESTORE);
             sleep_ms(120);
         }
+        // 借一次「用户按键」的身份
+        let alt = [key_input(VK_MENU, 0, KEYBD_EVENT_FLAGS(0))];
+        let _ = send(&alt);
+        let alt_up = [key_input(VK_MENU, 0, KEYEVENTF_KEYUP)];
+        let _ = send(&alt_up);
+
+        let fg = GetForegroundWindow();
+        let fg_tid = GetWindowThreadProcessId(fg, None);
+        let my_tid = GetCurrentThreadId();
+        let attached = fg_tid != 0 && fg_tid != my_tid && AttachThreadInput(my_tid, fg_tid, true).as_bool();
         let ok = SetForegroundWindow(h).as_bool();
-        Ok(ok)
+        if attached {
+            let _ = AttachThreadInput(my_tid, fg_tid, false);
+        }
+        // 再确认一次：SetForegroundWindow 的返回值不完全可靠（有时成功了也返回 0）
+        sleep_ms(60);
+        Ok(ok || GetForegroundWindow() == h)
     }
 }
 

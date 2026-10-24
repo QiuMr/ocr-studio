@@ -25,7 +25,26 @@ OUT.mkdir(parents=True, exist_ok=True)
 cfg = json.loads(CFG.read_text(encoding="utf-8"))
 ai = Ai(f"http://127.0.0.1:{cfg['port']}", cfg["ai_token"])
 
-TARGET = "0.1.9"
+# 目标版本从线上 latest.json 读，不写死 —— 写死的话每次发版都要记着改，
+# 忘改就会出现「其实已经是最新版本却跑去测升级」的假阴性。
+DEFAULT_TARGET = "0.1.10"
+
+
+def remote_target() -> str:
+    import urllib.request
+    try:
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        raw = op.open(
+            "https://github.com/QiuMr/ocr-studio/releases/latest/download/latest.json",
+            timeout=10,
+        ).read()
+        return json.loads(raw).get("version") or DEFAULT_TARGET
+    except Exception as e:
+        print(f"[WARN] 读不到线上版本号，用默认 {DEFAULT_TARGET}（{e}）")
+        return DEFAULT_TARGET
+
+
+TARGET = remote_target()
 
 
 def health_version():

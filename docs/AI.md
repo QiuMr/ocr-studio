@@ -129,7 +129,7 @@ curl -s http://127.0.0.1:8848/ai/v1/tool \
 | `read_qrcode` | 二维码 / 条形码 |
 | `teach_target` | 教一个新目标：参考图 + 框 + 中文名 |
 | `forget_target` | 忘掉一个教过的名字 |
-| `focus_window` | 把某个窗口切到前台（最小化的先还原） |
+| `focus_window` | 把某个窗口切到前台（最小化的先还原；用 AttachThreadInput 绕前台锁） |
 
 ### 5.3 危险（14 个）—— 会动你的电脑或改服务
 
@@ -193,7 +193,10 @@ read_table / ocr_image(source="window", title="某某")   # 只认这个窗口�
   （`MOUSEEVENTF_VIRTUALDESK`，按「虚拟屏宽高 - 1」映射到 0..65535）。
   用主屏尺寸归一化的话，副屏在主屏左侧时点下去会整体偏移一整屏。
 - 输入只会进**前台窗口**；`SetForegroundWindow` 受前台锁限制会静默失败，
-  所以 `focus_window` 如实返回 `foreground:false`，不假装成功。
+  所以 `focus_window` 如实返回 `foreground:false`，不假装成功。内部会依次尝试：
+① 发一次空 ALT 键（Windows 把它当作用户有焦点变更意图）；② AttachThreadInput 把自己的
+输入线程贴到当前前台窗口的线程上，借它的身份 SetForegroundWindow；③ 再读一次
+GetForegroundWindow 复核（这个 API 有时成功了也返回 false）。三道都不剩才会报 false。
 - 每一个底层能力都尽量只写一遍：`ocr_image`、`find_text`、`read_table`、
   `find_target` 共用 `load_image()`（本地图 / 截屏 / 截窗口 + `region` 裁剪），
   坐标平移只在这一处做。
@@ -227,7 +230,7 @@ read_table / ocr_image(source="window", title="某某")   # 只认这个窗口�
 | `401 连接码不正确` | 没带 `Authorization`，或带的是旧码（重置过） |
 | `summary` 里的人话是乱码 | 你的终端不是 UTF-8，不影响数据 |
 | `click_at` 报「系统拒绝了这次输入」 | 目标窗口是管理员权限（提权窗口收不到普通进程输入）或锁屏 |
-| `focus_window` 返回 `foreground:false` | Windows 前台锁；手动点一下任务栏，或用 `click_at` 点窗口标题栏 |
+| `focus_window` 返回 `foreground:false` | 前台锁没绕过去（极少数系统策略会拦 AttachThreadInput）。手动点一下任务栏把窗口激活，再用 `click_at` 点窗口标题栏把它带到最前 |
 | `find_text` 找不到 | 先用 `ocr_image` 看看到底认出了什么；再考虑放宽关键词或调 `region` |
 | 按钮就在屏幕上却找不到 | 大概率是白字彩底按钮，OCR 不出框。按颜色定位，见 §7.5 |
 | `read_table` 报缺模型 | `install_model(id="table")`，或去设置 → 模型库下载 |
