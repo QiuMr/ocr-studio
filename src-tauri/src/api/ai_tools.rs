@@ -3,20 +3,28 @@
 //! 设计原则（照搬用户另一个项目里已经跑顺的那套）：
 //! - 工具名用动词开头、参数用 snake_case（大模型对这两个约定最熟）；
 //! - 每个工具都要**人话 summary**：AI 念给用户听的就是它，要说清"做了什么、结果如何"；
-//! - `risk` 三档：readonly（只读）/ write（改程序状态或读屏幕）/ dangerous（动服务配置）。
-//!   写操作全部写审计日志，用户能在运行日志里看到 AI 干了什么；
-//! - 参数解析**刻意宽松**：AI 很容易把数字写成字符串、把布尔写成 "true"，
-//!   一律容错接收；区间用 clamp 夹住。报错必须告诉 AI 下一步怎么做。
+//! - `risk` 三档：readonly（只读）/ write（改程序状态或读屏幕）/ dangerous（动服务配置、
+//!   或在用户桌面上真的点一下/打字）。写操作全部写审计日志，用户能在运行日志里看到
+//!   AI 干了什么；
+//! - 参数解析**刻意宽松**：AI 很容易把数字写成字符串、把布尔写成 "true"，一律容错接收；
+//!   区间用 clamp 夹住。报错必须告诉 AI 下一步怎么做。
 //!
-//! **明确不提供**（要么自伤要么动系统，这三件事让人来点界面）：
+//! **坐标约定（容易出错，务必遵守）**：所有返回的坐标都是**屏幕绝对坐标**，
+//! 可以直接喂给 `click_at`。`origin_x/origin_y` 是这次取图的左上角在屏幕上的位置
+//! （传图给 AI 时用 0,0；截屏/截窗口时是屏/窗原点，多显示器时可能为负）。
+//!
+//! **明确不提供**（要么自伤要么动系统，这几件事让人来点界面）：
 //! 退出程序、改开机自启注册表、改 AI 开关本身与连接码。
 //! 做法是**根本不注册**，不靠运行时黑名单。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use image::{DynamicImage, RgbImage};
 use serde_json::{json, Value};
 
+use super::routes::{clamp_region, to_table_dtos};
 use super::state::AppState;
 use crate::api::dto::{decode_base64_image, decode_image, OcrOptions};
 use crate::config::{Device, ModelLevel};
@@ -65,9 +73,32 @@ const fn tool(
     }
 }
 
+// ---------------------------------------------------------------- 取图通用参数说明
+
+/// 截屏 / 截窗口 / 读本地图，这几件事的参数在三类工具里是同一套，单独抽出来复用。
+const A_SOURCE: Arg = arg(
+    "source",
+    "图从哪来：screen（截屏，默认）/ window（截某个窗口，配 title 或 hwnd）",
+    false,
+    "screen",
+);
+const A_TITLE: Arg = arg(
+    "title",
+    "窗口标题（source=window 时用，可以只写一部分，如 \"记事本\"）。先调 list_windows 看有哪些",
+    false,
+    "",
+);
+const A_HWND: Arg = arg("hwnd", "窗口句柄（比 title 精确，list_windows 里有）", false, "");
+const A_REGION: Arg = arg(
+    "region",
+    "只处理图上的一块 [x,y,w,h]（原图像素）。截屏时是屏幕坐标，传图时是图内坐标",
+    false,
+    "",
+);
+
 /// 工具清单（**顺序即展示顺序**：先只读、后写、最后危险，方便 AI 建立风险意识）。
 pub const TOOLS: &[Tool] = &[
-    // ---------------------------------------------------------------- 只读
+    // ================================================================ 只读
     tool(
         "get_status",
         "看服务在不在跑、端口、引擎、推理设备、模型目录。排查「调不通」时先调它。",
@@ -104,22 +135,75 @@ pub const TOOLS: &[Tool] = &[
         RISK_READONLY,
         &[],
     ),
-    // ---------------------------------------------------------------- 写
     tool(
-        "screenshot",
-        "截一张屏幕并存成文件，返回文件路径和尺寸。后续 ocr_image / find_image 可以直接用这个路径当输入。**会读取用户屏幕内容**。",
-        RISK_WRITE,
+        "list_windows",
+        "列出当前打开的窗口（标题、句柄、位置、尺寸、哪个在前台）。要操作某个软件之前先调它，拿到 title/hwnd。",
+        RISK_READONLY,
+        &[arg("title", "只看标题里包含这几个字的窗口（可空 = 全部）", false, "")],
+    ),
+    tool(
+        "list_models",
+        "看模型库里每个能力装没装、多大、装上能用哪些接口，以及正在下载的进度。缺能力时用它确认。",
+        RISK_READONLY,
+        &[arg("refresh", "true = 强制联网刷新清单（默认 false 用缓存）", false, "false")],
+    ),
+    tool(
+        "check_update",
+        "查这个工具本身有没有新版本。只查不装，装不装由用户决定。",
+        RISK_READONLY,
         &[],
     ),
     tool(
+        "wait",
+        "等一会儿再继续（毫秒，最多 10000）。点完按钮等界面加载、等窗口出来时用，别连续猛调。",
+        RISK_READONLY,
+        &[arg("ms", "等多久，1-10000（默认 500）", false, "500")],
+    ),
+
+    // ================================================================ 写
+    tool(
+        "screenshot",
+        "截一张图存成文件，返回文件路径、尺寸和原点坐标。可以截全屏、截某个窗口、或只截一块。后续 ocr_image / read_table 等可以直接用这个路径当输入。**会读取用户屏幕内容**。",
+        RISK_WRITE,
+        &[
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            A_REGION,
+        ],
+    ),
+    tool(
         "ocr_image",
-        "认一张图里的字。图可以是本地路径（image_path）、base64（image），不给图就截屏（source=screen）。返回整段文本和每一行的位置。",
+        "认出图里所有文字。图可以是本地路径（image_path）、base64（image），也可以截屏/截窗口。返回整段文本 + 每一行的屏幕坐标。",
         RISK_WRITE,
         &[
             arg("image_path", "本地图片绝对路径", false, ""),
             arg("image", "图片 base64（与 image_path 二选一）", false, ""),
-            arg("source", "不给图时去哪截：screen（默认）", false, "screen"),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            A_REGION,
             arg("max_lines", "最多返回几行，1-200（默认 50）", false, "50"),
+        ],
+    ),
+    tool(
+        "find_text",
+        "在屏幕上找到某段文字在哪（先认字再筛），返回每处命中的坐标。想知道「确定按钮在哪」「有没有报错提示」就用它——比 find_target 省事，不需要先教。",
+        RISK_WRITE,
+        &[
+            arg(
+                "keyword",
+                "要找的文字。默认是「包含即命中」；用 /正则/ 两边加斜杠可以写正则，如 /\\d+个结果/",
+                true,
+                "",
+            ),
+            arg("image_path", "在本地这张图里找", false, ""),
+            arg("image", "图片 base64", false, ""),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            A_REGION,
+            arg("max_results", "最多返回几处，1-200（默认 20）", false, "20"),
         ],
     ),
     tool(
@@ -130,23 +214,62 @@ pub const TOOLS: &[Tool] = &[
             arg("names", "教过的名字，逗号分隔，如 \"提交按钮,搜索框\"", true, ""),
             arg("image_path", "在本地这张图里找", false, ""),
             arg("image", "图片 base64", false, ""),
-            arg("source", "不给图时去哪截：screen（默认）", false, "screen"),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
             arg("conf", "置信度阈值 0-1（默认 0.25），找不到就调低", false, "0.25"),
             arg("max_results", "最多返回几个，1-64（默认 8）", false, "8"),
         ],
     ),
     tool(
         "find_image",
-        "模板找图：拿一张小图在大图里找位置（比像素）。目标图不给就截屏。",
+        "模板找图：拿一张小图在大图/屏幕里找位置（比像素，要求长得几乎一样）。目标图不给就截屏。",
         RISK_WRITE,
         &[
             arg("template_path", "小图（模板）的本地路径", false, ""),
             arg("template", "小图 base64（与 template_path 二选一）", false, ""),
             arg("image_path", "大图本地路径", false, ""),
             arg("image", "大图 base64", false, ""),
-            arg("source", "不给大图时去哪截：screen（默认）", false, "screen"),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            A_REGION,
             arg("threshold", "相似度阈值 0-1（默认 0.9）", false, "0.9"),
             arg("max_results", "最多返回几个，1-64（默认 1）", false, "1"),
+        ],
+    ),
+    tool(
+        "detect_objects",
+        "通用目标检测：找图里的物体（人、车、表格、按钮……取决于装了哪个检测模型），返回类别名 + 框 + 分数。想按类别找东西、又没现成模板时用它。",
+        RISK_WRITE,
+        &[
+            arg("image_path", "本地图片路径", false, ""),
+            arg("image", "图片 base64", false, ""),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            arg("classes", "只看这些类别（逗号分隔，按名字包含匹配，如 \"人,车\"）；空 = 全部", false, ""),
+            arg("conf", "置信度阈值 0-1（默认 0.3）", false, "0.3"),
+            arg("max_results", "最多返回几个，1-200（默认 30）", false, "30"),
+        ],
+    ),
+    tool(
+        "read_table",
+        "读表格：整页里自动找表格 → 认出结构 → 填上文字。返回 HTML 表格、TSV 文本（可直接粘 Excel）和每个单元格坐标。",
+        RISK_WRITE,
+        &[
+            arg("image_path", "本地图片路径", false, ""),
+            arg("image", "图片 base64", false, ""),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
+            arg(
+                "mode",
+                "auto（默认，先找表格再识别）/ structure（整图当一张表）/ detect（只给表格位置）",
+                false,
+                "auto",
+            ),
+            arg("with_text", "要不要把文字填进单元格（默认 true）", false, "true"),
         ],
     ),
     tool(
@@ -156,7 +279,9 @@ pub const TOOLS: &[Tool] = &[
         &[
             arg("image_path", "本地图片路径", false, ""),
             arg("image", "图片 base64", false, ""),
-            arg("source", "不给图时去哪截：screen（默认）", false, "screen"),
+            A_SOURCE,
+            A_TITLE,
+            A_HWND,
             arg("try_harder", "图糊或扫不出来时设 true，会多试几遍（慢一点）", false, "true"),
         ],
     ),
@@ -168,10 +293,86 @@ pub const TOOLS: &[Tool] = &[
             arg("name", "中文名，如 \"提交按钮\"", true, ""),
             arg("image_path", "参考图的本地路径（**整张图**，通常是 screenshot 返回的）", false, ""),
             arg("image", "参考图 base64", false, ""),
-            arg("box", "参考框 [x1,y1,x2,y2]，参考图左上角为原点", true, ""),
+            arg("box", "参考框 [x1,y1,x2,y2]，参考图左上角为原点（截屏得到的图就是屏幕坐标）", true, ""),
         ],
     ),
-    // ---------------------------------------------------------------- 危险
+    tool(
+        "forget_target",
+        "忘掉一个教过的目标（按名字）。教错了、或者目标已经不用了就用它清掉。",
+        RISK_WRITE,
+        &[arg("name", "要忘掉的名字", true, "")],
+    ),
+    tool(
+        "focus_window",
+        "把某个窗口切到最前面（最小化的先还原）。要往某个软件里打字/点击之前，必须先调它——输入只会进前台窗口。",
+        RISK_WRITE,
+        &[A_TITLE, A_HWND],
+    ),
+
+    // ================================================================ 危险
+    tool(
+        "move_mouse",
+        "把鼠标移到某个坐标（只移动不点击）。悬停展开菜单时用。**会在用户桌面上真的动鼠标**。",
+        RISK_DANGEROUS,
+        &[arg("x", "屏幕 X 坐标", true, ""), arg("y", "屏幕 Y 坐标", true, "")],
+    ),
+    tool(
+        "click_at",
+        "在屏幕某个坐标点一下（支持左右中键、双击）。**会在用户电脑上真的点下去**，先跟用户确认再动手。",
+        RISK_DANGEROUS,
+        &[
+            arg("x", "屏幕 X 坐标", true, ""),
+            arg("y", "屏幕 Y 坐标", true, ""),
+            arg("button", "left（默认）/ right / middle", false, "left"),
+            arg("count", "点几下，1-3（2 = 双击，默认 1）", false, "1"),
+        ],
+    ),
+    tool(
+        "drag_mouse",
+        "从一个点按住拖到另一个点（拖文件、拖滚动条、框选）。**会真的操作鼠标**。",
+        RISK_DANGEROUS,
+        &[
+            arg("x", "起点 X", true, ""),
+            arg("y", "起点 Y", true, ""),
+            arg("to_x", "终点 X", true, ""),
+            arg("to_y", "终点 Y", true, ""),
+            arg("button", "left（默认）/ right / middle", false, "left"),
+        ],
+    ),
+    tool(
+        "scroll",
+        "在某个位置滚轮（不给坐标就在鼠标当前位置滚）。delta 正数向上、负数向下，一格约 120。",
+        RISK_DANGEROUS,
+        &[
+            arg("x", "屏幕 X（可空 = 当前鼠标位置）", false, ""),
+            arg("y", "屏幕 Y（可空 = 当前鼠标位置）", false, ""),
+            arg("delta", "滚动量，正数向上 / 负数向下（默认 -120，即向下滚一格）", false, "-120"),
+        ],
+    ),
+    tool(
+        "type_text",
+        "往当前前台窗口里打一段文字（支持中文）。**会真的往用户正在用的软件里输入**，先确认焦点窗口对不对。",
+        RISK_DANGEROUS,
+        &[arg("text", "要输入的文字", true, "")],
+    ),
+    tool(
+        "press_key",
+        "按一个键或组合键，如 \"enter\"、\"ctrl+s\"、\"alt+f4\"、\"ctrl+shift+esc\"。**会真的按键**。",
+        RISK_DANGEROUS,
+        &[arg("keys", "按键，多个键用 + 连接", true, "")],
+    ),
+    tool(
+        "install_model",
+        "装一个模型（按 id，list_models 里有）。大模型有一两百 MB，会**在后台下载**，立刻返回，用 list_models 看进度。",
+        RISK_DANGEROUS,
+        &[arg("id", "模型 id，如 table / ddddocr / medium", true, "")],
+    ),
+    tool(
+        "remove_model",
+        "卸载一个模型（删掉 models 下对应的目录，腾空间）。正在用它的话相关接口会改报缺模型。",
+        RISK_DANGEROUS,
+        &[arg("id", "模型 id", true, "")],
+    ),
     tool(
         "server_start",
         "启动 HTTP 服务。本来就开着的话直接返回端口。",
@@ -242,15 +443,29 @@ pub fn risk_of(name: &str) -> Option<&'static str> {
     TOOLS.iter().find(|t| t.name == name).map(|t| t.risk)
 }
 
+/// 按风险档分组计数，界面与提示词里用（避免两边各写一份数字）。
+pub fn risk_counts() -> (usize, usize, usize) {
+    let mut r = (0, 0, 0);
+    for t in TOOLS {
+        match t.risk {
+            RISK_READONLY => r.0 += 1,
+            RISK_WRITE => r.1 += 1,
+            _ => r.2 += 1,
+        }
+    }
+    r
+}
+
 /// 提示词里「你可以帮我…」的一句话（人话，不列工具名）。
 pub fn highlights() -> Vec<&'static str> {
     vec![
-        "看屏幕上有什么、认出上面的字",
+        "看屏幕上有什么、认出上面的字、按文字定位（「确定」按钮在哪）",
         "按中文名找界面元素的位置（按钮、图标、输入框）",
         "教它认新目标（框一次、起个中文名，之后就能找）",
-        "读二维码和条形码",
-        "看服务状态与运行日志、排查调不通的原因",
-        "启停服务、换模型档位和推理设备",
+        "读表格成 Excel 可粘的文本 / 读二维码和条形码",
+        "真的动手：点按钮、拖拽、滚动、打字、按快捷键",
+        "装/卸模型（表格识别、更大的识别模型……按需下载）",
+        "看服务状态与运行日志、查有没有新版本、启停服务和换设备",
     ]
 }
 
@@ -258,7 +473,7 @@ pub fn highlights() -> Vec<&'static str> {
 // 参数解析（宽松）
 // ---------------------------------------------------------------------------
 
-fn s(args: &Value, key: &str) -> Option<String> {
+pub(crate) fn s(args: &Value, key: &str) -> Option<String> {
     match args.get(key)? {
         Value::String(v) => {
             let t = v.trim();
@@ -284,6 +499,15 @@ fn f(args: &Value, key: &str) -> Option<f64> {
     }
 }
 
+/// 必填数字。缺失时报错要写清「该填什么」，AI 才能自我修正。
+pub(crate) fn req_i(args: &Value, key: &str, hint: &str) -> Result<i32, String> {
+    match f(args, key) {
+        Some(v) if v.is_finite() => Ok(v.round() as i32),
+        Some(_) => Err(format!("{key} 不是有效数字")),
+        None => Err(format!("缺少 {key}（{hint}）")),
+    }
+}
+
 fn b(args: &Value, key: &str) -> Option<bool> {
     match args.get(key)? {
         Value::Bool(v) => Some(*v),
@@ -297,7 +521,7 @@ fn b(args: &Value, key: &str) -> Option<bool> {
     }
 }
 
-/// 取整数数组（框、区域等）。
+/// 取数字数组（框、区域等）。
 fn nums(args: &Value, key: &str) -> Option<Vec<f64>> {
     let v = args.get(key)?;
     match v {
@@ -325,6 +549,27 @@ fn nums(args: &Value, key: &str) -> Option<Vec<f64>> {
     }
 }
 
+/// `[x, y, w, h]`，四个数、宽高为正。给的是「空数组/缺省」时返回 None。
+fn num4(args: &Value, key: &str) -> Option<[i32; 4]> {
+    let v = nums(args, key)?;
+    if v.len() != 4 {
+        return None;
+    }
+    Some([v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32])
+}
+
+/// 逗号分隔的字符串列表（中英文逗号、分号、竖线都认）。
+fn list_of(args: &Value, key: &str) -> Vec<String> {
+    s(args, key)
+        .map(|raw| {
+            raw.split([',', '，', ';', '；', '|'])
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn clamp_f(v: f64, lo: f64, hi: f64) -> f64 {
     if !v.is_finite() {
         return lo;
@@ -337,29 +582,143 @@ fn clamp_i(v: f64, lo: usize, hi: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// 图片来源
+// 图片来源（带屏幕原点）
 // ---------------------------------------------------------------------------
 
-/// 取目标图。`image_path` / `image`(base64) 优先，都没有就截屏。
-fn load_image(args: &Value) -> Result<DynamicImage, String> {
+/// 取到的图 + 它在屏幕上的原点。
+///
+/// 原点不是 0 的时候，图内坐标 + 原点 = 屏幕绝对坐标。**只有带上它，
+/// 找出来的位置才能直接拿去点** —— 这是 AI 闭环的最后一环。
+struct Loaded {
+    img: DynamicImage,
+    ox: i32,
+    oy: i32,
+}
+
+impl Loaded {
+    fn from_file(img: DynamicImage) -> Self {
+        Loaded { img, ox: 0, oy: 0 }
+    }
+
+    fn rect(args: &Value) -> Option<[i32; 4]> {
+        num4(args, "region")
+    }
+
+    /// 按 region 裁一块，并把原点平移到裁剪处。
+    fn crop(self, region: Option<[i32; 4]>) -> Result<Self, String> {
+        let Some([x, y, w, h]) = region else {
+            return Ok(self);
+        };
+        let (iw, ih) = (self.img.width(), self.img.height());
+        let Some([cx, cy, cw, ch]) = clamp_region(x, y, w, h, iw, ih) else {
+            return Err(format!(
+                "region [{x},{y},{w},{h}] 与这张图（{iw}x{ih}）没有有效交集"
+            ));
+        };
+        let img = self
+            .img
+            .crop_imm(cx as u32, cy as u32, cw as u32, ch as u32);
+        Ok(Loaded {
+            img,
+            ox: self.ox + cx,
+            oy: self.oy + cy,
+        })
+    }
+}
+
+/// 取图。优先级：image_path / image（本地图）> window（截窗口）> screen（截屏）。
+fn load_image(args: &Value) -> Result<Loaded, String> {
+    let region = Loaded::rect(args);
+
     if let Some(p) = s(args, "image_path") {
-        return image::open(std::path::Path::new(&p))
-            .map_err(|e| format!("读不了图片 {p}：{e}（先确认路径存在，注意 Windows 路径用 / 或 \\\\）"));
+        let img = image::open(std::path::Path::new(&p)).map_err(|e| {
+            format!("读不了图片 {p}：{e}（确认路径存在，Windows 路径用 / 或 \\\\）")
+        })?;
+        return Loaded::from_file(img).crop(region);
     }
     if let Some(b64) = s(args, "image") {
         let raw = decode_base64_image(&b64)?;
-        return decode_image(&raw).map_err(|e| e.to_string());
+        let img = decode_image(&raw).map_err(|e| e.to_string())?;
+        return Loaded::from_file(img).crop(region);
     }
-    if s(args, "source").as_deref() == Some("window") {
-        return Err("source=window 需要 hwnd，AI 接口暂不支持；请改用 screenshot 后传 image_path".into());
+
+    let source = s(args, "source").unwrap_or_else(|| "screen".to_string());
+    match source.trim().to_ascii_lowercase().as_str() {
+        "window" | "jubing" => {
+            let hwnd = resolve_hwnd(args)?;
+            let win = crate::capture::window_region(hwnd).map_err(|e| format!("取窗口位置失败：{e}"))?;
+            let img = crate::capture::capture_window(hwnd).map_err(|e| format!("截窗口失败：{e}"))?;
+            Loaded {
+                img: DynamicImage::ImageRgb8(img),
+                ox: win.x,
+                oy: win.y,
+            }
+            .crop(region)
+        }
+        _ => {
+            let vs = crate::capture::virtual_screen();
+            let img = crate::capture::capture_region(region.map(|[x, y, w, h]| {
+                crate::capture::ScreenRegion {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                }
+            }))
+            .map_err(|e| format!("截屏失败：{e}"))?;
+            // 截了区域的话，原点就是区域左上角；否则是整个虚拟屏的左上角
+            let (ox, oy) = match region {
+                Some([x, y, _, _]) => (x, y),
+                None => (vs.x, vs.y),
+            };
+            Ok(Loaded {
+                img: DynamicImage::ImageRgb8(img),
+                ox,
+                oy,
+            })
+        }
     }
-    // 没给图 → 截屏
-    let rgb = crate::capture::capture_region(None).map_err(|e| format!("截屏失败：{e}"))?;
-    Ok(DynamicImage::ImageRgb8(rgb))
 }
 
-fn load_rgb(args: &Value) -> Result<RgbImage, String> {
-    Ok(load_image(args)?.to_rgb8())
+/// 句柄优先，其次标题（精确 → 子串）。与 HTTP 层同一套规则，避免两处解析不一致。
+fn resolve_hwnd(args: &Value) -> Result<isize, String> {
+    if let Some(h) = f(args, "hwnd") {
+        if h as isize != 0 {
+            return Ok(h as isize);
+        }
+    }
+    if let Some(title) = s(args, "title") {
+        if let Some(h) = crate::capture::find_window(&title) {
+            return Ok(h);
+        }
+        if let Some(h) = crate::capture::find_window_contains(&title) {
+            return Ok(h);
+        }
+        let titles: Vec<String> = crate::capture::list_windows()
+            .into_iter()
+            .map(|w| w.title)
+            .take(15)
+            .collect();
+        return Err(format!(
+            "找不到标题含 {title:?} 的可见窗口。当前开着的有：{}。\
+             也可以先调 list_windows 拿 hwnd。",
+            if titles.is_empty() {
+                "（一个都没有）".to_string()
+            } else {
+                titles.join("、")
+            }
+        ));
+    }
+    Err("source=window 需要 title 或 hwnd（先调 list_windows 看有哪些窗口）".to_string())
+}
+
+fn load_rgb(args: &Value) -> Result<Loaded, String> {
+    let l = load_image(args)?;
+    Ok(Loaded {
+        img: DynamicImage::ImageRgb8(l.img.to_rgb8()),
+        ox: l.ox,
+        oy: l.oy,
+    })
 }
 
 fn save_png(dir: &std::path::Path, prefix: &str, img: &RgbImage) -> Result<std::path::PathBuf, String> {
@@ -374,6 +733,39 @@ fn save_png(dir: &std::path::Path, prefix: &str, img: &RgbImage) -> Result<std::
 }
 
 // ---------------------------------------------------------------------------
+// 模型安装进度（AI 后台下载用）
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct InstallState {
+    done: u64,
+    total: u64,
+    phase: String,
+}
+
+fn installs() -> &'static Mutex<HashMap<String, InstallState>> {
+    static M: OnceLock<Mutex<HashMap<String, InstallState>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_install(id: &str, done: u64, total: u64, phase: &str) {
+    let mut g = installs().lock().unwrap_or_else(|e| e.into_inner());
+    g.insert(
+        id.to_string(),
+        InstallState {
+            done,
+            total,
+            phase: phase.to_string(),
+        },
+    );
+}
+
+fn clear_install(id: &str) {
+    let mut g = installs().lock().unwrap_or_else(|e| e.into_inner());
+    g.remove(id);
+}
+
+// ---------------------------------------------------------------------------
 // 执行
 // ---------------------------------------------------------------------------
 
@@ -383,7 +775,7 @@ pub async fn exec(
     args: &Value,
 ) -> Result<(String, Value), String> {
     match name {
-        // ---------------------------------------------------------- 只读
+        // ============================================================ 只读
         "get_status" => {
             let (running, port, level, device, allow_browser, ai_enabled) = {
                 let cfg = state.cfg.read().unwrap_or_else(|e| e.into_inner());
@@ -411,9 +803,7 @@ pub async fn exec(
                 "ai_enabled": ai_enabled,
             });
             let human = if running {
-                format!(
-                    "服务在跑，地址 http://127.0.0.1:{port}，引擎 {level}（{device}）。"
-                )
+                format!("服务在跑，地址 http://127.0.0.1:{port}，引擎 {level}（{device}）。")
             } else {
                 format!("服务没启动（端口 {port}）。需要的话调 server_start。")
             };
@@ -497,40 +887,167 @@ pub async fn exec(
             ))
         }
 
-        // ---------------------------------------------------------- 写
+        "list_windows" => {
+            crate::capture::ensure_dpi_aware();
+            let filter = s(args, "title").unwrap_or_default();
+            let fg = crate::input::foreground_window();
+            let wins: Vec<Value> = crate::capture::list_windows()
+                .into_iter()
+                .filter(|w| filter.is_empty() || w.title.contains(&filter))
+                .map(|w| {
+                    json!({
+                        "title": w.title,
+                        "hwnd": w.hwnd,
+                        "x": w.rect.x,
+                        "y": w.rect.y,
+                        "width": w.rect.width,
+                        "height": w.rect.height,
+                        "foreground": w.hwnd == fg,
+                    })
+                })
+                .collect();
+            Ok((
+                if wins.is_empty() {
+                    if filter.is_empty() {
+                        "现在没有可见窗口。".to_string()
+                    } else {
+                        format!("没有标题含 {filter:?} 的窗口。去掉 title 参数可看全部。")
+                    }
+                } else {
+                    format!("当前开着 {} 个窗口，最前面的是「{}」。", wins.len(),
+                        wins.iter().find(|w| w["foreground"] == json!(true))
+                            .and_then(|w| w["title"].as_str()).unwrap_or("（未知）"))
+                },
+                json!({ "windows": wins, "count": wins.len() }),
+            ))
+        }
+
+        "list_models" => {
+            let refresh = b(args, "refresh").unwrap_or(false);
+            let data_dir = state.data_dir.clone();
+            let (cat, online) = tokio::task::spawn_blocking(move || {
+                crate::modellib::load_catalog(&data_dir, refresh)
+            })
+            .await
+            .map_err(|e| format!("读清单任务异常：{e}"))?;
+
+            let statuses = crate::modellib::statuses(&state.models_root, &cat, online);
+            let mut missing = 0usize;
+            let mut installed = 0usize;
+            let items: Vec<Value> = statuses
+                .iter()
+                .map(|m| {
+                    if m.installed { installed += 1 } else { missing += 1 }
+                    let prog = {
+                        let g = installs().lock().unwrap_or_else(|e| e.into_inner());
+                        g.get(&m.id).cloned()
+                    };
+                    let pct = prog.as_ref().map(|p| {
+                        if p.total == 0 { 0.0 } else { (p.done as f64 / p.total as f64 * 100.0).round() }
+                    });
+                    json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "group": m.group,
+                        "note": m.note,
+                        "size_mb": (m.size as f64 / 1048576.0 * 10.0).round() / 10.0,
+                        "installed": m.installed,
+                        "recommended": m.recommended,
+                        "endpoints": m.endpoints,
+                        "installing": prog.as_ref().map(|p| json!({
+                            "phase": p.phase,
+                            "percent": pct,
+                        })),
+                    })
+                })
+                .collect();
+            Ok((
+                format!(
+                    "模型库共 {} 项，已装 {installed} 项，还缺 {missing} 项。{}",
+                    items.len(),
+                    if online { "" } else { "（没连上网络，这是本地缓存的清单）" }
+                ),
+                json!({
+                    "models": items,
+                    "count": items.len(),
+                    "installed": installed,
+                    "missing": missing,
+                    "online": online,
+                    "models_root": state.models_root.display().to_string(),
+                }),
+            ))
+        }
+
+        "check_update" => {
+            let r = tokio::task::spawn_blocking(crate::updater::check)
+                .await
+                .map_err(|e| format!("查更新任务异常：{e}"))?;
+            if let Some(err) = &r.error {
+                return Ok((
+                    format!("查不到更新：{err}。这可能只是网络问题，不影响使用。"),
+                    json!({ "checked": false, "error": err, "current": r.current }),
+                ));
+            }
+            Ok((
+                if r.has_update {
+                    format!("有新版本 {}（当前 {}）。装不装由你决定，装了程序会自动重启。", r.latest, r.current)
+                } else {
+                    format!("已经是最新的 {}。", r.current)
+                },
+                json!({
+                    "checked": true,
+                    "current": r.current,
+                    "latest": r.latest,
+                    "has_update": r.has_update,
+                    "notes": r.notes,
+                    "size_mb": (r.size as f64 / 1048576.0 * 10.0).round() / 10.0,
+                }),
+            ))
+        }
+
+        "wait" => {
+            let ms = clamp_i(f(args, "ms").unwrap_or(500.0), 1, 10_000) as u64;
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok((format!("等了 {ms} 毫秒。"), json!({ "waited_ms": ms })))
+        }
+
+        // ============================================================ 写
         "screenshot" => {
             crate::capture::ensure_dpi_aware();
-            let rgb = crate::capture::capture_region(None).map_err(|e| format!("截屏失败：{e}"))?;
-            let (w, h) = (rgb.width(), rgb.height());
+            let loaded = load_rgb(args)?;
+            let (w, h) = (loaded.img.width(), loaded.img.height());
             let dir = state.data_dir.join("ai_shots");
-            let path = save_png(&dir, "shot", &rgb)?;
+            let path = save_png(&dir, "shot", &loaded.img.to_rgb8())?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
+            let where_ = if ox == 0 && oy == 0 {
+                "（这是图内坐标，坐标系与屏幕一致时可当屏幕坐标用）".to_string()
+            } else {
+                format!("原点在屏幕 ({ox}, {oy})")
+            };
             Ok((
-                format!("截了一张 {w}x{h} 的屏幕，存到 {}。后续工具可以用 image_path 引用它。", path.display()),
-                json!({ "image_path": path.display().to_string(), "width": w, "height": h }),
+                format!(
+                    "截了一张 {w}x{h} 的图，存到 {}，{where_}。后续工具可以用 image_path 引用它。",
+                    path.display()
+                ),
+                json!({
+                    "image_path": path.display().to_string(),
+                    "width": w,
+                    "height": h,
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
             ))
         }
 
         "ocr_image" => {
-            let img = load_image(args)?;
+            let loaded = load_rgb(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
             let max_lines = clamp_i(f(args, "max_lines").unwrap_or(50.0), 1, 200);
             let lines = state
-                .recognize_lines(&OcrOptions::default(), img)
+                .recognize_lines(&OcrOptions::default(), loaded.img)
                 .await
                 .map_err(|e| e.to_string())?;
-            let shown: Vec<Value> = lines
-                .iter()
-                .take(max_lines)
-                .map(|l| {
-                    let (cx, cy) = line_center(l);
-                    json!({
-                        "text": l.text,
-                        "score": l.score,
-                        "center_x": cx,
-                        "center_y": cy,
-                        "box": l.points.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
+            let shown: Vec<Value> = lines.iter().take(max_lines).map(|l| line_json(l, ox, oy)).collect();
             let text: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
             Ok((
                 if lines.is_empty() {
@@ -538,51 +1055,86 @@ pub async fn exec(
                 } else {
                     format!("认出 {} 行字。", lines.len())
                 },
-                json!({ "text": text, "lines": shown, "count": lines.len() }),
+                json!({
+                    "text": text,
+                    "lines": shown,
+                    "count": lines.len(),
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
+            ))
+        }
+
+        "find_text" => {
+            let keyword = s(args, "keyword").ok_or("缺少 keyword（要找的文字，正则写成 /.../）")?;
+            let max_results = clamp_i(f(args, "max_results").unwrap_or(20.0), 1, 200);
+            let loaded = load_rgb(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
+            let matcher = super::routes::build_matcher(&keyword).map_err(|e| e.message())?;
+
+            let lines = state
+                .recognize_lines(&OcrOptions::default(), loaded.img)
+                .await
+                .map_err(|e| e.to_string())?;
+            let hits: Vec<Value> = lines
+                .iter()
+                .filter(|l| matcher.is_match(&l.text))
+                .take(max_results)
+                .map(|l| line_json(l, ox, oy))
+                .collect();
+            Ok((
+                if hits.is_empty() {
+                    format!("没找到「{keyword}」。屏幕上有 {} 行字，可以先用 ocr_image 看全部内容，或者放宽关键词。", lines.len())
+                } else if hits.len() == 1 {
+                    format!("找到「{keyword}」，中心点在 ({}, {})，可以直接 click_at。",
+                        hits[0]["center_x"], hits[0]["center_y"])
+                } else {
+                    format!("找到 {} 处「{keyword}」，第一处在 ({}, {})。",
+                        hits.len(), hits[0]["center_x"], hits[0]["center_y"])
+                },
+                json!({
+                    "keyword": keyword,
+                    "found": !hits.is_empty(),
+                    "count": hits.len(),
+                    "matches": hits,
+                    "scanned_lines": lines.len(),
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
             ))
         }
 
         "find_target" => {
             // 名字只能来自参考库。旧写法把名字写进 words，这里一并收下
-            let raw = s(args, "names")
-                .or_else(|| s(args, "words"))
-                .ok_or("缺少 names（要找的名字，必须是先用 teach_target 教过的）")?;
-            let names: Vec<String> = raw
-                .split([',', '，', ';'])
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
+            let names = {
+                let mut v = list_of(args, "names");
+                if v.is_empty() {
+                    v = list_of(args, "words");
+                }
+                v
+            };
             if names.is_empty() {
-                return Err("names 是空的".into());
+                return Err("缺少 names（要找的名字，必须是先用 teach_target 教过的）".into());
             }
             let conf = clamp_f(f(args, "conf").unwrap_or(0.25), 0.0, 1.0) as f32;
             let max_results = clamp_i(f(args, "max_results").unwrap_or(8.0), 1, 64);
-            let img = load_image(args)?;
+            let loaded = load_image(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
             let opts = DetectOptions {
                 conf_thresh: conf,
                 iou_thresh: 0.7,
                 class_filter: Vec::new(),
             };
             let dets = state
-                .prompt_find(PromptInput::Refs { names: names.clone() }, img, opts)
+                .prompt_find(PromptInput::Refs { names: names.clone() }, loaded.img, opts)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut hits: Vec<Value> = dets
+            let total = dets.len();
+            let hits: Vec<Value> = dets
                 .iter()
                 .take(max_results)
-                .map(|d| {
-                    let (cx, cy) = box_center(&d.points);
-                    json!({
-                        "class_name": d.class_name,
-                        "score": d.score,
-                        "center_x": cx,
-                        "center_y": cy,
-                        "box": d.points.iter().map(|p| [p.0, p.1]).collect::<Vec<_>>(),
-                    })
-                })
+                .map(|d| det_json(d, ox, oy))
                 .collect();
-            let total = dets.len();
-            hits.truncate(max_results);
             Ok((
                 if hits.is_empty() {
                     format!(
@@ -590,9 +1142,18 @@ pub async fn exec(
                         names.join("、")
                     )
                 } else {
-                    format!("找到 {} 个「{}」。", total, names.join("、"))
+                    format!(
+                        "找到 {} 个「{}」，最像的在 ({}, {})。",
+                        total, names.join("、"), hits[0]["center_x"], hits[0]["center_y"]
+                    )
                 },
-                json!({ "found": !hits.is_empty(), "matches": hits, "count": total }),
+                json!({
+                    "found": !hits.is_empty(),
+                    "matches": hits,
+                    "count": total,
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
             ))
         }
 
@@ -602,24 +1163,35 @@ pub async fn exec(
             } else {
                 return Err("缺少模板：给 template_path 或 template（要找的那张小图）".into());
             };
-            let needle = load_rgb(&tpl_args)?;
+            let needle = load_rgb(&tpl_args)?.img.to_rgb8();
             let hay = load_rgb(args)?;
+            let (ox, oy) = (hay.ox, hay.oy);
             let threshold = clamp_f(f(args, "threshold").unwrap_or(0.9), 0.0, 1.0);
             let max_results = clamp_i(f(args, "max_results").unwrap_or(1.0), 1, 64);
-            let hits = crate::matcher::find_template(
-                &hay,
-                &needle,
-                &crate::matcher::MatchOptions {
-                    min_score: threshold,
-                    max_results,
-                },
-            )?;
+            let hits = tokio::task::spawn_blocking(move || {
+                crate::matcher::find_template(
+                    &hay.img.to_rgb8(),
+                    &needle,
+                    &crate::matcher::MatchOptions {
+                        min_score: threshold,
+                        max_results,
+                    },
+                )
+            })
+            .await
+            .map_err(|e| format!("匹配任务异常：{e}"))??;
+
             let items: Vec<Value> = hits
                 .iter()
                 .map(|h| {
+                    let (cx, cy) = h.center();
                     json!({
-                        "x": h.x, "y": h.y, "width": h.width, "height": h.height,
-                        "center_x": h.center().0, "center_y": h.center().1,
+                        "x": h.x as i32 + ox,
+                        "y": h.y as i32 + oy,
+                        "width": h.width,
+                        "height": h.height,
+                        "center_x": cx + ox as f64,
+                        "center_y": cy + oy as f64,
                         "score": h.score,
                     })
                 })
@@ -628,29 +1200,178 @@ pub async fn exec(
                 if items.is_empty() {
                     format!("没找到（阈值 {threshold}）。可以调低 threshold 再试。")
                 } else {
-                    format!("找到 {} 处，最像的那个在 ({}, {})。", items.len(),
+                    format!("找到 {} 处，最像的那个中心在 ({}, {})。", items.len(),
                         items[0]["center_x"], items[0]["center_y"])
                 },
-                json!({ "found": !items.is_empty(), "matches": items, "count": items.len() }),
+                json!({
+                    "found": !items.is_empty(),
+                    "matches": items,
+                    "count": items.len(),
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
+            ))
+        }
+
+        "detect_objects" => {
+            let loaded = load_rgb(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
+            let conf = clamp_f(f(args, "conf").unwrap_or(0.3), 0.0, 1.0) as f32;
+            let max_results = clamp_i(f(args, "max_results").unwrap_or(30.0), 1, 200);
+            let model = s(args, "model").or_else(|| s(args, "engine"));
+            let opts = OcrOptions {
+                engine: Some(model.unwrap_or_else(|| "yolo".to_string())),
+                ..Default::default()
+            };
+            let detect = DetectOptions {
+                conf_thresh: conf,
+                iou_thresh: 0.7,
+                class_filter: Vec::new(),
+            };
+            let dets = state
+                .detect_objects(&opts, loaded.img, detect)
+                .await
+                .map_err(|e| e.message())?;
+
+            // 类别按名字过滤而不是 id：AI 和用户都只知道「人/车」，不知道模型里 0 是哪个
+            let want = list_of(args, "classes");
+            let items: Vec<Value> = dets
+                .iter()
+                .filter(|d| {
+                    want.is_empty()
+                        || want.iter().any(|w| {
+                            let name = d.class_name.to_lowercase();
+                            let w = w.to_lowercase();
+                            name.contains(&w) || w.contains(&name) || d.class_id.to_string() == w
+                        })
+                })
+                .take(max_results)
+                .map(|d| det_json(d, ox, oy))
+                .collect();
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|d| d["class_name"].as_str().map(str::to_string))
+                .collect();
+            let uniq: Vec<String> = {
+                let mut u: Vec<String> = Vec::new();
+                for n in names {
+                    if !u.contains(&n) {
+                        u.push(n);
+                    }
+                }
+                u
+            };
+            Ok((
+                if items.is_empty() {
+                    format!("没检出目标（共 {} 个候选）。可以调低 conf，或确认装了检测模型（list_models）。", dets.len())
+                } else {
+                    format!("检出 {} 个目标：{}。", items.len(),
+                        if uniq.is_empty() { "（无类别名）".to_string() } else { uniq.join("、") })
+                },
+                json!({
+                    "count": items.len(),
+                    "detections": items,
+                    "class_names": uniq,
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
+            ))
+        }
+
+        "read_table" => {
+            let loaded = load_rgb(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
+            let mode_raw = s(args, "mode").unwrap_or_else(|| "auto".to_string());
+            let mode = crate::engine::table::Mode::parse(&mode_raw).ok_or_else(|| {
+                format!("mode 只能是 auto / structure / detect，收到「{mode_raw}」")
+            })?;
+            let with_text = b(args, "with_text").unwrap_or(true);
+            let device = match s(args, "device").map(|d| d.to_ascii_lowercase()) {
+                Some(d) if d == "cpu" => Device::Cpu,
+                _ => Device::Directml,
+            };
+
+            let root = state.models_root.clone();
+            let page = loaded.img.clone();
+            let (fallback, mut hits) = tokio::task::spawn_blocking(move || {
+                crate::engine::table::recognize_page(&root, &page, device, mode, 0.5)
+            })
+            .await
+            .map_err(|e| format!("表格识别任务异常：{e}"))?
+            .map_err(|e| e.to_string())?;
+
+            if with_text && hits.iter().any(|h| h.result.is_some()) {
+                match state.recognize_lines(&OcrOptions::default(), loaded.img).await {
+                    Ok(lines) => super::routes::fill_table_text(&mut hits, &lines),
+                    Err(e) => tracing::warn!("表格文字识别失败，结构与坐标照常返回：{e:?}"),
+                }
+            }
+
+            let tables: Vec<Value> = to_table_dtos(hits)
+                .into_iter()
+                .map(|t| {
+                    let mut v = serde_json::to_value(&t).unwrap_or_default();
+                    // 表格框的坐标也要平移成屏幕绝对坐标，否则跟别的工具对不上
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("x".into(), json!(t.x as i64 + ox as i64));
+                        obj.insert("y".into(), json!(t.y as i64 + oy as i64));
+                    }
+                    v
+                })
+                .collect();
+
+            let truncated = tables.iter().any(|t| t["truncated"] == json!(true));
+            Ok((
+                if tables.is_empty() {
+                    "这张图里没找到表格。如果图本来就是一张表格，试 mode=structure。".to_string()
+                } else {
+                    format!(
+                        "找到 {} 张表格{}{}。",
+                        tables.len(),
+                        if fallback { "（没检出表格框，按整图识别）" } else { "" },
+                        if truncated { "，注意：其中有的表太大，单元格被截断了" } else { "" }
+                    )
+                },
+                json!({
+                    "mode": if fallback { "structure" } else { mode.as_str() },
+                    "fallback": fallback,
+                    "count": tables.len(),
+                    "tables": tables,
+                    "origin_x": ox,
+                    "origin_y": oy,
+                }),
             ))
         }
 
         "read_qrcode" => {
-            let img = load_rgb(args)?;
-            let hits = crate::barcode::decode_barcodes(
-                &img,
-                &crate::barcode::BarcodeOptions {
-                    formats: Vec::new(),
-                    try_harder: b(args, "try_harder").unwrap_or(true),
-                },
-            )?;
+            let loaded = load_rgb(args)?;
+            let (ox, oy) = (loaded.ox, loaded.oy);
+            let img = loaded.img.to_rgb8();
+            let try_harder = b(args, "try_harder").unwrap_or(true);
+            let hits = tokio::task::spawn_blocking(move || {
+                crate::barcode::decode_barcodes(
+                    &img,
+                    &crate::barcode::BarcodeOptions {
+                        formats: Vec::new(),
+                        try_harder,
+                    },
+                )
+            })
+            .await
+            .map_err(|e| format!("条码识别任务异常：{e}"))??;
+
             let items: Vec<Value> = hits
                 .iter()
                 .map(|h| {
                     json!({
                         "text": h.text,
                         "format": h.format,
-                        "bounds": h.bounds,
+                        "x": h.bounds[0] + ox,
+                        "y": h.bounds[1] + oy,
+                        "width": h.bounds[2],
+                        "height": h.bounds[3],
+                        "center_x": h.bounds[0] + ox + h.bounds[2] / 2,
+                        "center_y": h.bounds[1] + oy + h.bounds[3] / 2,
                     })
                 })
                 .collect();
@@ -661,20 +1382,20 @@ pub async fn exec(
                     format!("读到 {} 个码：{}。", items.len(),
                         hits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>().join(" / "))
                 },
-                json!({ "count": items.len(), "codes": items }),
+                json!({ "count": items.len(), "codes": items, "origin_x": ox, "origin_y": oy }),
             ))
         }
 
         "teach_target" => {
             let name = s(args, "name").ok_or("缺少 name（给这个目标起个中文名）")?;
-            let img = load_image(args)?;
+            let loaded = load_image(args)?;
             let bx = nums(args, "box").ok_or("缺少 box，格式 [x1,y1,x2,y2]（参考图左上角为原点）")?;
             if bx.len() != 4 {
                 return Err("box 要是 4 个数：[x1,y1,x2,y2]".into());
             }
             let entry = {
                 let mut refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
-                refs.add(&name, &img, [bx[0] as f32, bx[1] as f32, bx[2] as f32, bx[3] as f32])
+                refs.add(&name, &loaded.img, [bx[0] as f32, bx[1] as f32, bx[2] as f32, bx[3] as f32])
                     .map_err(|e| e.to_string())?
             };
             Ok((
@@ -683,7 +1404,207 @@ pub async fn exec(
             ))
         }
 
-        // ---------------------------------------------------------- 危险
+        "forget_target" => {
+            let name = s(args, "name").ok_or("缺少 name（要忘掉哪个目标）")?;
+            let removed = {
+                let mut refs = state.refs.lock().unwrap_or_else(|e| e.into_inner());
+                refs.remove(&name).map_err(|e| e.to_string())?
+            };
+            Ok((
+                if removed {
+                    format!("忘掉「{name}」了。")
+                } else {
+                    format!("没有叫「{name}」的目标，可能已经删过了。list_targets 能看到现有的。")
+                },
+                json!({ "name": name, "removed": removed }),
+            ))
+        }
+
+        "focus_window" => {
+            let hwnd = resolve_hwnd(args)?;
+            let ok = crate::input::focus_window(hwnd)?;
+            let title = crate::capture::list_windows()
+                .into_iter()
+                .find(|w| w.hwnd == hwnd)
+                .map(|w| w.title)
+                .unwrap_or_default();
+            Ok((
+                if ok {
+                    format!("已把「{title}」切到前台，现在可以往里点击/打字了。")
+                } else {
+                    format!(
+                        "没能把「{title}」切到前台（Windows 前台锁拦截，后台进程不能随便抢焦点）。\
+                         可以让我先把窗口最小化再还原，或者由你手动点一下任务栏。"
+                    )
+                },
+                json!({ "hwnd": hwnd, "title": title, "foreground": ok }),
+            ))
+        }
+
+        // ============================================================ 桌面操控
+        "move_mouse" => {
+            let x = req_i(args, "x", "屏幕 X 坐标")?;
+            let y = req_i(args, "y", "屏幕 Y 坐标")?;
+            crate::input::move_to(x, y)?;
+            Ok((
+                format!("鼠标移到 ({x}, {y})。"),
+                json!({ "x": x, "y": y }),
+            ))
+        }
+
+        "click_at" => {
+            let x = req_i(args, "x", "屏幕 X 坐标（find_text/find_target 返回的 center_x）")?;
+            let y = req_i(args, "y", "屏幕 Y 坐标")?;
+            let button = match crate::input::Button::parse(&s(args, "button").unwrap_or_default()) {
+                Some(b) => b,
+                None => return Err("button 只能是 left / right / middle".into()),
+            };
+            let count = clamp_i(f(args, "count").unwrap_or(1.0), 1, 3) as u32;
+            crate::input::click(x, y, button, count)?;
+            Ok((
+                format!(
+                    "在 ({x}, {y}) {}{}。",
+                    match button {
+                        crate::input::Button::Left => "左键",
+                        crate::input::Button::Right => "右键",
+                        crate::input::Button::Middle => "中键",
+                    },
+                    if count > 1 { format!("点了 {count} 下") } else { "点了一下".to_string() }
+                ),
+                json!({ "x": x, "y": y, "count": count }),
+            ))
+        }
+
+        "drag_mouse" => {
+            let x = req_i(args, "x", "起点 X")?;
+            let y = req_i(args, "y", "起点 Y")?;
+            let to_x = req_i(args, "to_x", "终点 X")?;
+            let to_y = req_i(args, "to_y", "终点 Y")?;
+            let button = match crate::input::Button::parse(&s(args, "button").unwrap_or_default()) {
+                Some(b) => b,
+                None => return Err("button 只能是 left / right / middle".into()),
+            };
+            crate::input::drag((x, y), (to_x, to_y), button)?;
+            Ok((
+                format!("从 ({x}, {y}) 拖到 ({to_x}, {to_y})。"),
+                json!({ "from": [x, y], "to": [to_x, to_y] }),
+            ))
+        }
+
+        "scroll" => {
+            let (cx, cy) = crate::input::cursor_pos();
+            let x = f(args, "x").map(|v| v.round() as i32).unwrap_or(cx);
+            let y = f(args, "y").map(|v| v.round() as i32).unwrap_or(cy);
+            let delta = clamp_f(f(args, "delta").unwrap_or(-120.0), -12000.0, 12000.0) as i32;
+            crate::input::scroll(x, y, delta)?;
+            Ok((
+                format!(
+                    "在 ({x}, {y}) 滚了 {} 格。",
+                    (delta as f64 / 120.0).round()
+                ),
+                json!({ "x": x, "y": y, "delta": delta }),
+            ))
+        }
+
+        "type_text" => {
+            let text = s(args, "text").ok_or("缺少 text（要输入的文字）")?;
+            crate::input::type_text(&text)?;
+            Ok((
+                format!("输入了 {} 个字：{}", text.chars().count(),
+                    text.chars().take(40).collect::<String>()),
+                json!({ "typed_chars": text.chars().count() }),
+            ))
+        }
+
+        "press_key" => {
+            let keys = s(args, "keys").ok_or("缺少 keys（如 \"enter\" 或 \"ctrl+s\"）")?;
+            crate::input::press_keys(&keys)?;
+            Ok((
+                format!("按了 {keys}。"),
+                json!({ "keys": keys }),
+            ))
+        }
+
+        // ============================================================ 模型 / 服务
+        "install_model" => {
+            let id = s(args, "id").ok_or("缺少 id（模型标识，list_models 里有）")?;
+            let data_dir = state.data_dir.clone();
+            let (cat, _online) = tokio::task::spawn_blocking(move || {
+                crate::modellib::load_catalog(&data_dir, false)
+            })
+            .await
+            .map_err(|e| format!("读清单任务异常：{e}"))?;
+            let entry = crate::modellib::find(&cat, &id)
+                .ok_or_else(|| {
+                    let ids: Vec<&str> = cat.models.iter().map(|m| m.id.as_str()).collect();
+                    format!("没有 id 为 {id:?} 的模型。可用：{}", ids.join(" / "))
+                })?
+                .clone();
+
+            if crate::modellib::is_installed(&state.models_root, &entry) {
+                return Ok((
+                    format!("「{}」本来就装好了，直接用就行。", entry.name),
+                    json!({ "id": id, "installed": true }),
+                ));
+            }
+            {
+                let g = installs().lock().unwrap_or_else(|e| e.into_inner());
+                if g.contains_key(&id) {
+                    return Ok((
+                        format!("「{}」已经在下载了，用 list_models 看进度。", entry.name),
+                        json!({ "id": id, "installing": true }),
+                    ));
+                }
+            }
+
+            // 后台跑：一两百 MB 的下载不能让 AI 的 HTTP 请求干等着超时
+            let root = state.models_root.clone();
+            let dd = state.data_dir.clone();
+            let e = entry.clone();
+            set_install(&id, 0, e.size, "start");
+            tokio::task::spawn_blocking(move || {
+                let id2 = e.id.clone();
+                let r = crate::modellib::install(&root, &dd, &e, |done, total, phase| {
+                    set_install(&id2, done, total, phase);
+                });
+                if let Err(err) = &r {
+                    tracing::warn!("AI 装模型 {} 失败：{err}", e.id);
+                }
+                clear_install(&id2);
+            });
+
+            Ok((
+                format!(
+                    "开始下载「{}」（约 {:.1} MB），在后台跑。用 list_models 看进度，装完对应接口就能用。",
+                    entry.name,
+                    entry.size as f64 / 1048576.0
+                ),
+                json!({ "id": id, "started": true, "size_mb": (entry.size as f64 / 1048576.0 * 10.0).round() / 10.0 }),
+            ))
+        }
+
+        "remove_model" => {
+            let id = s(args, "id").ok_or("缺少 id（模型标识，list_models 里有）")?;
+            let data_dir = state.data_dir.clone();
+            let (cat, _) = tokio::task::spawn_blocking(move || {
+                crate::modellib::load_catalog(&data_dir, false)
+            })
+            .await
+            .map_err(|e| format!("读清单任务异常：{e}"))?;
+            let entry = crate::modellib::find(&cat, &id)
+                .ok_or_else(|| format!("没有 id 为 {id:?} 的模型"))?
+                .clone();
+            let root = state.models_root.clone();
+            let name = entry.name.clone();
+            tokio::task::spawn_blocking(move || crate::modellib::remove(&root, &entry))
+                .await
+                .map_err(|e| format!("卸载任务异常：{e}"))??;
+            Ok((
+                format!("卸载了「{name}」。再要用得重新装（install_model）。"),
+                json!({ "id": id, "removed": true }),
+            ))
+        }
+
         "server_start" => {
             if state.is_running() {
                 return Ok((
@@ -697,7 +1618,7 @@ pub async fn exec(
                 if state.is_running() {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if !state.is_running() {
                 return Err(format!("服务没起来：127.0.0.1:{} 可能被占用", state.port()));
@@ -787,6 +1708,13 @@ pub async fn exec(
         }
 
         other => {
+            // 清单里有、这里没实现 = 程序 bug，明确说出来，别让 AI 以为是自己参数写错了
+            if risk_of(other).is_some() {
+                return Err(format!(
+                    "工具 {other:?} 在清单里但还没实现（这是程序 bug，不是你的参数问题）。\
+                     先用 list_endpoints 做别的，并把这句话告诉用户。"
+                ));
+            }
             let hint = closest_tool(other)
                 .map(|c| format!("。你想说的可能是 {c:?}"))
                 .unwrap_or_default();
@@ -797,11 +1725,49 @@ pub async fn exec(
     }
 }
 
-/// 最接近的工具名，给「AI 把工具名写错」时自我修正用。
-///
-/// 为什么值得做：AI 常见的错法不是随机拼错，而是**把名字写短**
-/// （`ocr` → `ocr_image`）或者漏个下划线。光说「未知工具」，
-/// AI 只能再去拉一次清单碰运气；给一个候选名，它下一发就对。
+// ---------------------------------------------------------------------------
+// 出参小工具（坐标一律平移到屏幕绝对坐标）
+// ---------------------------------------------------------------------------
+
+/// 一行文字 → JSON。`ox/oy` 是这张图在屏幕上的原点。
+fn line_json(l: &crate::engine::TextLine, ox: i32, oy: i32) -> Value {
+    let pts: Vec<[f64; 2]> = l.points.iter().map(|p| [p.0 + ox as f64, p.1 + oy as f64]).collect();
+    let xs: Vec<f64> = pts.iter().map(|p| p[0]).collect();
+    let ys: Vec<f64> = pts.iter().map(|p| p[1]).collect();
+    let x0 = xs.iter().cloned().fold(f64::MAX, f64::min);
+    let x1 = xs.iter().cloned().fold(f64::MIN, f64::max);
+    let y0 = ys.iter().cloned().fold(f64::MAX, f64::min);
+    let y1 = ys.iter().cloned().fold(f64::MIN, f64::max);
+    json!({
+        "text": l.text,
+        "score": l.score,
+        "x": x0.round() as i32,
+        "y": y0.round() as i32,
+        "width": (x1 - x0).round().max(0.0) as i32,
+        "height": (y1 - y0).round().max(0.0) as i32,
+        "center_x": ((x0 + x1) / 2.0).round() as i32,
+        "center_y": ((y0 + y1) / 2.0).round() as i32,
+        "box": pts,
+    })
+}
+
+/// 一个检测框 → JSON（同样平移到屏幕绝对坐标）。
+fn det_json(d: &crate::engine::Detection, ox: i32, oy: i32) -> Value {
+    let (x0, y0) = (d.points[0].0 + ox as f64, d.points[0].1 + oy as f64);
+    let (x1, y1) = (d.points[2].0 + ox as f64, d.points[2].1 + oy as f64);
+    json!({
+        "class_id": d.class_id,
+        "class_name": d.class_name,
+        "score": d.score,
+        "x": x0.round() as i32,
+        "y": y0.round() as i32,
+        "width": (x1 - x0).round().max(0.0) as i32,
+        "height": (y1 - y0).round().max(0.0) as i32,
+        "center_x": ((x0 + x1) / 2.0).round() as i32,
+        "center_y": ((y0 + y1) / 2.0).round() as i32,
+    })
+}
+
 fn closest_tool(name: &str) -> Option<&'static str> {
     let n = name.trim().to_ascii_lowercase();
     if n.is_empty() {
@@ -842,20 +1808,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-// ---------------------------------------------------------------------------
-// 小工具
-// ---------------------------------------------------------------------------
-
-fn line_center(l: &crate::engine::TextLine) -> (f64, f64) {
-    let (sx, sy): (f64, f64) = l.points.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
-    (sx / 4.0, sy / 4.0)
-}
-
-fn box_center(pts: &[(f64, f64); 4]) -> (f64, f64) {
-    let (sx, sy) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
-    (sx / 4.0, sy / 4.0)
-}
-
 /// 端点 → 方法。必须与 `routes::PATHS` 一一对应（有单测钉住）。
 const ENDPOINT_METHODS: &[(&str, &str)] = &[
     ("/ocr/shibie", "POST"),
@@ -877,28 +1829,48 @@ const ENDPOINT_METHODS: &[(&str, &str)] = &[
     ("/vision/qrcode", "POST"),
     ("/vision/prompt", "POST"),
     ("/vision/promptref", "GET/POST/DELETE"),
+    ("/ocr/biaoge", "POST"),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 工具清单与 `exec` 的分支必须一一对应：清单里写了但 exec 不认，
-    /// AI 会调一个「文档里有、实际没有」的工具。
+    /// 工具清单自身的一致性：名字唯一、都有 summary 与合法风险档。
     #[test]
-    fn every_listed_tool_is_executable() {
-        for t in TOOLS {
-            assert!(
-                risk_of(t.name).is_some(),
-                "工具 {} 不在 TOOLS 里（重复或漏登记）",
-                t.name
-            );
-            assert!(!t.summary.trim().is_empty(), "{} 缺 summary", t.name);
-            assert!(!t.risk.is_empty(), "{} 缺 risk", t.name);
-        }
+    fn every_listed_tool_is_well_formed() {
         let mut seen = std::collections::HashSet::new();
         for t in TOOLS {
             assert!(seen.insert(t.name), "工具名重复：{}", t.name);
+            assert!(!t.summary.trim().is_empty(), "{} 缺 summary", t.name);
+            assert!(
+                matches!(t.risk, RISK_READONLY | RISK_WRITE | RISK_DANGEROUS),
+                "{} 的风险档非法：{}",
+                t.name,
+                t.risk
+            );
+            assert!(
+                t.name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{} 不是 snake_case（AI 最容易照抄错的就是名字）",
+                t.name
+            );
+        }
+    }
+
+    /// 风险分档要「先只读、后写、最后危险」——清单顺序就是展示顺序，
+    /// 打乱了 AI 会先看见一堆危险工具，容易被诱导直接上手动操作。
+    #[test]
+    fn tools_are_grouped_by_risk() {
+        let rank = |r: &str| match r {
+            RISK_READONLY => 0,
+            RISK_WRITE => 1,
+            _ => 2,
+        };
+        let mut last = 0;
+        for t in TOOLS {
+            let now = rank(t.risk);
+            assert!(now >= last, "{} 的风险档排到前面去了（顺序：只读→写→危险）", t.name);
+            last = now;
         }
     }
 
@@ -945,9 +1917,16 @@ mod tests {
         assert_eq!(f(&a, "max_results"), Some(5.0));
         assert_eq!(b(&a, "flag"), Some(true));
         assert_eq!(nums(&a, "box"), Some(vec![1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(num4(&a, "box"), Some([1, 2, 3, 4]));
         // 缺参数不该 panic
         assert_eq!(f(&a, "nope"), None);
         assert_eq!(s(&a, "nope"), None);
+    }
+
+    #[test]
+    fn list_of_accepts_chinese_separators() {
+        let a = json!({ "names": "提交按钮，搜索框; 关 闭" });
+        assert_eq!(list_of(&a, "names"), vec!["提交按钮", "搜索框", "关 闭"]);
     }
 
     #[test]
@@ -956,5 +1935,14 @@ mod tests {
         assert_eq!(clamp_f(-5.0, 0.0, 1.0), 0.0);
         assert_eq!(clamp_f(f64::NAN, 0.0, 1.0), 0.0);
         assert_eq!(clamp_i(9999.0, 1, 64), 64);
+    }
+
+    /// AI 最常见的错法是「只写了 x 忘了 y」——报错必须点名缺哪个参数。
+    #[test]
+    fn missing_required_number_names_the_field() {
+        let a = json!({ "x": 10 });
+        let e = req_i(&a, "y", "屏幕 Y 坐标").unwrap_err();
+        assert!(e.contains("y"), "报错里要点名缺的是 y：{e}");
+        assert!(e.contains("屏幕 Y 坐标"), "还要说清该填什么：{e}");
     }
 }

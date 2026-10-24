@@ -1652,6 +1652,14 @@ pub struct AiStatusOut {
     pub prompt: String,
     /// 服务当前是否在监听（接口开着但服务没起的话，AI 也调不通）。
     pub running: bool,
+    /// 可用工具数（面板上写「N 个工具」用，避免前端自己维护一个会过时的数字）。
+    pub tool_count: usize,
+    /// 按风险档拆开：只读 / 写 / 危险。
+    pub tool_readonly: usize,
+    pub tool_write: usize,
+    pub tool_dangerous: usize,
+    /// 人话能力清单（「你可以帮我……」那几句），面板直接列出来。
+    pub highlights: Vec<String>,
 }
 
 #[tauri::command]
@@ -1661,6 +1669,7 @@ pub fn ai_status(state: State<'_, Arc<AppState>>) -> AiStatusOut {
         (cfg.ai_enabled, cfg.ai_token.clone(), cfg.port)
     };
     let base = format!("http://127.0.0.1:{port}");
+    let (ro, wr, dg) = crate::api::ai_tools::risk_counts();
     AiStatusOut {
         enabled,
         port,
@@ -1668,6 +1677,14 @@ pub fn ai_status(state: State<'_, Arc<AppState>>) -> AiStatusOut {
         token: token.clone(),
         prompt: crate::api::ai::prompt(&base, &token),
         running: state.is_running(),
+        tool_count: crate::api::ai_tools::TOOLS.len(),
+        tool_readonly: ro,
+        tool_write: wr,
+        tool_dangerous: dg,
+        highlights: crate::api::ai_tools::highlights()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
     }
 }
 

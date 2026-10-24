@@ -404,10 +404,15 @@ pub fn prompt(base_url: &str, token: &str) -> String {
          你可以帮我：{highlights}。\n\n\
          注意事项：\n\
          - 这个接口只在**本机**能访问（127.0.0.1），跑在云端的 AI 连不上；\n\
+         - **所有返回的坐标都是屏幕绝对坐标**，可以直接给 click_at / move_mouse；\n\
+         - 要操作某个软件：先 list_windows 拿 title/hwnd → focus_window 切到前台 → \n\
+           find_text / find_target 找位置 → click_at 点下去；\n\
          - 找我界面上的东西时，**中文词可以直接用**（如「提交按钮」「人」「公交车」）；\n\
          - 每次直接告诉我结果（用中文、说人话），别把原始 JSON 贴给我；\n\
          - 如果提示词里有你没见过的中文目标，先调 GET /ai/v1/tools 看看有没有 \
            teach_target 这类工具，或者让我到界面上框一次教给它；\n\
+         - **点名操作（click_at / type_text / press_key 等）会真的动我的鼠标键盘**，\n\
+           先跟我说清要点哪里、打什么字，我同意再动手；\n\
          - 若接口没打开，让我到「设置 → AI 控制」里打开再试。\n",
         base = base_url,
         token = token,

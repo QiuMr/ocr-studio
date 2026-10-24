@@ -314,6 +314,13 @@ export interface AiStatus {
   token: string;
   prompt: string;
   running: boolean;
+  /** 可用工具数（后端按工具表算，前端不自己维护数字） */
+  tool_count: number;
+  tool_readonly: number;
+  tool_write: number;
+  tool_dangerous: number;
+  /** 能力清单（「你可以帮我……」），直接列给用户看 */
+  highlights: string[];
 }
 
 // ---------------------------------------------------------------- 引擎

@@ -1008,10 +1008,15 @@ export function SettingsPage() {
               <Badge variant={ai?.enabled ? "success" : "outline"}>
                 {ai?.enabled ? "已开启" : "默认关闭"}
               </Badge>
+              {ai && (
+                <Badge variant="outline" className="font-mono">
+                  {ai.tool_count} 个工具
+                </Badge>
+              )}
             </CardTitle>
           </div>
           <CardDescription>
-            给本机 AI 一个简单的 HTTP 地址，让它直接调用 OCR、找图、截图和服务控制，不需要安装 MCP。
+            给本机 AI 一个简单的 HTTP 地址：它能看屏幕、认字、读表格、找界面元素，也能真的点按钮、拖拽、打字。不用装 MCP。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -1022,7 +1027,9 @@ export function SettingsPage() {
                 <Hint>只监听 127.0.0.1，云端网页 AI 无法访问；开启后仍需连接码。</Hint>
               </Label>
               <p className="mt-1 text-[12px] leading-4 text-neutral-500">
-                {ai?.enabled ? "已开放，AI 可以按工具清单调用本机服务。" : "关闭状态，AI 请求会被拒绝。"}
+                {ai?.enabled
+                  ? "已开放，AI 可以按工具清单调用本机服务（坐标一律是屏幕绝对坐标，可直接用来点击）。"
+                  : "关闭状态，AI 请求会被拒绝。"}
               </p>
             </div>
             <Switch
@@ -1053,6 +1060,35 @@ export function SettingsPage() {
               <Row label="当前监听">
                 <Badge variant={ai.running ? "success" : "warning"}>{ai.running ? "服务运行中" : "服务未启动"}</Badge>
               </Row>
+            </div>
+          )}
+
+          {ai && ai.highlights.length > 0 && (
+            <div className="rounded-lg bg-neutral-50 px-3.5 py-3">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-neutral-800">
+                  <Zap className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                  它现在能帮你做这些
+                </span>
+                <span className="text-[12px] text-neutral-400">
+                  {ai.tool_readonly} 个只读 · {ai.tool_write} 个读屏幕 · {ai.tool_dangerous} 个会动键鼠
+                </span>
+              </div>
+              <ul className="mt-2 grid gap-1 text-[12px] leading-5 text-neutral-600 sm:grid-cols-2">
+                {ai.highlights.map((h) => (
+                  <li key={h} className="flex items-start gap-1.5">
+                    <Check className="mt-[3px] h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                    <span>{h}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 flex items-start gap-1.5 border-t border-neutral-200/70 pt-2 text-[12px] leading-5 text-neutral-500">
+                <Shield className="mt-[3px] h-3.5 w-3.5 shrink-0 text-amber-600" />
+                <span>
+                  点鼠标、打字这类动作用的是「危险」档工具，会真的操作你的电脑；每次调用都写进运行日志，
+                  不给 AI 开放退出程序、开机自启和连接码本身。
+                </span>
+              </p>
             </div>
           )}
 

@@ -2333,13 +2333,13 @@ async fn danzijson(State(state): State<Arc<AppState>>, req: Request) -> Response
 }
 // ---------------------------------------------------------------- 关键词匹配
 
-enum Matcher {
+pub(crate) enum Matcher {
     Sub(String),
     Re(regex::Regex),
 }
 
 impl Matcher {
-    fn is_match(&self, s: &str) -> bool {
+    pub(crate) fn is_match(&self, s: &str) -> bool {
         match self {
             Matcher::Sub(k) => s.contains(k.as_str()),
             Matcher::Re(r) => r.is_match(s),
@@ -2348,7 +2348,7 @@ impl Matcher {
 }
 
 /// `/正则/` 形式按正则匹配，其余按普通子串匹配。
-fn build_matcher(keyword: &str) -> Result<Matcher, ApiError> {
+pub(crate) fn build_matcher(keyword: &str) -> Result<Matcher, ApiError> {
     let k = keyword.trim();
     if k.len() >= 2 && k.starts_with('/') && k.ends_with('/') {
         let pat = &k[1..k.len() - 1];
@@ -2367,12 +2367,16 @@ mod tests {
 
     /// 路径表就是路由表的镜像：数量对不上说明有人加了路由忘了登记，
     /// 那样 404 提示会指错地方。
+    ///
+    /// **加端点时必须同步三处**：这张表、`ai_tools::ENDPOINT_METHODS`、
+    /// 前端 `src/lib/endpoints.ts`（那边 `ENDPOINT_PATH_COUNT` 也钉了数量）。
     #[test]
     fn paths_table_covers_all_endpoints() {
         assert_eq!(
             PATHS.len(),
-            19,
-            "端点数量变了就要同步 PATHS（还有前端 src/lib/endpoints.ts 与各文档的 18 这个数）"
+            20,
+            "端点数量变了就要同步 PATHS（还有前端 src/lib/endpoints.ts 的 ENDPOINT_PATH_COUNT、\
+             ai_tools::ENDPOINT_METHODS、docs 里的端点数）"
         );
         for p in PATHS {
             assert!(p.starts_with('/'), "路径必须以 / 开头: {p}");

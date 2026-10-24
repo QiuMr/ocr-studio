@@ -15,6 +15,8 @@ pub mod commands;
 pub mod config;
 /// 多引擎抽象层（PP-OCR / DDDDOCR / YOLO）。设计契约见 `docs/ENGINES.md`。
 pub mod engine;
+/// 键鼠注入（SendInput）。只被 AI 工具层用到，但单独成模块便于自己写单测。
+pub mod input;
 pub mod logbuf;
 /// 可选模型库：按需下载 / 手动导入（主包只带 small，其余用的时候再下）。
 pub mod modellib;

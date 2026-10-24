@@ -284,7 +284,11 @@ fn read_tokens(sess: &Session) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// 一个单元格。
-#[derive(Debug, Clone, Default)]
+///
+/// **不 derive Default**：结构体默认值会让 rowspan/colspan 变成 0，
+/// 而 0 行高的格子在任何布局算法里都是「不存在」，渲染出来是一张空表。
+/// 手写一份把两个 span 默认成 1，语义才对。
+#[derive(Debug, Clone)]
 pub struct Cell {
     /// 行号（0 起），已考虑 rowspan 占位
     pub row: usize,
@@ -299,6 +303,22 @@ pub struct Cell {
     pub height: u32,
     /// 格内文字（`with_text` 时填，多行用空格连）
     pub text: String,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell {
+            row: 0,
+            col: 0,
+            rowspan: 1,
+            colspan: 1,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            text: String::new(),
+        }
+    }
 }
 
 /// 结构识别的完整结果。
@@ -362,7 +382,12 @@ impl TableResult {
         if self.cells.is_empty() {
             return String::new();
         }
-        let rows = self.cells.iter().map(|c| c.row + c.rowspan).max().unwrap_or(0);
+        let rows = self
+            .cells
+            .iter()
+            .map(|c| c.row + c.rowspan.max(1))
+            .max()
+            .unwrap_or(0);
         let mut lines = Vec::with_capacity(rows);
         for r in 0..rows {
             let mut row: Vec<&Cell> = self.cells.iter().filter(|c| c.row == r).collect();
@@ -485,7 +510,11 @@ enum Tok<'a> {
 }
 
 fn classify(t: &str) -> Tok<'_> {
-    match t.trim_end() {
+    // **必须两端都裁**：SLANet 的词表里属性 token 是带前导空格的
+    // （` colspan="3"`），只裁尾部会让合并单元格全部退化成普通格子——
+    // 不报错、不崩，只是 HTML 里少了 colspan，最难发现的那种错。
+    let s = t.trim();
+    match s {
         "<tr>" => Tok::RowStart,
         "</tr>" => Tok::RowEnd,
         "<td" | "<td>" | "<th" => Tok::CellOpen,
@@ -500,9 +529,20 @@ fn classify(t: &str) -> Tok<'_> {
 
 /// 从 `colspan="3"` 里取 3。取不到就当 1（比当 0 安全，0 会让布局循环空转）。
 fn attr_num(s: &str) -> Option<usize> {
-    let start = s.find('"')? + 1;
-    let end = s[start..].find('"')? + start;
-    s[start..end].trim().parse::<usize>().ok().filter(|&n| n >= 1)
+    // 有引号按引号取；没有引号（`colspan=3`）就取等号后面那段
+    let raw = if let Some(open) = s.find('"') {
+        let rest = &s[open + 1..];
+        match rest.find('"') {
+            Some(end) => &rest[..end],
+            None => rest,
+        }
+    } else {
+        s.split_once('=').map(|(_, v)| v).unwrap_or("")
+    };
+    raw.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n >= 1)
 }
 
 /// 待布局的原始单元格。
@@ -706,7 +746,11 @@ fn render_html(cells: &[Cell]) -> String {
     if cells.is_empty() {
         return String::new();
     }
-    let rows = cells.iter().map(|c| c.row + c.rowspan).max().unwrap_or(0);
+    let rows = cells
+        .iter()
+        .map(|c| c.row + c.rowspan.max(1))
+        .max()
+        .unwrap_or(0);
     let mut by_row: Vec<Vec<&Cell>> = vec![Vec::new(); rows];
     for c in cells {
         if c.row < rows {

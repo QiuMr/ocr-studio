@@ -1,13 +1,41 @@
 # OCR Studio 项目进度记录
 
 > 本文档记录「现在做到哪里了」。每次有实质进展后更新，旧结论不删除、只标注状态。
-> 最后更新：2026-10-24（表格识别：表格图 → HTML/TSV，整页自动找表格）
+> 最后更新：2026-10-24 晚（AI 操控补全：17 → 35 个工具，AI 能真的动手了）
 
 ---
 
 ## 0. 一句话现状
 
-**本轮（10-24）：表格识别。** 用户否掉了 YOLO26n（「才一点点类别，没用」），
+**本轮（10-24 晚）：AI 操控补全。** 用户的要求是「能操控得越多越好」。原来 AI 只能
+「看」（截图/认字/找图），不能动手，也不能读表格、不能按文字定位、不能碰模型库 ——
+闭环断在最后一步。现在 17 → **35 个工具**，三档风险（只读 10 / 读屏幕 11 / 动手 14），
+详见 `docs/AI.md`。
+
+新增的能力分四类：
+
+- **真动手**（新模块 `src-tauri/src/input.rs`，SendInput）：`click_at` / `drag_mouse` /
+  `scroll` / `move_mouse` / `type_text`（中文走 `KEYEVENTF_UNICODE`）/ `press_key`
+  （`ctrl+s` 这种组合键）。坐标用**虚拟屏归一化**（`VIRTUALDESK`，按「虚拟屏宽高-1」
+  映射 0..65535）—— 用主屏尺寸算的话，副屏在主屏左侧时点下去整体偏一屏。
+- **补页面能力**：`read_table`（表格）、`detect_objects`（通用检测）、`find_text`
+  （认字后按关键词/正则定位，比 `find_target` 省一步「先教」）。
+- **窗口**：`list_windows` + `focus_window`，`screenshot`/`ocr_image`/`find_*` 全部支持
+  `source=window`（原来 AI 直接报「不支持窗口」）。输入只进前台窗口，所以前置是必需的。
+- **资产/运维**：`list_models` / `install_model`（后台下载，立即返回，不占住 AI 的
+  请求）/ `remove_model` / `check_update` / `forget_target` / `wait`。
+
+统一了一条最容易错的约定：**所有返回坐标都是屏幕绝对坐标 + `origin_x/origin_y`**，
+`find_text` 的 `center_x/center_y` 可以直接喂 `click_at`。参数解析宽松（字符串数字也收），
+必填缺失时点名缺哪个字段。
+
+顺带修掉两个上一轮留下的真 bug（是测试红着发现的，不是猜的）：
+1. `table.rs::classify` 只 `trim_end()`，而 SLANet 词表里的属性 token 带**前导空格**
+   （` colspan="3"`）→ 合并单元格一直被静默忽略，HTML 里没有 colspan。
+2. `Cell` 用 `derive(Default)` → `rowspan/colspan` 默认 0，渲染出来是 `<table></table>`。
+   改成手写 Default（span = 1）并在 `render_html`/`to_tsv` 里 `max(1)` 兜底。
+
+**上一轮（10-24）：表格识别。** 用户否掉了 YOLO26n（「才一点点类别，没用」），
 要「两个表格的」——正好是一对配套模型：
 
 - `detect.onnx` **7.06MB**（PicoDet，`PP-DocLayout-S` 系列的 table-only 版）：
