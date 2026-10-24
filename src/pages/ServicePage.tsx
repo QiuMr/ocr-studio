@@ -334,6 +334,11 @@ print(r["data"]["text"])`,
           <p className="mt-1.5 text-[12px] font-medium text-neutral-500">
             共 {ENDPOINT_PATH_COUNT} 个。点任意一类看完整参数和示例。
           </p>
+          {/* /vision/promptref 一个端点三种方法，卡片按条目数，所以下面五张卡的
+              数字加起来比 {ENDPOINT_PATH_COUNT} 多 2 —— 先说清，免得用户以为页面算错。 */}
+          <p className="mt-1 text-[12px] font-medium leading-4 text-neutral-400">
+            promptref 一个端点三种方法算了 3 条，各卡片数字加起来比端点数多 2
+          </p>
         </div>
         <button
           type="button"

@@ -53,6 +53,12 @@ export function ApiPage() {
               {"{ code, msg, data }"}
             </code>
           </p>
+          {/* 口径说明：下面每组的「N 个」数的是**卡片张数**，而 /vision/promptref
+              一个端点三种方法拆成了三张卡。不解释的话，细心的用户把各组数字加起来
+              会比端点数多 2，反而以为页面写错了。 */}
+          <p className="mt-1 text-[12px] font-medium leading-4 text-neutral-400">
+            /vision/promptref 是一个端点的三种方法，分开写了三张，所以各组的卡片数加起来比端点数多 2
+          </p>
         </div>
 
         {/* 地址可改：换了端口之后，下面的示例要能跟着变 */}
