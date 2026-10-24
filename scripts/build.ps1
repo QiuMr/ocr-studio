@@ -68,8 +68,21 @@ if ($code -ne 0) { Write-Host "[FAIL] 前端构建失败（先看上面的 TS �
 Step 2 "触发重新嵌入前端资源"
 (Get-Item (Join-Path $root "src-tauri\build.rs")).LastWriteTime = Get-Date
 
-# ---- 3. release 构建 ----
-Step 3 "cargo build --release（LTO，通常 3~5 分钟）"
+# ---- 3. 接口清单一致性（前后端一本账 + 组不漏）----
+# 放在 Rust 构建之前：纯文本检查，几十毫秒，漏端点/漏组在这里就拦下，
+# 不要等构建完跑起来才发现界面上少了一组接口。
+Step 3 "接口清单一致性"
+$epChecker = Join-Path $root "scripts\check_endpoints.py"
+if (Test-Path $epChecker) {
+    & python $epChecker
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] 接口清单与后端路由不一致（见上），终止构建" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ---- 4. release 构建 ----
+Step 4 "cargo build --release（LTO，通常 3~5 分钟）"
 & $cargoExe build --release --manifest-path (Join-Path $root "src-tauri\Cargo.toml")
 if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] Rust 构建失败" -ForegroundColor Red; exit 1 }
 
@@ -80,8 +93,8 @@ if (-not (Test-Path $exe)) {
 }
 Write-Host "[PASS] 产物: $exe" -ForegroundColor Green
 
-# ---- 4. 校验新前端确实嵌进去了 ----
-Step 4 "校验嵌入资源"
+# ---- 5. 校验新前端确实嵌进去了 ----
+Step 5 "校验嵌入资源"
 $checker = Join-Path $root "scripts\check_embedded_assets.py"
 if (Test-Path $checker) {
     $assets = Get-ChildItem (Join-Path $root "dist\assets") -Filter "*.js" | Select-Object -ExpandProperty Name
@@ -89,15 +102,15 @@ if (Test-Path $checker) {
     if ($LASTEXITCODE -ne 0) { Write-Host "[WARN] 嵌入校验未通过（见上）" -ForegroundColor Yellow }
 }
 
-# ---- 5. 可选打包 ----
+# ---- 6. 可选打包 ----
 if ($Pack) {
-    Step 5 "打包免安装 zip"
+    Step 6 "打包免安装 zip"
     Get-Process | Where-Object { $_.ProcessName -like "*OCR*" } | Stop-Process -Force -ErrorAction SilentlyContinue
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\pack_exe.ps1")
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] 打包失败" -ForegroundColor Red; exit 1 }
 }
 
-# ---- 6. 可选启动 ----
+# ---- 7. 可选启动 ----
 if ($Run) {
     $target = if ($Pack) { Join-Path $root "release\OCR-Studio\OCR Studio.exe" } else { $exe }
     # 必须用资源管理器拉起：agent/终端直接跑 exe 时 WebView2 的 GPU 子进程会崩，

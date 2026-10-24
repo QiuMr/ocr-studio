@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Crosshair,
+  FileSpreadsheet,
   Info,
   Loader2,
   Power,
@@ -17,7 +18,15 @@ import { CodeBlock } from "../components/ui/code-block";
 import { getConfig, getHealth, serverStart, serverStatus, serverStop } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
-import { ENDPOINTS, ENDPOINT_PATH_COUNT, GROUP_DESC, GROUP_LABEL, groupOf, type EndpointGroup } from "../lib/endpoints";
+import {
+  ENDPOINTS,
+  ENDPOINT_PATH_COUNT,
+  GROUP_DESC,
+  GROUP_LABEL,
+  GROUP_ORDER,
+  groupOf,
+  type EndpointGroup,
+} from "../lib/endpoints";
 import type { OcrTab } from "../App";
 import type { AppConfig, Health } from "../types";
 
@@ -32,11 +41,19 @@ import type { AppConfig, Health } from "../types";
  * 把「上传一张图看看识别效果」放第二位——那是验证手段，不是产品本身。
  */
 
-const GROUPS: { key: EndpointGroup; icon: React.ReactNode; tint: string }[] = [
-  { key: "ocr", icon: <Type className="h-4 w-4" />, tint: "bg-[#EFF4FF] text-[#2563EB]" },
-  { key: "find", icon: <Crosshair className="h-4 w-4" />, tint: "bg-[#F2EEFF] text-[#6D4AE6]" },
-  { key: "vision", icon: <Boxes className="h-4 w-4" />, tint: "bg-[#E9F7F1] text-[#0E9F6E]" },
-];
+/**
+ * 每个组的图标和底色。
+ *
+ * 用 `Record<EndpointGroup, …>` 而不是数组：新增组时忘配图标会**编译报错**。
+ * 原来这里是手写数组，加「文档」组时漏了一项，表格在首页概览里直接不显示。
+ */
+const GROUP_STYLE: Record<EndpointGroup, { icon: React.ReactNode; tint: string }> = {
+  ocr: { icon: <Type className="h-4 w-4" />, tint: "bg-[#EFF4FF] text-[#2563EB]" },
+  find: { icon: <Crosshair className="h-4 w-4" />, tint: "bg-[#F2EEFF] text-[#6D4AE6]" },
+  vision: { icon: <Boxes className="h-4 w-4" />, tint: "bg-[#E9F7F1] text-[#0E9F6E]" },
+  doc: { icon: <FileSpreadsheet className="h-4 w-4" />, tint: "bg-[#FFF7E8] text-[#B7791F]" },
+  status: { icon: <Activity className="h-4 w-4" />, tint: "bg-[#F1F3F5] text-[#5B6472]" },
+};
 
 const LEVEL_TEXT: Record<string, string> = {
   tiny: "快",
@@ -329,11 +346,13 @@ print(r["data"]["text"])`,
       </div>
 
       <div className="mt-3 grid gap-3 md:grid-cols-3">
-        {GROUPS.map((g) => {
-          const list = ENDPOINTS.filter((e) => groupOf(e.path) === g.key);
+        {GROUP_ORDER.map((key) => {
+          const list = ENDPOINTS.filter((e) => groupOf(e.path) === key);
+          if (list.length === 0) return null;
+          const style = GROUP_STYLE[key];
           return (
             <button
-              key={g.key}
+              key={key}
               type="button"
               onClick={onOpenApi}
               className="card-lift group flex flex-col rounded-xl border border-neutral-200 bg-white p-4 text-left shadow-card"
@@ -342,18 +361,18 @@ print(r["data"]["text"])`,
                 <span
                   className={cn(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-                    g.tint,
+                    style.tint,
                   )}
                 >
-                  {g.icon}
+                  {style.icon}
                 </span>
-                <span className="text-[14px] font-bold text-neutral-900">{GROUP_LABEL[g.key]}</span>
+                <span className="text-[14px] font-bold text-neutral-900">{GROUP_LABEL[key]}</span>
                 <span className="ml-auto rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-bold text-neutral-500">
                   {list.length} 个
                 </span>
               </div>
               <p className="mt-2.5 text-[12px] font-medium leading-5 text-neutral-500">
-                {GROUP_DESC[g.key]}
+                {GROUP_DESC[key]}
               </p>
               <ul className="mt-3 flex flex-col gap-1.5 border-t border-neutral-100 pt-2.5">
                 {list.slice(0, 2).map((e) => (

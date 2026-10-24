@@ -6,6 +6,7 @@ import {
   ENDPOINT_PATH_COUNT,
   GROUP_DESC,
   GROUP_LABEL,
+  GROUP_ORDER,
   endpointsOf,
   type Endpoint,
   type EndpointGroup,
@@ -21,7 +22,9 @@ import {
  * 不做锚点导航：14 条一屏能扫完，加目录反而多一层。
  */
 
-const ORDER: EndpointGroup[] = ["ocr", "find", "vision", "status"];
+// 组顺序走 endpoints.ts 的 GROUP_ORDER（唯一事实源）。这里原来手写了一份
+// 四组数组，加「文档」组时漏改，表格接口在接口页上静默消失过。
+const ORDER: EndpointGroup[] = GROUP_ORDER;
 
 const ERRORS = [
   { code: "0", text: "成功，结果在 data 里" },

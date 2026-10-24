@@ -39,6 +39,17 @@ export const GROUP_DESC: Record<EndpointGroup, string> = {
   status: "查服务和引擎当前状态，脚本启动时先探一下",
 };
 
+/**
+ * 组的展示顺序，**唯一事实源**。
+ *
+ * 为什么值得单独导出：接口页的 `ORDER` 和首页的 `GROUPS` 原来各自手写了一份
+ * 组数组。加「文档」组时改好了 `EndpointGroup` / `GROUP_LABEL` / `GROUP_DESC`，
+ * 却漏了这两个数组 —— TypeScript 不报错（它们是普通数组，不是 Record），
+ * 结果是 `/ocr/biaoge` 在接口页和首页概览里**静默消失**，而端点数又是对的，
+ * 肉眼完全看不出少了一组。顺序收在这里，两个页面都派生，漏不掉。
+ */
+export const GROUP_ORDER: EndpointGroup[] = ["ocr", "find", "vision", "doc", "status"];
+
 export const ENDPOINTS: Endpoint[] = [
   // ------------------------------------------------------------------ 认字
   {
