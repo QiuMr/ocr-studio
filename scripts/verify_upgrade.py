@@ -188,6 +188,51 @@ def click_text(hwnd, keyword, expect=None, tries=5, rightmost=False):
     return None
 
 
+def click_sidebar_settings(hwnd, w, tries=4):
+    """点侧栏最后一个导航项 —— 布局上固定就是「设置」。
+
+    为什么不按文字找：侧栏是 12px 小字，PP-OCR 对它的识别**不稳定**。
+    实测同一屏把「服务」认成了「设置」，点下去页面根本没切，而 expect 又
+    能在首页别处命中「设置」俩字，整套判断一起错，最后表现是
+    「点了设置却滚不到检查更新」。侧栏顺序是固定的
+    （服务/接口/试跑/日志/设置），取最下面那一项不依赖任何文字识别，
+    版本号（v0.x）用关键词滤掉。
+    """
+    for _ in range(tries):
+        st, r = ai.call("ocr_image", source="window", hwnd=hwnd, region="0,0,220,900", max_lines="30")
+        d = r.get("data") or {}
+        lines = d.get("lines") or []
+        # 坐标**始终是屏幕绝对坐标**（带不带 region 都一样，line_json 里加了
+        # origin）—— 曾经以为 region 路径是相对坐标而多加了一次 origin，
+        # 点去了窗口中间，白绕一圈。实测对比过：同一行带 region 199、不带 196。
+        #
+        # 底部 120px 要排除：OCR 会在窗口下方那条黑边/任务栏区域产生**幻觉文字**
+        # （实测识别出 "•Wo.r.n"，y=834 远超窗口高度 729）。取「最下面一项」时
+        # 会命中它，点下去什么都不会发生，而 expect 又永远等不到。
+        y_limit = w["y"] + w["height"] - 120
+        cand = [
+            l for l in lines
+            if l.get("text") and l.get("center_x", 9999) < 220 and l.get("center_y", 0) < y_limit
+        ]
+        if not cand:
+            ai.call("wait", ms=300)
+            continue
+        cand.sort(key=lambda l: l.get("center_y", 0))
+        target = cand[-1]
+        st, r = ai.call("click_at", x=target["center_x"], y=target["center_y"])
+        if not r.get("ok"):
+            continue
+        # 点完复核：正文出现大标题「设置」才算换页成功
+        for _ in range(8):
+            ai.call("wait", ms=300)
+            st, r = ai.call("find_text", keyword="设置", source="window", hwnd=hwnd)
+            hits = (r.get("data") or {}).get("matches") or []
+            hits.sort(key=lambda m: m["center_x"], reverse=True)
+            if hits and hits[0]["center_x"] > 240:
+                return target
+    return None
+
+
 def main() -> int:
     v0 = health_version()
     print(f"[1] 升级前版本: {v0}")
@@ -220,7 +265,7 @@ def main() -> int:
     # 先看设置页在不在（残留页面可能是测试台），不在就点侧栏「设置」
     st, r = ai.call("find_text", keyword="检查更新", source="window", hwnd=hwnd)
     if not ((r.get("data") or {}).get("matches")):
-        m = click_text(hwnd, "设置", expect="设置", rightmost=True)
+        m = click_sidebar_settings(hwnd, w)
         print(f"[4] 点侧栏「设置」: {'OK' if m else 'FAIL'}")
         if not m:
             shot(hwnd, "4_settings_failed.png")
