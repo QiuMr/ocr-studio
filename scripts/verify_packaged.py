@@ -40,6 +40,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 提示找图 / 参考库需要 yoloe 模型。主包改为按需下载后，
+# 没装这套模型时相关断言直接跳过（标 SKIP，不算失败）。
+PROMPT_OK = False
+
 # 本机若开着系统代理，127.0.0.1 也会被代理拦成 502，必须显式绕开
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -130,6 +134,8 @@ def main() -> int:
     args = ap.parse_args()
 
     exe = str(Path(args.exe).resolve())
+    global PROMPT_OK
+    PROMPT_OK = (Path(exe).parent / "models" / "yoloe" / "yoloe26n_prompt.onnx").is_file()
     port = args.port
     base = f"http://127.0.0.1:{port}"
 
@@ -238,31 +244,35 @@ def main() -> int:
         except ImportError:
             print("[SKIP] 没装 qrcode 库，跳过扫码项")
 
-        # ---------------- 5. prompt visual（图找图） ----------------
-        print("\n=== /vision/prompt mode=visual（图找图，分发包应带全） ===")
         bus = ROOT / "assets" / "bus.png"
-        st, j = post_json(f"{base}/vision/prompt", {
-            "mode": "visual",
-            "image": b64(bus),
-            "ref_image": b64(bus),
-            "ref_boxes": "31,231,801,776",   # bus.png 里那辆巴士（810x1080）
-            "ref_names": "巴士",
-            "conf": 0.25,
-        })
-        d = j.get("data") or {}
-        print(json.dumps(d, ensure_ascii=False)[:500])
-        check("prompt visual code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
-        check("prompt visual 命中", bool(d.get("found")), str(d.get("found")))
-        hits = d.get("matches") or []
-        if hits:
-            h = hits[0]
-            # 目标就是参考图本身，命中框应与参考框大致重合（IoU 不严格，只看中心）
-            cx, cy = h.get("center_x"), h.get("center_y")
-            in_box = cx is not None and 31 <= cx <= 801 and 231 <= cy <= 776
-            check("命中框落在巴士上", bool(in_box), f"center=({cx},{cy}) score={h.get('score')}")
-            print(f"[INFO] 命中 {len(hits)} 个，首个 center=({cx},{cy}) "
-                  f"score={h.get('score')} class={h.get('class_name')}")
-        check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
+        if not PROMPT_OK:
+            print("\n[SKIP] 提示找图模型未安装（主包按需下载），本段跳过")
+        else:
+            # ---------------- 5. prompt visual（图找图） ----------------
+            print("\n=== /vision/prompt mode=visual（图找图，分发包应带全） ===")
+            bus = ROOT / "assets" / "bus.png"
+            st, j = post_json(f"{base}/vision/prompt", {
+                "mode": "visual",
+                "image": b64(bus),
+                "ref_image": b64(bus),
+                "ref_boxes": "31,231,801,776",   # bus.png 里那辆巴士（810x1080）
+                "ref_names": "巴士",
+                "conf": 0.25,
+            })
+            d = j.get("data") or {}
+            print(json.dumps(d, ensure_ascii=False)[:500])
+            check("prompt visual code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+            check("prompt visual 命中", bool(d.get("found")), str(d.get("found")))
+            hits = d.get("matches") or []
+            if hits:
+                h = hits[0]
+                # 目标就是参考图本身，命中框应与参考框大致重合（IoU 不严格，只看中心）
+                cx, cy = h.get("center_x"), h.get("center_y")
+                in_box = cx is not None and 31 <= cx <= 801 and 231 <= cy <= 776
+                check("命中框落在巴士上", bool(in_box), f"center=({cx},{cy}) score={h.get('score')}")
+                print(f"[INFO] 命中 {len(hits)} 个，首个 center=({cx},{cy}) "
+                      f"score={h.get('score')} class={h.get('class_name')}")
+            check("返回 engine=yoloe-prompt", d.get("engine") == "yoloe-prompt", str(d.get("engine")))
 
         # ---------------- 6. prompt ref（按中文名找 / 语言找图已移除） ----------------
         # 老块「mode=text 应该命中」已随功能移除一起删掉：留在这里会永远 FAIL，
@@ -291,51 +301,58 @@ def main() -> int:
         })
         msg = str(j.get("msg", ""))
         check("未教过的名字被拒", j.get("code") != 0, f"code={j.get('code')}")
-        check("报错文案指路（promptref / 教过的名字）",
-              "还没教过" in msg and "promptref" in msg, msg[:200])
+        # 模型没装时走不到「名字没教过」那一步，会先报「模型还没安装」。
+        # 两种文案都算合格：验的是**它给出了可执行的下一步**，
+        # 而不是把用户丢在一句「引擎未就绪」里。
+        check("报错文案指路（promptref / 教过的名字 / 模型库）",
+              ("还没教过" in msg and "promptref" in msg)
+              or ("还没安装" in msg and "模型库" in msg), msg[:200])
 
-        # ---------- 6c. 中文参考库（教一次 → 按中文名找 → 忘掉） ----------
-        print("\n=== /vision/promptref（中文参考库：教/找/删） ===")
-        st, j = post_json(f"{base}/vision/promptref", {
-            "name": "我的巴士",
-            "image": b64(bus),
-            "box": [31, 231, 801, 776],
-        })
-        check("教一次 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+        if not PROMPT_OK:
+            print("\n[SKIP] 提示找图模型未安装（主包按需下载），本段跳过")
+        else:
+            # ---------- 6c. 中文参考库（教一次 → 按中文名找 → 忘掉） ----------
+            print("\n=== /vision/promptref（中文参考库：教/找/删） ===")
+            st, j = post_json(f"{base}/vision/promptref", {
+                "name": "我的巴士",
+                "image": b64(bus),
+                "box": [31, 231, 801, 776],
+            })
+            check("教一次 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
 
-        st, j = get_json(f"{base}/vision/promptref")
-        d = j.get("data") or {}
-        got = [r.get("name") for r in (d.get("refs") or [])]
-        check("参考库列表里有它", "我的巴士" in got, str(got))
+            st, j = get_json(f"{base}/vision/promptref")
+            d = j.get("data") or {}
+            got = [r.get("name") for r in (d.get("refs") or [])]
+            check("参考库列表里有它", "我的巴士" in got, str(got))
 
-        st, j = post_json(f"{base}/vision/prompt", {
-            "mode": "ref",
-            "image": b64(bus),
-            "words": "我的巴士",
-            "conf": 0.25,
-        })
-        d = j.get("data") or {}
-        print(json.dumps(d, ensure_ascii=False)[:400])
-        check("按中文名找 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
-        check("按中文名找 命中", bool(d.get("found")), str(d.get("found")))
-        hits = d.get("matches") or []
-        if hits:
-            cx, cy = hits[0].get("center_x"), hits[0].get("center_y")
-            in_box = cx is not None and 31 <= cx <= 801 and 231 <= cy <= 776
-            check("命中框落在巴士上", bool(in_box), f"center=({cx},{cy})")
+            st, j = post_json(f"{base}/vision/prompt", {
+                "mode": "ref",
+                "image": b64(bus),
+                "words": "我的巴士",
+                "conf": 0.25,
+            })
+            d = j.get("data") or {}
+            print(json.dumps(d, ensure_ascii=False)[:400])
+            check("按中文名找 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+            check("按中文名找 命中", bool(d.get("found")), str(d.get("found")))
+            hits = d.get("matches") or []
+            if hits:
+                cx, cy = hits[0].get("center_x"), hits[0].get("center_y")
+                in_box = cx is not None and 31 <= cx <= 801 and 231 <= cy <= 776
+                check("命中框落在巴士上", bool(in_box), f"center=({cx},{cy})")
 
-        # query string 里中文必须 percent-encode，否则 http.client 按 ascii 发不出去
-        st, j = req("DELETE", f"{base}/vision/promptref?name="
-                   + urllib.parse.quote("我的巴士"))
-        try:
-            j = json.loads(j)
-        except Exception:
-            j = {}
-        check("删除 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
+            # query string 里中文必须 percent-encode，否则 http.client 按 ascii 发不出去
+            st, j = req("DELETE", f"{base}/vision/promptref?name="
+                       + urllib.parse.quote("我的巴士"))
+            try:
+                j = json.loads(j)
+            except Exception:
+                j = {}
+            check("删除 code=0", j.get("code") == 0, str(j.get("msg", ""))[:160])
 
-        st, j = get_json(f"{base}/vision/promptref")
-        got = [r.get("name") for r in ((j.get("data") or {}).get("refs") or [])]
-        check("删完后列表也干净", "我的巴士" not in got, str(got))
+            st, j = get_json(f"{base}/vision/promptref")
+            got = [r.get("name") for r in ((j.get("data") or {}).get("refs") or [])]
+            check("删完后列表也干净", "我的巴士" not in got, str(got))
 
         # ---------- 6d. AI 接口：不给凭据就进不来 ----------
         # 验的是**未授权访问被拒**，而不是「配置一定是默认关」：

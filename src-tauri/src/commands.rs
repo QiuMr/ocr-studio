@@ -1842,3 +1842,134 @@ pub fn tray_menu_height(app: tauri::AppHandle, height: f64) -> Result<(), String
         .map_err(|e| e.to_string())?;
     crate::place_tray_menu(&w).map_err(|e| e.to_string())
 }
+
+// ─────────────────────────── 模型库（按需下载） ───────────────────────────
+
+/// 列出可选模型及其安装状态。
+///
+/// `force` = true 时绕过清单缓存，强制联网拉取（用户点「刷新」）。
+#[tauri::command]
+pub async fn models_catalog(
+    state: State<'_, Arc<AppState>>,
+    force: Option<bool>,
+) -> Result<Vec<crate::modellib::ModelStatus>, String> {
+    // 先拷出来再进阻塞线程：State 的借用不能跨 await
+    let models_root = state.models_root.clone();
+    let data_dir = state.data_dir.clone();
+    let force = force.unwrap_or(false);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let (catalog, online) = crate::modellib::load_catalog(&data_dir, force);
+        crate::modellib::statuses(&models_root, &catalog, online)
+    })
+    .await
+    .map_err(|e| format!("读取模型清单异常：{e}"))
+}
+
+/// 下载并安装一个可选模型。进度通过 `models-progress` 事件推送。
+#[tauri::command]
+pub async fn models_download(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    let models_root = state.models_root.clone();
+    let data_dir = state.data_dir.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter as _;
+
+        let (catalog, _) = crate::modellib::load_catalog(&data_dir, false);
+        let entry = crate::modellib::find(&catalog, &id)
+            .ok_or_else(|| format!("清单里没有「{id}」这个模型，点「刷新」试试"))?
+            .clone();
+
+        let app2 = app.clone();
+        let id2 = id.clone();
+        let mut last_sent: u64 = 0;
+        crate::modellib::install(&models_root, &data_dir, &entry, move |done, total, phase| {
+            // 下载阶段按 1MB 节流：256KB 一个 chunk，133MB 会回调五百多次，
+            // 不节流的话事件队列本身就成了瓶颈（界面反而卡）。
+            // 其它阶段（校验/解压/完成）次数很少，直接发。
+            if phase == "download" {
+                if done.saturating_sub(last_sent) < 1_000_000 && done != total {
+                    return;
+                }
+                last_sent = done;
+            }
+            let _ = app2.emit(
+                "models-progress",
+                serde_json::json!({
+                    "id": id2,
+                    "done": done,
+                    "total": total,
+                    "phase": phase,
+                }),
+            );
+        })
+    })
+    .await
+    .map_err(|e| format!("下载任务异常：{e}"))?
+}
+
+/// 从本地文件手动安装（网络受限时的活路）。
+#[tauri::command]
+pub async fn models_import(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    let models_root = state.models_root.clone();
+    let data_dir = state.data_dir.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter as _;
+
+        let (catalog, _) = crate::modellib::load_catalog(&data_dir, false);
+        let entry = crate::modellib::find(&catalog, &id)
+            .ok_or_else(|| format!("清单里没有「{id}」这个模型"))?
+            .clone();
+
+        let app2 = app.clone();
+        let id2 = id.clone();
+        crate::modellib::import_zip(
+            &models_root,
+            &entry,
+            std::path::Path::new(&path),
+            move |_done, _total, phase| {
+                let _ = app2.emit(
+                    "models-progress",
+                    serde_json::json!({ "id": id2, "done": 0, "total": 0, "phase": phase }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("导入任务异常：{e}"))?
+}
+
+/// 卸载一个可选模型（只删它的目录）。
+#[tauri::command]
+pub async fn models_remove(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    let models_root = state.models_root.clone();
+    let data_dir = state.data_dir.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let (catalog, _) = crate::modellib::load_catalog(&data_dir, false);
+        let entry = crate::modellib::find(&catalog, &id)
+            .ok_or_else(|| format!("清单里没有「{id}」这个模型"))?;
+        crate::modellib::remove(&models_root, entry)
+    })
+    .await
+    .map_err(|e| format!("卸载任务异常：{e}"))?
+}
+
+/// 模型目录的绝对路径（前端「打开目录」按钮用）。
+#[tauri::command]
+pub fn models_dir(state: State<'_, Arc<AppState>>) -> String {
+    state.models_root.display().to_string()
+}

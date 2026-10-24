@@ -81,7 +81,36 @@ if (-not $SkipModels) {
   $models = Join-Path $root "models"
   if (Test-Path $models) {
     $dstModels = Join-Path $stage "models"
-    Copy-Item $models $dstModels -Recurse -Force
+    # 只带 PP-OCRv6 small（开箱能认字）。其余模型走设置页「模型库」按需下载，
+    # 由 scripts/build_models.py 打成 zip 挂在固定 tag `models` 的 Release 上。
+    #
+    # 为什么不全带：三档 OCR（7/32/133MB）+ ddddocr（52MB）+ 提示找图（23MB）
+    # 合起来 250MB 以上，而单个用户实际只用其中一两个。主包从 225MB 降到约 60MB。
+    #
+    # 下面的剔除逻辑保留着 —— 它们是「万一目录里又多了东西」的保险，
+    # 在只拷 small 之后基本不会命中，但删掉就等于把这道保险撤了。
+    if (-not (Test-Path (Join-Path $models "small"))) {
+      throw "缺少 models/small —— 这是开箱 OCR 的基础模型，必须带进分发包"
+    }
+    New-Item -ItemType Directory -Path $dstModels -Force | Out-Null
+    $smallDst = Join-Path $dstModels "small"
+    New-Item -ItemType Directory -Path $smallDst -Force | Out-Null
+    $smallFiles = Get-ChildItem (Join-Path $models "small") -File | Where-Object {
+      $_.Name -ne 'inspect.json' -and $_.Name -notlike 'reference_*'
+    }
+    foreach ($f in $smallFiles) {
+      Copy-Item $f.FullName (Join-Path $smallDst $f.Name) -Force
+    }
+    Write-Host ("[INFO] + models/small（{0} 个文件，开箱 OCR）" -f $smallFiles.Count)
+    # 检测模型目录只留说明文件：告诉用户自己的 YOLO 模型放哪儿，
+    # 同时保证目录存在（引擎扫描时不用处理「目录不存在」这种分支）。
+    $detectDst = Join-Path $dstModels "detect\yolo"
+    New-Item -ItemType Directory -Path $detectDst -Force | Out-Null
+    $detectReadme = Join-Path $models "detect\yolo\README.txt"
+    if (Test-Path $detectReadme) {
+      Copy-Item $detectReadme (Join-Path $detectDst "README.txt") -Force
+    }
+    Write-Host "[INFO] - 其余模型不进包（设置页「模型库」按需下载）"
     # 训练/对齐用的中间产物不进分发包：
     #   *.pt               原始权重（6~130MB，运行时只需要 onnx）
     #   ref_*.json         跟 ultralytics 逐框比对用的参考框（只有开发时需要）
@@ -147,7 +176,7 @@ if (-not $SkipModels) {
         }
       }
     }
-    Write-Host "[INFO] + models/（tiny / small / medium 三档 + 提示找图）"
+    Write-Host "[INFO] + models/（small 开箱可用，其余按需下载）"
   } else {
     Write-Warning "models 目录不存在，分发包将缺少模型"
   }

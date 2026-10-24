@@ -299,9 +299,9 @@ pub fn discover(root: &Path, yolo_external: &[String]) -> Vec<EngineStatus> {
         let note = if available {
             Some("单行识别引擎，行检测共用 PP-OCR det；中文/英文都支持，验证码更快".to_string())
         } else if !has_rec {
-            Some(format!("{} 缺少 rec.onnx", dir.display()))
+            Some("未安装（设置 → 模型库 → ddddocr 验证码）".to_string())
         } else if !has_charset {
-            Some(format!("{} 缺少字典（charset.txt / keys.txt / dict.txt）", dir.display()))
+            Some("未安装（设置 → 模型库 → ddddocr 验证码）".to_string())
         } else {
             Some(
                 "缺少 PP-OCR 的 det.onnx：ddddocr 只做单行识别，需要它来找文本行".to_string(),

@@ -53,6 +53,26 @@ models/                  模型（缺了会提示「引擎未加载」）
 > `models/detect/yolo/` **出厂为空**（程序不预置检测模型）；`models/ocr/ddddocr/` 占 54MB，
 > 只用 PP-OCR 的话可以整目录删掉，引擎列表里会显示「未安装」，其余功能不受影响。
 
+### 分发包只带 small，其余模型按需下载
+
+主包**只带 PP-OCRv6 small**（加上推理运行时一共约 50MB）。tiny / medium / ddddocr /
+提示找图 / 检测模型都不在里面，用户在设置页「模型库」点一下才下载。
+
+可选模型的打包与上传是一条命令：
+
+```bash
+python scripts/build_models.py            # 只打包 + 生成清单
+python scripts/build_models.py --upload    # 打包 + 上传到 Release
+```
+
+**模型挂在固定 tag `models` 的 Release 上，而且那个 Release 必须标成
+`--prerelease`。** GitHub 的 `releases/latest` 取的是「最新创建的正式 release」，
+模型库要是正式 release 且比版本发得晚，`releases/latest/download/latest.json`
+就会 404，自动更新全线报废。
+
+清单有内置兜底（`src-tauri/assets/catalog.json`，编译期嵌入）：没网时也能
+显示「有哪些能力可以加」，只是点下载会失败。清单三层：网络 → 本地缓存（1h）→ 内置。
+
 ### 前端改动不生效？
 
 `generate_context!` 在**编译期**把 `dist` 嵌进 exe。改完前端只跑 `pnpm build`

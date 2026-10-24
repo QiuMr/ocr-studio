@@ -31,6 +31,8 @@ import type {
   AiStatus,
   UpdateCheck,
   UpdateProgress,
+  OptionalModel,
+  ModelProgress,
 } from "../types";
 
 /** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
@@ -542,5 +544,41 @@ export async function subscribeUpdateProgress(
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<UpdateProgress>("update-progress", (e) => onProgress(e.payload));
+}
+
+// ---------------------------------------------------------------- 模型库
+
+/** 列出可选模型与安装状态。`force` = 强制联网刷新清单。 */
+export async function modelsCatalog(force = false): Promise<OptionalModel[]> {
+  return invoke<OptionalModel[]>("models_catalog", { force });
+}
+
+/** 下载并安装。进度走 `models-progress` 事件。 */
+export async function modelsDownload(id: string): Promise<void> {
+  return invoke<void>("models_download", { id });
+}
+
+/** 从本地 zip 手动安装（网络受限时的兜底）。 */
+export async function modelsImport(id: string, path: string): Promise<void> {
+  return invoke<void>("models_import", { id, path });
+}
+
+/** 卸载（只删它自己的目录）。 */
+export async function modelsRemove(id: string): Promise<void> {
+  return invoke<void>("models_remove", { id });
+}
+
+/** 模型目录绝对路径。 */
+export async function modelsDir(): Promise<string> {
+  return invoke<string>("models_dir");
+}
+
+/** 订阅模型下载进度。 */
+export async function subscribeModelProgress(
+  onProgress: (p: ModelProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<ModelProgress>("models-progress", (e) => onProgress(e.payload));
 }
 

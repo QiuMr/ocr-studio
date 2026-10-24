@@ -25,6 +25,7 @@ import {
   Shield,
   Square,
   Trash2,
+  Upload,
   Zap,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -57,6 +58,11 @@ import {
   setAutostart,
   setDevice,
   setLevel,
+  modelsCatalog,
+  modelsDownload,
+  modelsImport,
+  modelsRemove,
+  subscribeModelProgress,
   subscribeUpdateProgress,
   updateCheck,
   updateInstall,
@@ -73,6 +79,8 @@ import {
   type EngineList,
   type Health,
   type ModelLevel,
+  type ModelProgress,
+  type OptionalModel,
   type PromptAssets,
   type UpdateCheck,
   type UpdateProgress,
@@ -173,6 +181,115 @@ export function SettingsPage() {
     }, 3000);
     return () => window.clearInterval(t);
   }, []);
+
+  // ── 模型库（按需下载） ────────────────────────────────────────
+  const [optModels, setOptModels] = useState<OptionalModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  /** 清单是网上拉的吗。false = 用的内置兜底，界面要提示「可能不是最新」 */
+  const [modelsOnline, setModelsOnline] = useState(true);
+  /** 正在下载的模型 id（同一时间只允许下一个，避免抢带宽） */
+  const [modelBusyId, setModelBusyId] = useState<string | null>(null);
+  const [modelProgress, setModelProgress] = useState<Record<string, ModelProgress>>({});
+  const [modelErr, setModelErr] = useState<string | null>(null);
+  /** 「点了没下载的档位」时用它把视图滚到模型库 */
+  const modelsCardRef = useRef<HTMLDivElement>(null);
+
+  const loadModels = useCallback(async (force: boolean) => {
+    if (!isTauri()) return;
+    setModelsLoading(true);
+    try {
+      const list = await modelsCatalog(force);
+      setOptModels(list);
+      setModelsOnline(list.length ? list[0].online : true);
+      setModelErr(null);
+    } catch (e) {
+      setModelErr(String(e));
+    } finally {
+      setModelsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadModels(false);
+  }, [loadModels]);
+
+  // 下载进度：后端按 1MB 节流推事件
+  useEffect(() => {
+    if (!isTauri()) return;
+    let un: (() => void) | undefined;
+    let disposed = false;
+    void subscribeModelProgress((p) => {
+      setModelProgress((prev) => ({ ...prev, [p.id]: p }));
+      if (p.phase === "done") {
+        setModelBusyId(null);
+        // 装完刷新一次状态：按钮要从「下载」变成「已安装」
+        void loadModels(false);
+      }
+    }).then((f) => {
+      if (disposed) f();
+      else un = f;
+    });
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, [loadModels]);
+
+  const downloadModel = useCallback(
+    async (m: OptionalModel) => {
+      setModelErr(null);
+      setModelBusyId(m.id);
+      setModelProgress((p) => ({
+        ...p,
+        [m.id]: { id: m.id, done: 0, total: m.size, phase: "download" },
+      }));
+      try {
+        await modelsDownload(m.id);
+      } catch (e) {
+        setModelErr(String(e));
+        setModelBusyId(null);
+      }
+    },
+    [],
+  );
+
+  const importModel = useCallback(
+    async (m: OptionalModel) => {
+      setModelErr(null);
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({
+          multiple: false,
+          directory: false,
+          filters: [{ name: "模型包", extensions: ["zip"] }],
+        });
+        if (!picked || typeof picked !== "string") return;
+        setModelBusyId(m.id);
+        setModelProgress((p) => ({
+          ...p,
+          [m.id]: { id: m.id, done: 0, total: 0, phase: "extract" },
+        }));
+        await modelsImport(m.id, picked);
+      } catch (e) {
+        setModelErr(String(e));
+        setModelBusyId(null);
+      }
+    },
+    [],
+  );
+
+  const removeModel = useCallback(
+    async (m: OptionalModel) => {
+      setModelErr(null);
+      try {
+        await modelsRemove(m.id);
+        await loadModels(false);
+      } catch (e) {
+        setModelErr(String(e));
+      }
+    },
+    [loadModels],
+  );
 
   // ── 版本与更新 ────────────────────────────────────────────────
   // 进页面静默查一次。**查不到不是错误**：没网、还没发版都会走到这里，
@@ -492,31 +609,53 @@ export function SettingsPage() {
                     { v: "small" as ModelLevel, title: "均衡", desc: "推荐" },
                     { v: "medium" as ModelLevel, title: "准", desc: "慢一点，最准" },
                   ]
-                ).map((it) => (
-                  <button
-                    key={it.v}
-                    type="button"
-                    onClick={() => void onLevel(it.v)}
-                    disabled={!isTauri()}
-                    className={cn(
-                      "flex flex-col items-start rounded-md border-2 px-3 py-2 text-left transition-colors",
-                      cfg.level === it.v
-                        ? "border-[#2563EB] bg-[#EFF4FF]"
-                        : "border-neutral-200 bg-white hover:border-neutral-300",
-                    )}
-                  >
-                    <span
+                ).map((it) => {
+                  // 主包只带 small。另两档要用户从「模型库」下载才有 ——
+                  // 不标出来的话，用户点了「准」只会看到一句「引擎没加载好」，
+                  // 完全想不到是模型还没下。
+                  const avail =
+                    engines?.engines.find((e) => e.name === `ppocr:${it.v}`)?.available ?? true;
+                  return (
+                    <button
+                      key={it.v}
+                      type="button"
+                      onClick={() => {
+                        if (!avail) {
+                          setModelErr(
+                            `「${it.title}」这一档还没下载。下面「模型库」里装一下就能用。`,
+                          );
+                          modelsCardRef.current?.scrollIntoView({
+                            behavior: "smooth",
+                            block: "center",
+                          });
+                          return;
+                        }
+                        void onLevel(it.v);
+                      }}
+                      disabled={!isTauri()}
                       className={cn(
-                        "flex items-center gap-1.5 text-[13px] font-bold",
-                        cfg.level === it.v ? "text-[#2563EB]" : "text-neutral-800",
+                        "flex flex-col items-start rounded-md border-2 px-3 py-2 text-left transition-colors",
+                        cfg.level === it.v
+                          ? "border-[#2563EB] bg-[#EFF4FF]"
+                          : "border-neutral-200 bg-white hover:border-neutral-300",
+                        !avail && "border-dashed",
                       )}
                     >
-                      {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
-                      {it.title}
-                    </span>
-                    <span className="mt-0.5 text-[12px] text-neutral-500">{it.desc}</span>
-                  </button>
-                ))}
+                      <span
+                        className={cn(
+                          "flex items-center gap-1.5 text-[13px] font-bold",
+                          cfg.level === it.v ? "text-[#2563EB]" : "text-neutral-800",
+                        )}
+                      >
+                        {cfg.level === it.v && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                        {it.title}
+                      </span>
+                      <span className="mt-0.5 text-[12px] text-neutral-500">
+                        {avail ? it.desc : "未下载"}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
               {health && (
                 <p className="flex items-center gap-1.5 text-[12px] text-neutral-400">
@@ -928,6 +1067,172 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ---------------------------------------------------------- 模型库 */}
+      {/*
+        为什么单独一张卡、还放在版本卡之前：主包故意只带基础模型（约 50MB），
+        「我还缺不缺东西」是用户打开设置页最先问的问题。放在折叠区里等于没说。
+      */}
+      <div ref={modelsCardRef}>
+      <Card>
+        <CardHeader>
+          <div className="flex h-8 items-center justify-between gap-3">
+            <CardTitle className="flex items-center gap-2">
+              <Boxes className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              模型库
+              <Badge variant="outline" className="font-mono">
+                {optModels.filter((m) => m.installed).length}/{optModels.length}
+              </Badge>
+            </CardTitle>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title="刷新清单"
+              disabled={modelsLoading}
+              onClick={() => void loadModels(true)}
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", modelsLoading && "animate-spin")} />
+            </Button>
+          </div>
+          <CardDescription>
+            安装包只带基础识别模型。下面这些能力用哪个下哪个——不用为没碰过的功能付体积。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          {!modelsOnline && (
+            <p className="rounded-lg bg-amber-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-amber-800">
+              没连上模型清单，下面是内置列表，可能不是最新。点右上角刷新重试。
+            </p>
+          )}
+
+          {modelErr && (
+            <p className="whitespace-pre-wrap rounded-lg bg-red-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-red-700">
+              {modelErr}
+            </p>
+          )}
+
+          {optModels.length === 0 && !modelsLoading && (
+            <p className="px-1 py-3 text-[12px] text-neutral-400">清单是空的，点右上角刷新试试。</p>
+          )}
+
+          {optModels.map((m) => {
+            const busy = modelBusyId === m.id;
+            const p = modelProgress[m.id];
+            // 下载阶段才有真实进度；校验/解压阶段没有百分比，按 100% 画满再换文案
+            const pct =
+              p && p.phase === "download" && p.total > 0
+                ? Math.min(100, (p.done / p.total) * 100)
+                : 100;
+            const phaseText =
+              p?.phase === "verify"
+                ? "正在校验文件"
+                : p?.phase === "extract"
+                  ? "正在安装"
+                  : "正在下载";
+
+            return (
+              <div
+                key={m.id}
+                className={cn(
+                  "rounded-lg border px-3.5 py-3 transition-colors",
+                  m.installed ? "border-neutral-200/60 bg-neutral-50/60" : "border-neutral-200/70",
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[13px] font-medium text-neutral-800">{m.name}</span>
+                      {m.recommended && !m.installed && (
+                        <Badge variant="outline" className="border-blue-200 text-blue-700">
+                          推荐
+                        </Badge>
+                      )}
+                      {m.installed && (
+                        <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600">
+                          <Check className="h-3 w-3" />
+                          已安装
+                        </span>
+                      )}
+                      <span className="font-mono text-[11px] text-neutral-400">
+                        {formatBytes(m.size)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[12px] leading-relaxed text-neutral-500">{m.note}</p>
+
+                    {busy && (
+                      <div className="mt-2.5">
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-neutral-200/70">
+                          <div
+                            className={cn(
+                              "h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out",
+                              p?.phase !== "download" && "animate-pulse",
+                            )}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-neutral-500">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>{phaseText}</span>
+                          {p?.phase === "download" && p.total > 0 && (
+                            <span className="font-mono">
+                              {pct.toFixed(0)}% ·{" "}
+                              {p.done > 0 ? formatBytes(p.done) : "0 B"} /{" "}
+                              {formatBytes(p.total)}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1">
+                    {m.installed ? (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="卸载（只删模型文件）"
+                        onClick={() => void removeModel(m)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-neutral-400" />
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          disabled={busy || (modelBusyId !== null && !busy)}
+                          onClick={() => void downloadModel(m)}
+                        >
+                          {busy ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Download className="h-3.5 w-3.5" />
+                          )}
+                          {busy ? "下载中" : "下载"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          title="已经有安装包？从本地选一个 zip"
+                          disabled={busy}
+                          onClick={() => void importModel(m)}
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          <p className="px-1 pt-1 text-[11px] leading-relaxed text-neutral-400">
+            下载不动？让朋友把对应 zip 发你，点右边的上传图标直接从本地装。
+          </p>
+        </CardContent>
+      </Card>
+
+      </div>
 
       {/* ---------------------------------------------------- 版本与更新 */}
       {/*

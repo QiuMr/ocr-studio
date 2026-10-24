@@ -16,6 +16,8 @@ pub mod config;
 /// 多引擎抽象层（PP-OCR / DDDDOCR / YOLO）。设计契约见 `docs/ENGINES.md`。
 pub mod engine;
 pub mod logbuf;
+/// 可选模型库：按需下载 / 手动导入（主包只带 small，其余用的时候再下）。
+pub mod modellib;
 /// 模板匹配。文件名 `match.rs` 与 Rust 关键字冲突，模块名对外暴露为 `matcher`。
 #[path = "match.rs"]
 pub mod matcher;
@@ -608,6 +610,7 @@ pub fn run() {
             Some(vec!["--tray"]),
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 注意用 app_data_dir 而不是 data_dir：
             // data_dir() 返回的是 Roaming 根目录，config.json / 日志会直接落到
@@ -774,6 +777,11 @@ pub fn run() {
             commands::update_install,
             commands::tray_action,
             commands::tray_menu_height,
+            commands::models_catalog,
+            commands::models_download,
+            commands::models_import,
+            commands::models_remove,
+            commands::models_dir,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

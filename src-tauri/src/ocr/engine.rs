@@ -146,13 +146,15 @@ impl OcrEngine {
 
         if !det_path.exists() {
             return Err(ort::Error::new(format!(
-                "检测模型不存在: {}（请先运行 scripts/fetch_models.ps1）",
+                "这一档的识别模型还没安装：{}\n\
+                 打开「设置 → 模型库」，下载对应的 PP-OCRv6 档位即可。",
                 det_path.display()
             )));
         }
         if !rec_path.exists() {
             return Err(ort::Error::new(format!(
-                "识别模型不存在: {}",
+                "这一档的识别模型不完整：缺 {}\n\
+                 去「设置 → 模型库」重新下载这一档就能补全。",
                 rec_path.display()
             )));
         }

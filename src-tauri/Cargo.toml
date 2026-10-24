@@ -31,6 +31,9 @@ tauri-plugin-single-instance = "2"
 # 路径带空格时的引号处理与「禁用时清干净」都由插件负责。
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
+# 模型库的「从本地文件导入」需要真文件路径：webview 的 <input type=file>
+# 出于安全限制拿不到真实路径，只能走系统对话框。
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -110,6 +113,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 # 为什么要校验：一键更新会**自动替换程序文件**，下到半截或被人动了手脚就
 # 直接覆盖掉能用的程序，用户自己没法恢复。这块成本极低、收益极大。
 sha2 = "0.10"
+# 可选模型包解压。模型按需下载成 zip（PP-OCRv6 一档是 det/rec/cls 三个文件，
+# 打成一个包最省事），下载校验后解到 models/<dir>/。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

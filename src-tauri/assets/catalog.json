@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "ppocr-medium",
+      "name": "PP-OCRv6 高精度",
+      "group": "ocr",
+      "note": "识别精度最高的一档，慢一些。老照片、低清扫描件、复杂排版建议用它。",
+      "file": "ppocr-medium-v1.zip",
+      "dir": "medium",
+      "size": 106361619,
+      "sha256": "59e6bacea7afb95cf428e52bc3cfdb515187682fac483b8302532dddd0d51873",
+      "endpoints": [
+        "/ocr/ocr"
+      ],
+      "requires": [
+        "det.onnx",
+        "rec.onnx",
+        "cls.onnx"
+      ],
+      "recommended": true
+    },
+    {
+      "id": "ppocr-tiny",
+      "name": "PP-OCRv6 极速",
+      "group": "ocr",
+      "note": "体积最小、速度最快，精度略低。配置低的机器或只求快时用。",
+      "file": "ppocr-tiny-v1.zip",
+      "dir": "tiny",
+      "size": 6663774,
+      "sha256": "33fac9c5d37f10bf698a806565bf9c95924bc559dbf2da74e230bd825f384f8c",
+      "endpoints": [
+        "/ocr/ocr"
+      ],
+      "requires": [
+        "det.onnx",
+        "rec.onnx",
+        "cls.onnx"
+      ],
+      "recommended": false
+    },
+    {
+      "id": "ddddocr",
+      "name": "ddddocr 验证码",
+      "group": "ocr",
+      "note": "专门认验证码和单行短文本，比通用 OCR 更快更准。",
+      "file": "ddddocr-v1.zip",
+      "dir": "ocr/ddddocr/common",
+      "size": 50320832,
+      "sha256": "5061f51ea8440cadf94800f701bd826c753ff132da75ca3ac277bba43980d90b",
+      "endpoints": [
+        "/ocr/ocr"
+      ],
+      "requires": [
+        "rec.onnx"
+      ],
+      "recommended": false
+    },
+    {
+      "id": "yoloe-prompt",
+      "name": "提示找图",
+      "group": "find",
+      "note": "给一张参考图圈一下，就能找「长得像的东西」。换目标不用换模型。",
+      "file": "yoloe-prompt-v1.zip",
+      "dir": "yoloe",
+      "size": 20467036,
+      "sha256": "7aee0b9e6a78a50c9bea589d7694b6e94a0089e8e5c02be843c77f719bb2a4aa",
+      "endpoints": [
+        "/vision/prompt",
+        "/vision/promptref"
+      ],
+      "requires": [
+        "yoloe26n_prompt.onnx",
+        "yoloe26n_vpe.onnx"
+      ],
+      "recommended": true
+    }
+  ]
+}

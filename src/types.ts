@@ -427,3 +427,36 @@ export interface UpdateProgress {
   done: number;
   total: number;
 }
+
+// ---------------------------------------------------------------- 模型库
+
+/**
+ * 一个可选模型的安装状态（对应 Rust 侧 `modellib::ModelStatus`）。
+ *
+ * 为什么单独一套而不是直接复用清单条目：清单是「有什么」，
+ * 这里是「我这台机器上装没装」——前端要按后者决定按钮长什么样。
+ */
+export interface OptionalModel {
+  id: string;
+  name: string;
+  /** ocr / find / vision / image，前端按它分栏 */
+  group: string;
+  note: string;
+  /** zip 体积（字节） */
+  size: number;
+  /** 装上之后能用哪些端点 */
+  endpoints: string[];
+  installed: boolean;
+  recommended: boolean;
+  /** 清单是从网上拉的还是内置兜底（false 时提示「没网，清单可能不是最新」） */
+  online: boolean;
+}
+
+/** `models-progress` 事件的 payload。 */
+export interface ModelProgress {
+  id: string;
+  done: number;
+  total: number;
+  /** download / verify / extract / done */
+  phase: "download" | "verify" | "extract" | "done";
+}

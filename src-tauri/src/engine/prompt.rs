@@ -107,10 +107,12 @@ impl PromptEngine {
     /// 加载整套。检测器是必需的，两个编码器尽力而为。
     pub fn load(models_root: &Path, device: Device) -> Result<Self, VisionError> {
         let assets = discover_assets(models_root).ok_or_else(|| {
+            // 这句话是给**终端用户**看的，不能让他们去跑导出脚本 ——
+            // 分发包里没有源码。提示找图从 0.1.5 起改为按需下载，
+            // 最常见的「没模型」原因就是还没在设置页装它。
             VisionError::NotReady(format!(
-                "没有找到运行时提示模型。请先跑 \
-                 `python scripts/export_yoloe_prompt.py all`，\
-                 产物会落到 {}/yoloe/",
+                "提示找图模型还没安装。打开「设置 → 模型库」，下载「提示找图」即可（约 20MB）。\n\
+                 模型目录：{}/yoloe/",
                 models_root.display()
             ))
         })?;
@@ -129,8 +131,8 @@ impl PromptEngine {
             .cloned()
             .ok_or_else(|| {
                 VisionError::NotReady(format!(
-                    "{} 只有 1 个输入（{}）。这像是**烘焙过提示**的普通检测模型；\
-                     运行时提示需要 `scripts/export_yoloe_prompt.py` 导出的双输入版本",
+                    "{} 只有 1 个输入（{}）。这像是**烘焙过提示**的普通检测模型，\
+                     不能用于「提示找图」。去「设置 → 模型库」重新下载一次「提示找图」即可。",
                     assets.detector.display(),
                     det_images
                 ))
