@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Braces,
   Clipboard,
+  Code2,
   Copy,
   Crosshair,
   Eye,
@@ -34,8 +35,10 @@ import {
 } from "../components/ui/select";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { EmptyState } from "../components/ui/empty-state";
-import { Callout } from "../components/ui/callout";
 import { Hint } from "../components/ui/hint";
+import { ErrorHelp } from "../components/ui/error-help";
+import { NoResult } from "../components/ui/no-result";
+import { CallCodePanel } from "../components/ui/call-code";
 import { ImageViewer } from "../components/ImageViewer";
 import { FindPanel } from "../components/FindPanel";
 import { ScanPanel } from "../components/ScanPanel";
@@ -50,9 +53,11 @@ import {
   recognizeChars,
   regionOcr,
 } from "../lib/api";
+import type { Scene } from "../lib/codegen";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
 import { cn } from "../lib/utils";
 import type { OcrTab } from "../App";
+import { useErrorAction, type SettingsFocus } from "../lib/use-error-action";
 import type {
   DanziResult,
   DetectResult,
@@ -83,11 +88,17 @@ export function Playground({
   tab,
   onTabChange,
   pickToken,
+  onOpenSettings,
+  onOpenService,
 }: {
   tab: OcrTab;
   onTabChange: (t: OcrTab) => void;
   /** 每次自增 = 请把选图框弹出来（首页那个大按钮触发的） */
   pickToken: number;
+  /** 错误提示指路用：去设置页，可指定滚到哪一块 */
+  onOpenSettings: (focus?: SettingsFocus) => void;
+  /** 错误提示指路用：回首页看服务开关 */
+  onOpenService: () => void;
 }) {
   // 识别页载入的图会传下来，切到找图页可以直接当搜索图
   const [b64, setB64] = useState<string | null>(null);
@@ -141,13 +152,22 @@ export function Playground({
       </div>
 
       {tab === "ocr" ? (
-        <OcrPanel onImageLoaded={setB64} pickToken={pickToken} />
+        <OcrPanel
+          onImageLoaded={setB64}
+          pickToken={pickToken}
+          onOpenSettings={onOpenSettings}
+          onOpenService={onOpenService}
+        />
       ) : tab === "scan" ? (
-        <ScanPanel />
+        <ScanPanel onOpenSettings={onOpenSettings} onOpenService={onOpenService} />
       ) : tab === "table" ? (
-        <TablePanel />
+        <TablePanel onOpenSettings={onOpenSettings} onOpenService={onOpenService} />
       ) : (
-        <FindPanel inheritedImage={b64} />
+        <FindPanel
+          inheritedImage={b64}
+          onOpenSettings={onOpenSettings}
+          onOpenService={onOpenService}
+        />
       )}
     </div>
   );
@@ -157,9 +177,17 @@ interface OcrPanelProps {
   /** 把载入的图同步出去，切到找图页时可直接复用 */
   onImageLoaded: (b64: string) => void;
   pickToken: number;
+  /** 错误提示指路用 */
+  onOpenSettings: (focus?: SettingsFocus) => void;
+  onOpenService: () => void;
 }
 
-function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
+function OcrPanel({
+  onImageLoaded,
+  pickToken,
+  onOpenSettings,
+  onOpenService,
+}: OcrPanelProps) {
   const [src, setSrc] = useState<string | null>(null);
   const [name, setName] = useState<string>("");
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -175,7 +203,14 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
   /** 检测模式下：识别时是否顺带在框内认字 */
   const [ocrInBoxes, setOcrInBoxes] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * 存**原始错误**而不是拼好的文案。
+   *
+   * 以前存的是 `识别失败：${e}` 这种字符串，错误码在拼的时候就没了，
+   * 界面只能原样显示，用户看到的是后端写给开发者的原文。现在交给
+   * `ErrorHelp` 去翻译，它拿得到码也拿得到原文。
+   */
+  const [error, setError] = useState<unknown>(null);
   const [showBoxes, setShowBoxes] = useState(true);
   const [useCls, setUseCls] = useState(true);
   /** 空字符串 = 用当前 PP-OCR 配置（历史行为）；其它值为 `family:variant` */
@@ -192,6 +227,8 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
   /** 逐字结果：按需加载，切到「逐字」tab 时才请求 */
   const [detail, setDetail] = useState<DanziResult | null>(null);
   const [charBusy, setCharBusy] = useState(false);
+  /** 「脚本怎么用」面板 */
+  const [showCode, setShowCode] = useState(false);
   /** 「更多设置」浮层 */
   const [moreOpen, setMoreOpen] = useState(false);
   /** 换图后自动识别 */
@@ -282,7 +319,9 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         setRegionResult(null);
         setTab("text");
       } catch (e) {
-        if (seq === runSeq.current) setError(`识别失败：${e}`);
+        // 存原始错误对象，不拼前缀：人话翻译在 ErrorHelp 里做，
+        // 自己拼一句「识别失败：」只会把后端原文盖住、还丢掉错误码。
+        if (seq === runSeq.current) setError(e);
       } finally {
         if (seq === runSeq.current) setBusy(false);
       }
@@ -313,7 +352,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         setDetail(null);
         setTab("text");
       } catch (e) {
-        if (seq === runSeq.current) setError(`区域识别失败：${e}`);
+        if (seq === runSeq.current) setError(e);
       } finally {
         if (seq === runSeq.current) setBusy(false);
       }
@@ -361,7 +400,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         const dim = await imageSize(url);
         await applyImage(b64, url, dim, file.name);
       } catch (e) {
-        setError(`加载图片失败：${e}`);
+        setError(e);
       }
     },
     [applyImage],
@@ -422,7 +461,7 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
     try {
       setDetail(await recognizeChars(b64Ref.current, useCls, engine));
     } catch (e) {
-      setError(`逐字定位失败：${e}`);
+      setError(e);
     } finally {
       setCharBusy(false);
     }
@@ -432,6 +471,27 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
     setTab(v);
     if (v === "chars") void loadChars();
   };
+
+  const onErrorAction = useErrorAction({
+    onRetry: () => void runRecognize(),
+    onOpenSettings,
+    onOpenService,
+  });
+
+  /**
+   * 当前这一步对应的接口场景。
+   *
+   * 为什么按「界面现在在做什么」来定：用户刚在界面上试通了某一步，
+   * 他想要的调用代码就是**这一步**的代码，不是一份通用文档。
+   */
+  const currentScene: Scene =
+    tab === "chars"
+      ? "chars"
+      : regionResult
+        ? "region"
+        : detResult || pipeResult
+          ? "detect"
+          : "recognize";
 
   const copyJson = async () => {
     if (pipeResult) {
@@ -675,10 +735,12 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
         </div>
       </div>
 
-      {error && (
-        <Callout variant="error" icon={<ScanText className="h-4 w-4" />}>
-          {error}
-        </Callout>
+      {error !== null && (
+        <ErrorHelp
+          error={error}
+          onAction={onErrorAction}
+          context="我在试跑页上传了一张图，想看看文字识别的结果。"
+        />
       )}
 
       {/* 主体：左图右结果 */}
@@ -747,6 +809,15 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
               <Button
                 variant="ghost"
                 size="sm"
+                onClick={() => setShowCode((v) => !v)}
+                title="把这一步变成脚本里的代码"
+              >
+                <Code2 className={cn("h-3.5 w-3.5", showCode && "text-blue-600")} />
+                脚本怎么用
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => void copyJson()}
                 disabled={!hasResult}
               >
@@ -759,6 +830,20 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
               </Button>
             </div>
           </CardHeader>
+
+          {/*
+            调用代码面板。
+            为什么放在这里：这是「界面试通了 → 脚本里跑起来」的最后一步。
+            只给「复制 JSON」的话，用户拿到的是**结果数据**，还是不知道该怎么调。
+          */}
+          {showCode && (
+            <div className="shrink-0 px-5 pb-3">
+              <CallCodePanel
+                scene={currentScene}
+                opts={{ region: selection ?? undefined, engine: engine || undefined }}
+              />
+            </div>
+          )}
           <CardContent className="min-h-0 flex-1">
             {regionResult ? (
               <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
@@ -828,8 +913,24 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                     </li>
                   ))}
                   {pipeResult.regions.length === 0 && (
-                    <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
-                      （没有检出区域）
+                    <li className="px-1 py-4">
+                      <NoResult
+                        title="没检出任何区域"
+                        tips={[
+                          "这个模型只认它学过的类别——换一个检测模型试试",
+                          "把「置信度下限」调小一点（现在可能卡太严）",
+                        ]}
+                        action={
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => onOpenSettings("models")}
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            看看有哪些模型
+                          </Button>
+                        }
+                      />
                     </li>
                   )}
                 </ul>
@@ -862,8 +963,24 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                     </li>
                   ))}
                   {detResult.detections.length === 0 && (
-                    <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
-                      （没有检出目标，可以试着把置信度调低）
+                    <li className="px-1 py-4">
+                      <NoResult
+                        title="没检出目标"
+                        tips={[
+                          "把「置信度下限」调小——默认 0.25，小目标常常卡在这",
+                          "这个模型只认它学过的类别，换一个模型试试",
+                        ]}
+                        action={
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => onOpenSettings("models")}
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            看看有哪些模型
+                          </Button>
+                        }
+                      />
                     </li>
                   )}
                 </ul>
@@ -920,8 +1037,25 @@ function OcrPanel({ onImageLoaded, pickToken }: OcrPanelProps) {
                         </li>
                       ))}
                       {lines.length === 0 && (
-                        <li className="px-3 py-8 text-center text-[13px] text-neutral-400">
-                          （没识别到文字）
+                        <li className="px-1 py-4">
+                          <NoResult
+                            title="这张图里没认出文字"
+                            tips={[
+                              "图太模糊或字太小——换一张更清楚的，或者把字放大再截",
+                              "这张图本来就没有文字（纯照片、图形）",
+                              "竖排、艺术字、强透视的招牌认不出很正常",
+                            ]}
+                            action={
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => onOpenSettings("models")}
+                              >
+                                <Sparkles className="h-3.5 w-3.5" />
+                                换个更准的模型
+                              </Button>
+                            }
+                          />
                         </li>
                       )}
                     </ul>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Clipboard,
+  Code2,
   Copy,
   Check,
   FileImage,
@@ -24,11 +25,13 @@ import {
 import { Switch } from "./ui/switch";
 import { ScrollArea } from "./ui/scroll-area";
 import { EmptyState } from "./ui/empty-state";
-import { Callout } from "./ui/callout";
 import { Hint } from "./ui/hint";
+import { ErrorHelp } from "./ui/error-help";
+import { CallCodePanel } from "./ui/call-code";
 import { ImageViewer } from "./ImageViewer";
 import { fileToBase64, imageSize, scanBarcode } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
+import { useErrorAction, type SettingsFocus } from "../lib/use-error-action";
 import { cn } from "../lib/utils";
 import type { BarcodeResult, LineResult } from "../types";
 
@@ -70,13 +73,22 @@ function formatLabel(f: string): string {
 }
 
 /** 扫码面板：丢一张图进去，把图里所有码列出来。 */
-export function ScanPanel() {
+export function ScanPanel({
+  onOpenSettings,
+  onOpenService,
+}: {
+  onOpenSettings: (focus?: SettingsFocus) => void;
+  onOpenService: () => void;
+}) {
   const [src, setSrc] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [result, setResult] = useState<BarcodeResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** 存原始错误：人话翻译交给 ErrorHelp，别自己拼文案（会丢错误码） */
+  const [error, setError] = useState<unknown>(null);
+  /** 「脚本怎么用」面板 */
+  const [showCode, setShowCode] = useState(false);
   const [showBoxes, setShowBoxes] = useState(true);
   const [preset, setPreset] = useState("all");
   const [tryHarder, setTryHarder] = useState(true);
@@ -104,7 +116,7 @@ export function ScanPanel() {
         setResult(r);
       } catch (e) {
         if (seq === runSeq.current) {
-          setError(`扫码失败：${e}`);
+          setError(e);
           setResult(null);
         }
       } finally {
@@ -135,11 +147,17 @@ export function ScanPanel() {
         const dim = await imageSize(url);
         await applyImage(b64, url, dim, file.name);
       } catch (e) {
-        setError(`加载图片失败：${e}`);
+        setError(e);
       }
     },
     [applyImage],
   );
+
+  const onErrorAction = useErrorAction({
+    onRetry: () => void runScan(),
+    onOpenSettings,
+    onOpenService,
+  });
 
   const onDrop = useCallback(
     (imgs: DroppedImage[]) => {
@@ -289,10 +307,12 @@ export function ScanPanel() {
         </div>
       </div>
 
-      {error && (
-        <Callout variant="error" icon={<QrCode className="h-4 w-4" />}>
-          {error}
-        </Callout>
+      {error !== null && (
+        <ErrorHelp
+          error={error}
+          onAction={onErrorAction}
+          context="我在试跑页的「扫码」里上传了一张带二维码/条码的图，想读出码的内容。"
+        />
       )}
 
       {/* 主体：左图右结果 */}
@@ -368,8 +388,22 @@ export function ScanPanel() {
                 <ScanLine className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                 扫出来的内容
               </CardTitle>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowCode((v) => !v)}
+                title="把这一步变成脚本里的代码"
+              >
+                <Code2 className={cn("h-3.5 w-3.5", showCode && "text-blue-600")} />
+                脚本怎么用
+              </Button>
             </div>
           </CardHeader>
+          {showCode && (
+            <div className="shrink-0 px-5 pb-3">
+              <CallCodePanel scene="barcode" />
+            </div>
+          )}
           <CardContent className="min-h-0 flex-1">
             {codes.length > 0 ? (
               <ScrollArea className="h-full rounded-lg bg-neutral-50/70">
@@ -420,6 +454,24 @@ export function ScanPanel() {
                   result
                     ? "图里可能确实没有码，也可能码太小/太模糊/被裁掉了一部分。先确认码在画面里、没被裁切，再试着打开「仔细找」。"
                     : "二维码、条形码都支持，一个图里多个码会一起列出来。"
+                }
+                action={
+                  // 直接给按钮而不是让用户在设置里找开关：「仔细找」本来就是
+                  // 一维码漏检时最有效的一招，不该让用户自己去发现它。
+                  result && !tryHarder ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => {
+                        setTryHarder(true);
+                        void runScan();
+                      }}
+                      disabled={busy}
+                    >
+                      <ScanLine className="h-3.5 w-3.5" />
+                      打开「仔细找」再扫一次
+                    </Button>
+                  ) : undefined
                 }
               />
             )}

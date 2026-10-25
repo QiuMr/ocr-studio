@@ -5,6 +5,7 @@ import {
   Brain,
   Check,
   ChevronDown,
+  Code2,
   Copy,
   Crosshair,
   FileImage,
@@ -36,8 +37,9 @@ import {
 } from "./ui/select";
 import { Switch } from "./ui/switch";
 import { EmptyState } from "./ui/empty-state";
-import { Callout } from "./ui/callout";
 import { Hint } from "./ui/hint";
+import { ErrorHelp } from "./ui/error-help";
+import { CallCodePanel } from "./ui/call-code";
 import { ImageViewer } from "./ImageViewer";
 import {
   detectModels,
@@ -50,6 +52,8 @@ import {
   screenPreview,
 } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
+import { useErrorAction, type SettingsFocus } from "../lib/use-error-action";
+import type { Scene } from "../lib/codegen";
 import { cn } from "../lib/utils";
 import type {
   DetectModel,
@@ -99,6 +103,9 @@ const MIN_REF_BOX_AREA = 16;
 interface Props {
   /** 从「识别」页带过来的图片，切到找图页时可直接当模板候选 */
   inheritedImage?: string | null;
+  /** 错误提示指路用 */
+  onOpenSettings: (focus?: SettingsFocus) => void;
+  onOpenService: () => void;
 }
 
 const SOURCE_LABEL: Record<FindSource, string> = {
@@ -146,7 +153,7 @@ function parseIdList(s: string): number[] | undefined {
   return ids.length > 0 ? ids : undefined;
 }
 
-export function FindPanel({ inheritedImage }: Props) {
+export function FindPanel({ inheritedImage, onOpenSettings, onOpenService }: Props) {
   const [kind, setKind] = useState<FindKind>("template");
   const [source, setSource] = useState<FindSource>("window");
   const [mode, setMode] = useState<FindMode>("exact");
@@ -156,7 +163,10 @@ export function FindPanel({ inheritedImage }: Props) {
   const [mask, setMask] = useState<Template | null>(null);
   const [result, setResult] = useState<(FindResult & { preview?: string }) | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** 存原始错误：人话翻译交给 ErrorHelp，别自己拼文案（会丢错误码） */
+  const [error, setError] = useState<unknown>(null);
+  /** 「脚本怎么用」面板 */
+  const [showCode, setShowCode] = useState(false);
   const [showHits, setShowHits] = useState(true);
   const [advanced, setAdvanced] = useState(false);
   const [maxResults, setMaxResults] = useState(1);
@@ -189,7 +199,7 @@ export function FindPanel({ inheritedImage }: Props) {
       setWindows(list);
       setHwnd((cur) => cur ?? list[0]?.hwnd ?? null);
     } catch (e) {
-      setError(`枚举窗口失败: ${e}`);
+      setError(e);
     }
   }, []);
 
@@ -207,7 +217,7 @@ export function FindPanel({ inheritedImage }: Props) {
         setModels(list);
         setModelEngine((cur) => cur || list[0]?.engine || "");
       })
-      .catch((e) => setError(`读取检测模型失败: ${e}`));
+      .catch((e) => setError(e));
     return () => {
       cancelled = true;
     };
@@ -284,7 +294,7 @@ export function FindPanel({ inheritedImage }: Props) {
       else if (target === "ref") await applyRefImage(b64, url, file.name);
       else await applyTemplate(b64, url, file.name);
     } catch (e) {
-      setError(`加载图片失败: ${e}`);
+      setError(e);
     }
   };
 
@@ -305,7 +315,7 @@ export function FindPanel({ inheritedImage }: Props) {
       });
       setResult(null);
     } catch (e) {
-      setError(`截图失败: ${e}`);
+      setError(e);
     } finally {
       setBusy(false);
     }
@@ -319,7 +329,7 @@ export function FindPanel({ inheritedImage }: Props) {
       const p = await screenPreview();
       await applyRefImage(p.image, `data:image/png;base64,${p.image}`, "屏幕截图");
     } catch (e) {
-      setError(`截图失败: ${e}`);
+      setError(e);
     } finally {
       setBusy(false);
     }
@@ -429,14 +439,33 @@ export function FindPanel({ inheritedImage }: Props) {
         });
       }
     } catch (e) {
-      const what =
-        kind === "semantic" ? "语义查找" : kind === "prompt" ? "提示查找" : "找图";
-      setError(`${what}失败: ${e}`);
+      setError(e);
       setResult(null);
     } finally {
       setBusy(false);
     }
   };
+
+  const onErrorAction = useErrorAction({
+    onRetry: () => void onFind(),
+    onOpenSettings,
+    onOpenService,
+  });
+
+  /**
+   * 找图这一步对应的接口场景：找图方式 × 搜索范围决定用哪个端点。
+   * 「脚本怎么用」按它生成代码，用户拿到的就是他刚才试的那条路。
+   */
+  const findScene: Scene =
+    kind === "semantic"
+      ? "find-semantic"
+      : kind === "prompt"
+        ? "find-prompt"
+        : source === "screen"
+          ? "find-screen"
+          : source === "window"
+            ? "find-window"
+            : "find-image";
 
   const copyCoord = async (h: FindHit, i: number) => {
     // 给自动化脚本用：绝对屏幕坐标 = 图内坐标 + 截图原点
@@ -630,10 +659,12 @@ export function FindPanel({ inheritedImage }: Props) {
             </Label>
             <div className="flex items-center gap-1.5">
               {models.length === 0 ? (
-                <span className="flex h-8 items-center gap-1.5 rounded-md border border-dashed border-neutral-300 px-2.5 text-[12px] text-neutral-500">
+                // 做成按钮而不是一句提示：缺模型是「做不下去」的硬阻塞，
+                // 让用户自己记住再去设置页找，等于没说。
+                <Button size="sm" variant="outline" onClick={() => onOpenSettings("models")}>
                   <Boxes className="h-3.5 w-3.5" />
-                  没有检测模型 —— 去「设置」页添加 .onnx
-                </span>
+                  没有检测模型，去「设置」添加
+                </Button>
               ) : (
                 <Select value={modelEngine} onValueChange={setModelEngine}>
                   <SelectTrigger className="h-8 w-[190px] text-[12px]">
@@ -932,10 +963,14 @@ export function FindPanel({ inheritedImage }: Props) {
         </div>
       )}
 
-      {error && (
-        <Callout variant="error" icon={<Crosshair className="h-4 w-4" />}>
-          {error}
-        </Callout>
+      {error !== null && (
+        <ErrorHelp
+          error={error}
+          onAction={onErrorAction}
+          context={`我在试跑页的「找图定位」里用${
+            kind === "semantic" ? "语义查找" : kind === "prompt" ? "提示查找" : "模板找图"
+          }找目标。`}
+        />
       )}
 
       {/* 主体 */}
@@ -1086,14 +1121,37 @@ export function FindPanel({ inheritedImage }: Props) {
                 <Target className="h-3.5 w-3.5 text-blue-600" />
                 命中结果
               </CardTitle>
-              {result && (
-                <Badge variant={result.found ? "warning" : "secondary"}>
-                  {result.found ? `命中 ${result.matched}` : "未找到"} · {result.elapsed_ms} ms
-                  {result.engine ? ` · ${result.engine}` : ""}
-                </Badge>
-              )}
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowCode((v) => !v)}
+                  title="把这一步变成脚本里的代码"
+                >
+                  <Code2 className={cn("h-3.5 w-3.5", showCode && "text-blue-600")} />
+                  脚本怎么用
+                </Button>
+                {result && (
+                  <Badge variant={result.found ? "warning" : "secondary"}>
+                    {result.found ? `命中 ${result.matched}` : "未找到"} · {result.elapsed_ms} ms
+                    {result.engine ? ` · ${result.engine}` : ""}
+                  </Badge>
+                )}
+              </div>
             </div>
           </CardHeader>
+          {showCode && (
+            <div className="shrink-0 px-5 pb-3">
+              <CallCodePanel
+                scene={findScene}
+                opts={{
+                  engine: modelEngine || undefined,
+                  conf: Number.parseFloat(conf) || undefined,
+                  minScore: Number.parseFloat(minScore) || undefined,
+                }}
+              />
+            </div>
+          )}
           <CardContent className="min-h-0 flex-1">
             {result && result.found && result.matches.length > 0 ? (
               <>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
+  Code2,
   Copy,
   FileImage,
   ImagePlus,
@@ -16,8 +17,12 @@ import { Button } from "./ui/button";
 import { Callout } from "./ui/callout";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { EmptyState } from "./ui/empty-state";
+import { ErrorHelp } from "./ui/error-help";
+import { NoResult } from "./ui/no-result";
+import { CallCodePanel } from "./ui/call-code";
 import { fileToBase64, imageSize, recognizeTable } from "../lib/api";
 import { useImageDrop, type DroppedImage } from "../lib/use-file-drop";
+import { useErrorAction, type SettingsFocus } from "../lib/use-error-action";
 import { cn } from "../lib/utils";
 import type { TableItem, TableResult } from "../types";
 
@@ -49,7 +54,13 @@ const MODES = [
  * 三个模式对应三种真实用法，所以做成并列的按钮而不是藏在下拉里——
  * 「我有张文档照片」和「我已经裁好表格了」的人要找的东西不一样。
  */
-export function TablePanel() {
+export function TablePanel({
+  onOpenSettings,
+  onOpenService,
+}: {
+  onOpenSettings: (focus?: SettingsFocus) => void;
+  onOpenService: () => void;
+}) {
   const [src, setSrc] = useState<string | null>(null);
   const [b64, setB64] = useState<string>("");
   const [fileName, setFileName] = useState("");
@@ -58,8 +69,11 @@ export function TablePanel() {
   const [withText, setWithText] = useState(true);
   const [result, setResult] = useState<TableResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** 存原始错误：人话翻译交给 ErrorHelp，别自己拼文案（会丢错误码） */
+  const [error, setError] = useState<unknown>(null);
   const [showBoxes, setShowBoxes] = useState(true);
+  /** 「脚本怎么用」面板 */
+  const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -72,13 +86,19 @@ export function TablePanel() {
         setResult(await recognizeTable(b, { mode: m, withText: wt }));
       } catch (e) {
         setResult(null);
-        setError(String(e));
+        setError(e);
       } finally {
         setBusy(false);
       }
     },
     [],
   );
+
+  const onErrorAction = useErrorAction({
+    onRetry: () => void run(b64, mode, withText),
+    onOpenSettings,
+    onOpenService,
+  });
 
   const load = useCallback(
     async (file: File) => {
@@ -92,7 +112,7 @@ export function TablePanel() {
         setSize(dim);
         await run(b, mode, withText);
       } catch (e) {
-        setError(`加载图片失败：${e}`);
+        setError(e);
       }
     },
     [mode, withText, run],
@@ -282,6 +302,15 @@ export function TablePanel() {
             识别结果
           </CardTitle>
           <div className="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowCode((v) => !v)}
+              title="把这一步变成脚本里的代码"
+            >
+              <Code2 className={cn("h-3.5 w-3.5", showCode && "text-blue-600")} />
+              脚本怎么用
+            </Button>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-400" />}
             {total > 0 && (
               <Badge variant="secondary">
@@ -291,6 +320,12 @@ export function TablePanel() {
             )}
           </div>
         </CardHeader>
+
+        {showCode && (
+          <div className="shrink-0 px-5 pt-3">
+            <CallCodePanel scene="table" opts={{ mode }} />
+          </div>
+        )}
 
         <CardContent className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
           <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-1">
@@ -326,14 +361,12 @@ export function TablePanel() {
             识别格子里的文字（关掉只出结构，快一倍）
           </label>
 
-          {error && (
-            <Callout
-              variant="error"
-              icon={<AlertTriangle className="h-3.5 w-3.5" />}
-              title="识别失败"
-            >
-              {error}
-            </Callout>
+          {error !== null && (
+            <ErrorHelp
+              error={error}
+              onAction={onErrorAction}
+              context="我在试跑页的「表格」里上传了一张表格图，想把它变成能复制进 Excel 的表格。"
+            />
           )}
 
           {result?.fallback && (
@@ -354,8 +387,28 @@ export function TablePanel() {
           )}
 
           {result && result.tables.length === 0 && !error && (
-            <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-neutral-200">
-              <p className="text-[12px] text-neutral-400">这张图里没有找到表格</p>
+            <div className="flex min-h-0 flex-1 items-center justify-center">
+              <NoResult
+                title="这张图里没有找到表格"
+                tips={[
+                  "确认表格线看得清——无框线的表（靠空白对齐）最容易漏",
+                  "整页里表格只占一小块时，先把那一块裁出来再传",
+                ]}
+                action={
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => {
+                      setMode("structure");
+                      void run(b64, "structure", withText);
+                    }}
+                    disabled={busy}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    按「整图当表格」再试一次
+                  </Button>
+                }
+              />
             </div>
           )}
 

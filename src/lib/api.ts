@@ -8,6 +8,7 @@
  */
 
 import { invoke, isTauri } from "./tauri";
+import { ApiError } from "./errors";
 import type {
   AppConfig,
   DanziResult,
@@ -38,6 +39,24 @@ import type {
 
 /** 浏览器调试时的兜底地址（Rust 服务默认端口）。 */
 const HTTP_BASE = "http://127.0.0.1:8848";
+
+/**
+ * 拆统一信封：`code != 0` 就抛**带码**的错误。
+ *
+ * 为什么不能直接 `throw new Error(json.msg)`：码里藏着「这事该去哪解决」
+ * （503 去装模型、429 退避重试、1002 换引擎），丢掉它前端就只剩一句
+ * 后端原文，用户看不懂也不知道下一步干嘛。见 `lib/errors.ts`。
+ */
+function mustOk(json: { code?: number; msg?: string }, res: Response, endpoint: string): void {
+  if (json.code !== 0) {
+    throw new ApiError({
+      code: json.code ?? -1,
+      msg: json.msg || `HTTP ${res.status}`,
+      endpoint,
+      httpStatus: res.status,
+    });
+  }
+}
 
 export async function getHealth(): Promise<Health> {
   return invoke<Health>("get_health");
@@ -159,9 +178,7 @@ export async function recognize(
     body: JSON.stringify({ image, use_cls: useCls, ...(engine ? { engine } : {}) }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/ocr/shibie");
   const d = json.data;
   return {
     text: d.text,
@@ -196,9 +213,7 @@ export async function recognizeChars(
     body: JSON.stringify({ image, use_cls: useCls, ...(engine ? { engine } : {}) }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/ocr/danzijson");
   return json.data as DanziResult;
 }
 
@@ -229,9 +244,7 @@ export async function regionOcr(
     body: JSON.stringify({ image, region, use_cls: useCls, ...(engine ? { engine } : {}) }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/ocr/quyuocr");
   return json.data as RegionOcrResult;
 }
 
@@ -268,9 +281,7 @@ export async function recognizeTable(
     }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/ocr/biaoge");
   return json.data as TableResult;
 }
 
@@ -303,9 +314,7 @@ export async function scanBarcode(
     }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/vision/qrcode");
   return json.data as BarcodeResult;
 }
 
@@ -340,9 +349,7 @@ export async function detectImage(
     }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/vision/detect");
   return json.data as DetectResult;
 }
 
@@ -375,9 +382,7 @@ export async function pipeline(
     }),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/vision/pipeline");
   return json.data as PipelineResult;
 }
 
@@ -405,9 +410,7 @@ export async function findImage(args: FindArgs): Promise<FindResult & { preview?
     body: JSON.stringify(args),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, path);
   return json.data as FindResult;
 }
 
@@ -430,9 +433,7 @@ export async function findSemantic(
     body: JSON.stringify(args),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/ocr/yuyizhaotu");
   return json.data as FindResult;
 }
 
@@ -456,9 +457,7 @@ export async function findPrompt(
     body: JSON.stringify(args),
   });
   const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(json.msg || `HTTP ${res.status}`);
-  }
+  mustOk(json, res, "/vision/prompt");
   return json.data as FindResult;
 }
 

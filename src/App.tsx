@@ -7,6 +7,7 @@ import { ApiPage } from "./pages/ApiPage";
 import { Playground } from "./pages/Playground";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import type { SettingsFocus } from "./lib/use-error-action";
 import { cn } from "./lib/utils";
 import { invoke, isTauri } from "./lib/tauri";
 import { writeCachedUpdate } from "./lib/update";
@@ -84,6 +85,14 @@ export default function App() {
    * 是因为连续点两次也要能再弹一次。
    */
   const [pickToken, setPickToken] = useState(0);
+  /**
+   * 进设置页时要滚到哪一块。
+   *
+   * 由错误提示的「去模型库安装」这类按钮设置：报错说模型没装，点一下
+   * 直接落到模型卡，用户不用自己在长页面里找。手动点侧栏进设置页时清空，
+   * 否则下次进来会莫名滚到中间。
+   */
+  const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   /*
@@ -148,6 +157,21 @@ export default function App() {
     if (pick) setPickToken((t) => t + 1);
   }, []);
 
+  /**
+   * 切页。顺手清掉设置页的定位标记——它是「从错误提示指路过来」时的一次性
+   * 意图，不该粘到用户之后每次进设置页的浏览上。
+   */
+  const goPage = useCallback((p: PageKey) => {
+    if (p !== "settings") setSettingsFocus(undefined);
+    setPage(p);
+  }, []);
+
+  /** 去设置页，可指定滚到哪一块（错误提示指路用） */
+  const openSettings = useCallback((focus?: SettingsFocus) => {
+    setSettingsFocus(focus);
+    setPage("settings");
+  }, []);
+
   // 报到：告诉后端「界面已经渲染出来了」。
   // 后端有个看门狗在等这个信号——WebView2 的 GPU 进程崩溃时 JS 根本不会执行，
   // 收不到报到就自动切软件合成重建窗口（见 src-tauri/src/lib.rs）。
@@ -185,7 +209,7 @@ export default function App() {
                   icon={item.icon}
                   active={page === item.key}
                   collapsed={collapsed}
-                  onClick={() => setPage(item.key)}
+                  onClick={() => goPage(item.key)}
                 />
               ))}
             </nav>
@@ -224,16 +248,22 @@ export default function App() {
                 {page === "service" && (
                   <ServicePage
                     onOpenPlayground={openPlayground}
-                    onOpenApi={() => setPage("api")}
-                    onOpenSettings={() => setPage("settings")}
+                    onOpenApi={() => goPage("api")}
+                    onOpenSettings={openSettings}
                   />
                 )}
                 {page === "api" && <ApiPage />}
                 {page === "playground" && (
-                  <Playground tab={ocrTab} onTabChange={setOcrTab} pickToken={pickToken} />
+                  <Playground
+                    tab={ocrTab}
+                    onTabChange={setOcrTab}
+                    pickToken={pickToken}
+                    onOpenSettings={openSettings}
+                    onOpenService={() => goPage("service")}
+                  />
                 )}
                 {page === "logs" && <LogsPage />}
-                {page === "settings" && <SettingsPage />}
+                {page === "settings" && <SettingsPage focus={settingsFocus} />}
               </div>
             </div>
           </main>

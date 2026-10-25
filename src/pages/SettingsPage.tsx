@@ -23,6 +23,7 @@ import {
   Server,
   Settings as SettingsIcon,
   Shield,
+  Sparkles,
   Square,
   Trash2,
   Upload,
@@ -69,6 +70,7 @@ import {
 } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
+import { type SettingsFocus } from "../lib/use-error-action";
 import {
   DEFAULT_CONFIG,
   type AiStatus,
@@ -100,7 +102,30 @@ import {
  * 改动**自动保存**，不再要求用户去右上角找「保存」按钮。
  * 这页里没有一样是「改错了会炸」的，多一个保存步骤只会让人以为没生效。
  */
-export function SettingsPage() {
+/**
+ * 设置页。
+ *
+ * `focus` 用于**从别的页面指路过来**：试跑页报「模型没装」时，点错误里的
+ * 「去模型库安装」是直接跳到这里并滚到模型卡的 —— 如果没有这个参数，
+ * 用户跳过来还得自己在长页面里找，等于没指路。
+ */
+export function SettingsPage({ focus }: { focus?: SettingsFocus } = {}) {
+  /**
+   * 定位到指定区块。
+   *
+   * 延时一帧是必须的：页面刚挂载时布局还没算完，`scrollIntoView` 会滚到
+   * 错误的位置（实测滚到了顶部）。另外 App 切页时会先 `scrollTo(0)`，
+   * 不晚于它执行就白滚了。
+   */
+  useEffect(() => {
+    if (!focus) return;
+    const t = window.setTimeout(() => {
+      const el = focus === "models" ? modelsCardRef.current : aiCardRef.current;
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [focus]);
+
   const [cfg, setCfg] = useState<AppConfig>(DEFAULT_CONFIG);
   const [health, setHealth] = useState<Health | null>(null);
   const [root, setRoot] = useState("-");
@@ -121,6 +146,7 @@ export function SettingsPage() {
   const [aiTargetsList, setAiTargetsList] = useState<string[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiCopied, setAiCopied] = useState(false);
+  const [aiTryCopied, setAiTryCopied] = useState(false);
 
   /** 更新检查结果。null = 还没查过 */
   const [update, setUpdate] = useState<UpdateCheck | null>(null);
@@ -193,6 +219,8 @@ export function SettingsPage() {
   const [modelErr, setModelErr] = useState<string | null>(null);
   /** 「点了没下载的档位」时用它把视图滚到模型库 */
   const modelsCardRef = useRef<HTMLDivElement>(null);
+  /** AI 控制卡片。别的页面报错要指路过来时用 */
+  const aiCardRef = useRef<HTMLDivElement>(null);
 
   const loadModels = useCallback(async (force: boolean) => {
     if (!isTauri()) return;
@@ -435,6 +463,23 @@ export function SettingsPage() {
     await copy(ai.prompt, "ai");
     setAiCopied(true);
     window.setTimeout(() => setAiCopied(false), 1400);
+  };
+
+  /**
+   * 「试试看」：一条能立刻验证链路通不通的命令。
+   *
+   * 开完开关、拿到连接码之后，用户最常见的状态是「然后呢？」。
+   * 给一条可以直接粘进终端的命令，比再解释三段文字管用——
+   * 它能问出「AI 现在能帮我干什么」，也是 AI 自己上手时调的第一个接口。
+   */
+  const copyAiTry = async () => {
+    if (!ai) return;
+    await copy(
+      `curl -s ${ai.base_url}/ai/v1/tools \\\n  -H "Authorization: Bearer ${ai.token}"`,
+      "",
+    );
+    setAiTryCopied(true);
+    window.setTimeout(() => setAiTryCopied(false), 1600);
   };
 
   const onToggleServer = async () => {
@@ -920,8 +965,15 @@ export function SettingsPage() {
             </Button>
 
             <div className="flex flex-col gap-1">
-              <Label htmlFor="port" className="text-[12px] text-neutral-500">
+              <Label
+                htmlFor="port"
+                className="flex items-center gap-1.5 text-[12px] text-neutral-500"
+              >
                 端口
+                <Hint>
+                  脚本里那个地址末尾的数字。改了要重启服务才生效，
+                  而且你脚本里的地址也得跟着改。除非和别的程序冲突，一般不用动。
+                </Hint>
               </Label>
               <Input
                 id="port"
@@ -999,6 +1051,7 @@ export function SettingsPage() {
       </Card>
 
       {/* ---------------------------------------------------------- AI 控制 */}
+      <div ref={aiCardRef}>
       <Card>
         <CardHeader>
           <div className="flex h-8 items-center">
@@ -1063,6 +1116,43 @@ export function SettingsPage() {
             </div>
           )}
 
+          {/*
+            「然后呢？」引导。
+            只在开启后显示：关闭时讲这些步骤是噪音。AI 这块最容易卡在
+            「开关开了、码也拿到了，但不知道下一步粘给谁」——
+            尤其是网页版 AI 访问不到 localhost 这件事，不写清楚会白试半天。
+          */}
+          {ai?.enabled && (
+            <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3.5 py-3">
+              <div className="flex items-center gap-1.5 text-[12px] font-medium text-blue-900">
+                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                接下来怎么用
+              </div>
+              <ol className="mt-1.5 space-y-1 text-[12px] leading-5 text-blue-900/80">
+                <li>1. 点下面「一键复制给 AI 的提示词」，整段复制</li>
+                <li>2. 粘给一个<b>跑在你这台电脑上</b>的 AI（编程助手、本地脚本、本地大模型都行）</li>
+                <li>3. 剩下的它自己会来问工具清单，然后开始干活</li>
+              </ol>
+              <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-blue-900/70">
+                <Info className="mt-[2px] h-3 w-3 shrink-0" />
+                <span>
+                  网页版 AI 在云端，访问不到你电脑的 127.0.0.1 ——
+                  这是它只给本机 AI 用的原因。
+                </span>
+              </p>
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="xs" onClick={() => void copyAiPrompt()}>
+                  {aiCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  {aiCopied ? "已复制" : "复制给 AI 的提示词"}
+                </Button>
+                <Button variant="ghost" size="xs" onClick={() => void copyAiTry()}>
+                  {aiTryCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  {aiTryCopied ? "已复制" : "复制一条试试看的命令"}
+                </Button>
+              </div>
+            </div>
+          )}
+
           {ai && ai.highlights.length > 0 && (
             <div className="rounded-lg bg-neutral-50 px-3.5 py-3">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -1098,11 +1188,21 @@ export function SettingsPage() {
               {aiCopied ? "已复制提示词" : "一键复制给 AI 的提示词"}
             </Button>
             <span className="text-[12px] text-neutral-400">
-              已教目标：{aiTargetsList.length ? aiTargetsList.join("、") : "暂无，可用 teach_target 教一次"}
+              {aiTargetsList.length > 0 ? (
+                <>
+                  已教目标：
+                  <span className="text-neutral-600">{aiTargetsList.join("、")}</span>
+                </>
+              ) : (
+                // 「暂无，可用 teach_target 教一次」是接口视角的说法。
+                // 用户视角要回答的是「教了有什么用」。
+                "还没教过目标。让 AI 调一次 teach_target（框个按钮、起个中文名），之后你说名字它就能找到。"
+              )}
             </span>
           </div>
         </CardContent>
       </Card>
+      </div>
 
       {/* ---------------------------------------------------------- 模型库 */}
       {/*
@@ -1148,7 +1248,21 @@ export function SettingsPage() {
           )}
 
           {optModels.length === 0 && !modelsLoading && (
-            <p className="px-1 py-3 text-[12px] text-neutral-400">清单是空的，点右上角刷新试试。</p>
+            <div className="flex items-center justify-between gap-3 rounded-lg bg-neutral-50 px-3.5 py-3">
+              <p className="text-[12px] leading-5 text-neutral-500">
+                清单是空的。一般是还没联网拉过——点一下右边就行；
+                一直拉不到的话，也可以让朋友把 zip 发你、用「从本地安装」。
+              </p>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => void loadModels(true)}
+                className="shrink-0"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                刷新清单
+              </Button>
+            </div>
           )}
 
           {optModels.map((m) => {
