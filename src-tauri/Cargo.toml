@@ -128,6 +128,10 @@ features = [
   # 更新助手要 OpenProcess 判断旧进程是否真的退出了
   # （不能只 sleep 几秒：onnxruntime.dll 被占用时覆盖会半途失败）
   "Win32_System_Threading",
+  # 环境体检：读注册表确认 WebView2 装没装（RegGetValueW）
+  "Win32_System_Registry",
+  # 环境体检：端口被占用时查占用者 PID（GetExtendedTcpTable）
+  "Win32_NetworkManagement_IpHelper",
   # 托盘菜单拿不到前台焦点时，靠 GetAsyncKeyState 轮询左键做到「点外面就关」
   "Win32_UI_Input_KeyboardAndMouse",
 ]

@@ -15,6 +15,8 @@ pub mod commands;
 pub mod config;
 /// 多引擎抽象层（PP-OCR / DDDDOCR / YOLO）。设计契约见 `docs/ENGINES.md`。
 pub mod engine;
+/// 环境体检与一键修复（WebView2 缺失 / 系统太旧 / 端口占用）。
+pub mod envcheck;
 /// 键鼠注入（SendInput）。只被 AI 工具层用到，但单独成模块便于自己写单测。
 pub mod input;
 pub mod logbuf;
@@ -321,6 +323,17 @@ fn show_tray_menu_inner(app: &tauri::AppHandle, pos: tauri::PhysicalPosition<f64
                 Ok(w) => w,
                 Err(e) => {
                     tracing::error!("托盘菜单窗口创建失败: {e}");
+                    // 菜单本身就是个 WebView 窗口 —— WebView2 真缺了，这里也建不起来，
+                    // 菜单里那条「安装 WebView2」自然点不到。启动时弹过一次引导，
+                    // 用户当时选了「暂不」，之后就再没有入口了。
+                    // 所以在这一刻补一个：只补一次，避免每次点托盘都弹框。
+                    static OFFERED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if crate::envcheck::webview2_missing()
+                        && !OFFERED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        crate::envcheck::offer_webview2_repair(app);
+                    }
                     return;
                 }
             }
@@ -538,11 +551,20 @@ fn spawn_tray_ticker(app: tauri::AppHandle, tray: tauri::tray::TrayIcon) {
             } else {
                 "OCR Studio · 服务已停止".to_string()
             };
+            // webview2_missing 一起带上：托盘菜单要靠它决定是否显示
+            // 「安装 WebView2」高亮项。它装没装不会变，所以不进上面的去重比较。
             let _ = app.emit(
                 "tray-status",
-                serde_json::json!({ "running": running, "port": port }),
+                serde_json::json!({
+                    "running": running,
+                    "port": port,
+                    "webview2_missing": crate::envcheck::webview2_missing(),
+                }),
             );
-            let _ = tray.set_tooltip(Some(tip));
+            // 装 WebView2 期间别抢 tooltip：那是唯一的进度通道
+            if !crate::envcheck::is_installing() {
+                let _ = tray.set_tooltip(Some(tip));
+            }
         }
     });
 }
@@ -622,6 +644,15 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             init_logging(&data_dir);
+            // 指令集体检：老 CPU（2013 年前的至强 E5 v1/v2 等）会让 onnxruntime.dll
+            // 在建会话时抛 0xC000001D，进程被 Windows 直接干掉、零日志。
+            // 这里提前喊一嗓子，用户至少在日志里看得见原因，不用去翻事件查看器。
+            if !crate::ocr::ort_util::cpu_supports_ort_baseline() {
+                tracing::error!(
+                    "{}",
+                    crate::ocr::ort_util::CPU_BASELINE_HINT
+                );
+            }
             // 日志转发线程：把缓冲区里的新日志批量推给前端（日志页用）
             logbuf::spawn_forwarder(app.handle().clone());
             tracing::info!("OCR Studio 启动，数据目录: {}", data_dir.display());
@@ -659,7 +690,20 @@ pub fn run() {
                     persist_compat(&data_dir);
                 }
             }
+            // 托盘先建、引导后弹：消息框是模态的，会占住主线程到用户点掉为止。
+            // 顺序反了的话，那几秒里用户面对的是一个「啥都没有」的桌面，
+            // 连退出的入口都没有。
             setup_tray(app.handle())?;
+
+            // 界面起不来的两种情况：真失败了；诊断开关强制走引导（验收用，
+            // 真机没法卸 WebView2 来测）。引导里会自己分辨「没装」和「装了但坏了」。
+            let fake_no_webview = std::env::var_os("OCR_FAKE_NO_WEBVIEW").is_some();
+            if created.is_err() || fake_no_webview {
+                if fake_no_webview {
+                    tracing::warn!("OCR_FAKE_NO_WEBVIEW 已设置：强制走 WebView2 缺失引导（诊断）");
+                }
+                crate::envcheck::offer_webview2_repair(app.handle());
+            }
 
             // 诊断开关：启动后直接把托盘菜单弹出来。
             //

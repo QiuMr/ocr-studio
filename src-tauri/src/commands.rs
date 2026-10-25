@@ -975,6 +975,7 @@ pub fn get_config(state: State<'_, Arc<AppState>>) -> AppConfig {
 /// 保存配置并热生效：端口变更会重启服务，档位/设备变更会重载引擎。
 #[tauri::command]
 pub async fn save_config(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     mut cfg: AppConfig,
 ) -> Result<AppConfig, String> {
@@ -1010,7 +1011,7 @@ pub async fn save_config(
     // 端口变更 -> 重启服务
     if cfg.port != old.port {
         stop_server(&state);
-        server_start(state).await?;
+        server_start(app, state).await?;
     }
     Ok(cfg)
 }
@@ -1052,7 +1053,9 @@ pub fn server_status(state: State<'_, Arc<AppState>>) -> bool {
 }
 
 /// 在后台启动 HTTP 服务。托盘菜单和 Tauri 命令共用这段逻辑。
-pub fn start_server_background(state: &Arc<AppState>) {
+///
+/// 带 `app` 是为了 bind 失败时能把「端口被谁占了」推给前端（见 `api::serve`）。
+pub fn start_server_background(state: &Arc<AppState>, app: Option<tauri::AppHandle>) {
     let st = Arc::clone(state);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -1063,7 +1066,7 @@ pub fn start_server_background(state: &Arc<AppState>) {
             }
         };
         rt.block_on(async move {
-            if let Err(e) = crate::api::serve(st).await {
+            if let Err(e) = crate::api::serve(st, app).await {
                 tracing::error!("HTTP 服务退出: {e}");
             }
         });
@@ -1072,12 +1075,15 @@ pub fn start_server_background(state: &Arc<AppState>) {
 
 /// 启动 HTTP 服务（已在运行时直接返回端口）。
 #[tauri::command]
-pub async fn server_start(state: State<'_, Arc<AppState>>) -> Result<u16, String> {
+pub async fn server_start(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<u16, String> {
     if state.is_running() {
         return Ok(state.port());
     }
     let port = state.port();
-    start_server_background(&state);
+    start_server_background(&state, Some(app));
 
     // 等监听真正就绪（serve 里绑定成功后才登记 shutdown）
     for _ in 0..100 {
@@ -1891,7 +1897,7 @@ pub fn tray_action(app: tauri::AppHandle, action: String) -> Result<(), String> 
                 return Ok(());
             }
             tracing::info!("托盘：启动服务");
-            start_server_background(&state);
+            start_server_background(&state, Some(app.clone()));
             Ok(())
         }
         "stop" => {
@@ -1905,6 +1911,16 @@ pub fn tray_action(app: tauri::AppHandle, action: String) -> Result<(), String> 
         "quit" => {
             tracing::info!("托盘：退出应用");
             app.exit(0);
+            Ok(())
+        }
+        // 装了 WebView2 后才可能出现这个入口（缺失时启动就会弹引导），
+        // 用户当时选了「暂不处理」就从这里找回。
+        // **必须另起线程**：同步命令跑在主线程上，而下载 + 安装要好几十秒，
+        // 直接调会把整个界面连同托盘一起冻住直到装完。
+        "webview2" => {
+            tracing::info!("托盘：修复 WebView2");
+            let h = app.clone();
+            std::thread::spawn(move || crate::envcheck::tray_install_webview2(&h));
             Ok(())
         }
         other => Err(format!("未知托盘动作：{other}")),

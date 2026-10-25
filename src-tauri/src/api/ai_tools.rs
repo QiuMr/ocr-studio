@@ -1612,7 +1612,9 @@ pub async fn exec(
                     json!({ "running": true, "port": state.port() }),
                 ));
             }
-            crate::commands::start_server_background(state);
+            // AI 工具层没有 Tauri 句柄，bind 失败只记日志；工具返回里
+            // 带上端口被谁占了（envcheck 查得到），调用方（AI）能转告用户。
+            crate::commands::start_server_background(state, None);
             // 等它真的 listen
             for _ in 0..100 {
                 if state.is_running() {
@@ -1621,7 +1623,14 @@ pub async fn exec(
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if !state.is_running() {
-                return Err(format!("服务没起来：127.0.0.1:{} 可能被占用", state.port()));
+                let who = crate::envcheck::port_owner(state.port())
+                    .map(|(pid, n)| format!("（被 {n} 进程 {pid} 占用）"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "服务没起来：127.0.0.1:{} 可能被占用{}",
+                    state.port(),
+                    who
+                ));
             }
             Ok((
                 format!("服务已启动，地址 http://127.0.0.1:{}。", state.port()),

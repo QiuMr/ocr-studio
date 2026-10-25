@@ -22,11 +22,36 @@ use crate::config::AppConfig;
 use crate::ocr::ensure_ort_dylib_path;
 
 /// 启动 HTTP 服务，直到收到停机信号。
-pub async fn serve(state: Arc<AppState>) -> anyhow::Result<()> {
+///
+/// `app` 为 `None` 时（AI 工具层启动，没有 Tauri 句柄）bind 失败只记日志，
+/// 不向前端推事件——那种场景下也没有界面可推。
+pub async fn serve(state: Arc<AppState>, app: Option<tauri::AppHandle>) -> anyhow::Result<()> {
     let port = state.port();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .with_context(|| format!("绑定 127.0.0.1:{port} 失败（端口被占用？）"))?;
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            // 端口被占是最常见的一类「服务起不来」。原来只有一句 context 报错，
+            // 用户看到的是首页「服务已停止」——完全不知道被谁占了、该怎么办。
+            // 这里查占用者并推给前端，首页就能给出人话引导。
+            let owner = crate::envcheck::port_owner(port);
+            let reason = match &owner {
+                Some((pid, name)) if !name.is_empty() => {
+                    format!("端口 {port} 被 {name}（进程 {pid}）占用了")
+                }
+                Some((pid, _)) => format!("端口 {port} 被进程 {pid} 占用了"),
+                None => format!("端口 {port} 绑不上（{e}）"),
+            };
+            tracing::error!("{reason}");
+            if let Some(app) = app {
+                use tauri::Emitter as _;
+                let _ = app.emit(
+                    "service-error",
+                    serde_json::json!({ "reason": reason, "port": port }),
+                );
+            }
+            anyhow::bail!("{reason}");
+        }
+    };
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     {
@@ -95,6 +120,7 @@ pub fn start_for_tauri(app: &tauri::AppHandle) -> Arc<AppState> {
 
     // 引擎加载以秒计，放独立线程 + 独立 runtime，避免阻塞 UI 线程
     let st = Arc::clone(&state);
+    let app_owned = app.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -107,7 +133,7 @@ pub fn start_for_tauri(app: &tauri::AppHandle) -> Arc<AppState> {
             if let Err(e) = st.ensure_engine(&Default::default()).await {
                 tracing::error!("引擎加载失败: {e}");
             }
-            if let Err(e) = serve(st).await {
+            if let Err(e) = serve(st, Some(app_owned)).await {
                 tracing::error!("HTTP 服务异常退出: {e}");
             }
         });

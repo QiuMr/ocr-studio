@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AppWindow, Download, LogOut, Play, RefreshCw, Square } from "lucide-react";
+import { AppWindow, Download, LogOut, Play, Puzzle, RefreshCw, Square } from "lucide-react";
 import { invoke } from "../lib/tauri";
 import { readCachedUpdate, writeCachedUpdate, type CachedUpdate } from "../lib/update";
 import type { UpdateCheck } from "../types";
@@ -30,10 +30,11 @@ export function TrayMenu() {
   const [port, setPort] = useState(8848);
   const [version, setVersion] = useState("");
   const [cached, setCached] = useState<CachedUpdate | null>(null);
+  const [webview2Missing, setWebview2Missing] = useState(false);
   const [busy, setBusy] = useState<"start" | "stop" | "check" | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const act = useCallback(async (action: "open" | "start" | "stop" | "quit") => {
+  const act = useCallback(async (action: "open" | "start" | "stop" | "quit" | "webview2") => {
     try {
       await invoke<void>("tray_action", { action });
     } catch (e) {
@@ -87,10 +88,16 @@ export function TrayMenu() {
     let disposed = false;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      const f = await listen<{ running: boolean; port: number }>("tray-status", (e) => {
-        setRunning(e.payload.running);
-        setPort(e.payload.port);
-      });
+      const f = await listen<{ running: boolean; port: number; webview2_missing?: boolean }>(
+        "tray-status",
+        (e) => {
+          setRunning(e.payload.running);
+          setPort(e.payload.port);
+          if (typeof e.payload.webview2_missing === "boolean") {
+            setWebview2Missing(e.payload.webview2_missing);
+          }
+        },
+      );
       if (disposed) f();
       else un = f;
     })();
@@ -213,6 +220,24 @@ export function TrayMenu() {
               label="检查更新"
               disabled={busy === "check"}
               onClick={() => void checkNow()}
+            />
+          )}
+          {/*
+            界面组件修复入口。
+            悖论先想清楚：WebView2 真缺失时，这个菜单窗口（也是 WebView）本身
+            也打不开——所以它不是「缺失时的主要引导」，那种情况靠启动时的
+            原生消息框。它的价值是：① 用户界面出了别的问题，想主动重装试试；
+            ② 诊断开关 OCR_FAKE_NO_WEBVIEW 下的验收路径（那时 WebView2 实际
+            装着，菜单能开，missing 标志为真，正好把这条路径完整走一遍）。
+          */}
+          {webview2Missing && (
+            <MenuItem
+              icon={<Puzzle className="h-3.5 w-3.5" />}
+              label="安装 WebView2"
+              hint="修复界面组件"
+              tone="accent"
+              badge
+              onClick={() => void act("webview2")}
             />
           )}
         </div>

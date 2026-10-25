@@ -15,6 +15,7 @@ import {
   Type,
 } from "lucide-react";
 import { CodeBlock } from "../components/ui/code-block";
+import { Button } from "../components/ui/button";
 import { getConfig, getHealth, serverStart, serverStatus, serverStop } from "../lib/api";
 import { isTauri } from "../lib/tauri";
 import { cn } from "../lib/utils";
@@ -115,6 +116,30 @@ export function ServicePage({ onOpenPlayground, onOpenApi, onOpenSettings }: Pro
     const id = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(id);
   }, [refresh]);
+
+  // 服务起不来时后端会推原因（最常见：端口被别的程序占了）。
+  // 没有这个通道时，用户看到的是「服务已停止」四个字，完全不知道被谁占了。
+  useEffect(() => {
+    if (!tauri) return;
+    let un: (() => void) | undefined;
+    let disposed = false;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const f = await listen<{ reason?: string; port?: number }>("service-error", (e) => {
+          setError(e.payload.reason || "服务启动失败，原因未知。");
+        });
+        if (disposed) f();
+        else un = f;
+      } catch {
+        /* 浏览器预览模式没有这个事件，忽略 */
+      }
+    })();
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, [tauri]);
 
   // 每秒走一次，让「已运行」这个数字是活的（同时也表明服务在跑）
   useEffect(() => {
@@ -310,8 +335,33 @@ print(r["data"]["text"])`,
       </section>
 
       {error && (
-        <div className="mt-3 rounded-lg bg-amber-50 px-3.5 py-2.5 text-[13px] font-medium text-amber-900">
-          {error}
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-3.5 py-2.5 text-[13px] font-medium text-amber-900">
+          <span className="min-w-0 flex-1">{error}</span>
+          {/* 端口被占是最常见的「服务起不来」，而且解法明确：换个端口。
+              按钮直接把用户送到设置页的端口输入框，别让他自己找。 */}
+          {error.includes("占用") && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0 border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+              onClick={onOpenSettings}
+            >
+              去设置页改端口
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* 显卡加速不可用时解释一句：不说的话，用户只会觉得「这程序怎么这么慢」，
+          而他已经能在下面的「推理设备」统计里看到「处理器」——缺的是原因和出路。 */}
+      {running && cfg?.device === "directml" && health?.actual_device === "cpu" && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg bg-blue-50 px-3.5 py-2.5 text-[13px] font-medium leading-relaxed text-blue-900">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            显卡加速没有生效（驱动太老、远程桌面或虚拟机里常见），已自动改用处理器跑，速度会慢一些。
+            更新显卡驱动后重启程序即可恢复。
+          </span>
         </div>
       )}
 
