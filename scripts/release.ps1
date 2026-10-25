@@ -33,22 +33,56 @@ function Fail([string]$msg) {
 function Info([string]$msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Ok([string]$msg) { Write-Host "[OK]   $msg" -ForegroundColor Green }
 
+# git 探测（与 build.ps1 探测 node/python 同一套理由）：
+# 不保证每个 shell 的 PATH 里都有 git —— 精简环境、某些终端、以及
+# 用 .NET/任务计划拉起的会话都可能没有。写死 `git` 会在第一步就
+# CommandNotFoundException，而此时脚本还什么都没做，看着像脚本坏了。
+# 用绝对路径调用，后续一律走 $gitExe。
+$gitExe = $null
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) { $gitExe = $gitCmd.Source }
+if (-not $gitExe) {
+  $gitCands = @(
+    "D:\Git\cmd\git.exe",
+    "C:\Program Files\Git\cmd\git.exe",
+    "C:\Program Files (x86)\Git\cmd\git.exe"
+  )
+  foreach ($c in $gitCands) {
+    if (Test-Path $c) { $gitExe = $c; break }
+  }
+}
+if (-not $gitExe) { Fail "找不到 git。装一个，或把它加进 PATH" }
+Info "git: $gitExe"
+
 # 调 git 并返回 @{ Code; Out }。
 #
-# **必须包这一层**：git 把进度和提示都写到 **stderr**（"Everything up-to-date"、
-# "To https://..."、"branch 'master' set up to track ..." 全是 stderr），
-# 而 `$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误。
-# 结果是「推送其实成功了，脚本却报错退出」——这类假失败最费时间：
-# 输出看着像出错，实际一步都没做错。
+# **必须包这一层**，两个原因：
+# 1) git 把进度和提示都写到 **stderr**（"Everything up-to-date"、"To https://..."、
+#    "branch 'master' set up to track ..." 全是 stderr），而 `$ErrorActionPreference
+#    = "Stop"` 会把原生命令的 stderr 当成终止性错误 —— 结果是「推送其实成功了，
+#    脚本却报错退出」。这类假失败最费时间：输出看着像出错，实际一步都没做错。
+# 2) 直接用 `& git ...` 取输出在某些会话里会拿到**空字符串**（原生 exe 的
+#    stdout 重定向不稳定）。空输出会被下游误判成「没有 origin 远程」这种
+#    完全错误的事实。所以改走 .NET 的 Process 显式重定向两条流。
 function Invoke-Git([string[]]$gitArgs) {
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  try {
-    $out = & git -C $root @gitArgs 2>&1
-    return @{ Code = $LASTEXITCODE; Out = (($out | Out-String).Trim()) }
-  } finally {
-    $ErrorActionPreference = $prev
-  }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $gitExe
+  # 参数里可能有空格（路径、提交信息），手工加引号，不用数组拼接
+  $psi.Arguments = (($gitArgs | ForEach-Object {
+    if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+  }) -join ' ')
+  $psi.WorkingDirectory = $root
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $psi.CreateNoWindow = $true
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEnd()
+  $err = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  return @{ Code = $p.ExitCode; Out = (($out + "`n" + $err).Trim()) }
 }
 
 # ── 1. 版本号：唯一来源 tauri.conf.json ────────────────────────────────
