@@ -4,6 +4,10 @@
 //! - 引擎放在 `std::sync::Mutex<Option<OcrEngine>>` 而不是 `tokio::sync::RwLock`：
 //!   推理是阻塞式计算（几十到几百毫秒），用 `spawn_blocking` 跑更合适；
 //!   `Option` 允许模型加载失败时服务照样起来，接口返回 503 而不是进程退出。
+//!   **顺带这是 ONNX Runtime 多线程崩溃的官方推荐解法**：一个会话 + 互斥锁串行，
+//!   Session 全程复用，线程数只由会话数决定、与并发请求数无关。
+//! - 在途请求另有 `infer_slots` 信号量封顶（见该字段）：串行化只保证不崩，
+//!   不保证内存有界 —— 排队期间每张已解码位图都活着。
 //! - 配置用 `std::sync::RwLock`：临界区内没有 `.await`，无需异步锁。
 
 use std::path::{Path, PathBuf};
@@ -172,7 +176,25 @@ pub struct AppState {
     pub started_at: Instant,
     /// 停机信号发送端。`Some` 表示服务正在运行。
     pub shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    /// 在途推理请求的名额。拿不到就当场 429，不排队。
+    ///
+    /// 为什么需要：推理被 `engine` 互斥锁串行化，所以并发请求**只会排队** ——
+    /// 而排队期间每张已解码的位图都活着（32MB 的 body 能解出 200MB 位图），
+    /// 在途数不设上限时内存随并发线性上涨，直到被系统 OOM killer 干掉
+    /// （现象：闪退、零日志）。实测 48 路并发 + 2400×1600 的图，工作集
+    /// 从 204MB 涨到 493MB；200 路并发时光是排队就把最后一个请求拖到 52 秒，
+    /// 客户端早超时了，白占内存。
+    /// 放在 `Arc` 里是为了能 `acquire_owned()`：许可跟着请求走，
+    /// 不用把 `&self` 的借用拖进 handler。
+    pub infer_slots: Arc<tokio::sync::Semaphore>,
 }
+
+/// 在途推理请求的上限。
+///
+/// 32 的来历：推理是串行的，超过这个数只是排队；而每张在途位图按最坏情况
+/// （`MAX_DECODE_PIXELS` = 3200 万像素 ≈ 96MB）算，32 路也就是 3GB 量级的上限，
+/// 真实截图（1080p~4K，2~8M 像素）则只有几百 MB。
+pub const MAX_INFLIGHT_INFER: usize = 32;
 
 impl AppState {
     pub fn new(models_root: PathBuf, cfg: AppConfig) -> Self {
@@ -202,6 +224,22 @@ impl AppState {
             ai_rate: Mutex::new(std::collections::VecDeque::new()),
             ai_idem: Mutex::new(super::ai::AiIdem::default()),
             shutdown: Mutex::new(None),
+            infer_slots: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_INFER)),
+        }
+    }
+
+    /// 拿一个在途推理名额。
+    ///
+    /// **不排队**：`try_acquire` 拿不到就立刻返回 429 + `Retry-After`。
+    /// 排队看起来「客气」，实际上是把客户端的超时和自己的内存一起耗光。
+    /// 许可由调用方持有到推理结束（`OwnedSemaphorePermit` drop 时自动释放）。
+    pub fn acquire_infer_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+        match self.infer_slots.clone().try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(_) => Err(ApiError::TooManyRequests(format!(
+                "在途推理请求已达上限 {MAX_INFLIGHT_INFER}，请稍后重试（响应带 Retry-After）。\
+                 推理是逐张串行处理的，继续加并发只会让队列更长、不会更快。"
+            ))),
         }
     }
 
@@ -679,6 +717,30 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 并发闸门：名额用光时必须**当场 429**，不能排队。
+    ///
+    /// 排队看着客气，实际是把客户端的超时和自己的内存一起耗光 —— 实测 200 路并发
+    /// 无闸门时最后一个要等 52 秒，客户端早超时了，位图还白占着。
+    #[test]
+    fn infer_slot_gate_fails_fast_instead_of_queueing() {
+        let st = AppState::new(PathBuf::from("."), AppConfig::default());
+        // 先把名额全部占住
+        let mut held: Vec<_> = (0..MAX_INFLIGHT_INFER)
+            .map(|_| st.acquire_infer_slot().expect("名额不该用完"))
+            .collect();
+        assert_eq!(held.len(), MAX_INFLIGHT_INFER);
+
+        let e = st.acquire_infer_slot().unwrap_err();
+        assert_eq!(e.code(), crate::api::dto::CODE_TOO_MANY_REQUESTS);
+        assert_eq!(e.code(), 429);
+        // 消息必须说清「稍后重试」，不能让人以为服务坏了
+        assert!(e.message().contains("请稍后重试"));
+
+        // 还回去一个，立刻又能拿到（不能有泄漏）
+        drop(held.pop());
+        assert!(st.acquire_infer_slot().is_ok());
+    }
 
     /// 引擎层错误 → API 错误的映射，必须逐档对上，不能一律拍成 500。
     ///

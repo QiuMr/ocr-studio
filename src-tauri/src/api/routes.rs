@@ -318,22 +318,35 @@ fn edit_distance(a: &str, b: &str) -> usize {
 // ---------------------------------------------------------------- 入参解析
 
 /// 从请求里取出图像与参数。支持 JSON base64 与 multipart 两种形态。
-async fn parse_recognize(req: Request) -> Result<(DynamicImage, OcrOptions), ApiError> {
-    let is_multipart = req
+///
+/// **顺序有讲究**：先读完请求体 → 拿在途名额 → 才解码图像。
+/// 反过来（先解码或一进门就拿名额）都会出事：先解码则名额管不住已经分配出去的位图；
+/// 一进门就拿名额，则一个连 body 都不发的慢客户端能把名额占死。
+///
+/// 返回的许可必须由调用方持有到推理结束，否则这道闸毫无意义
+/// （`OwnedSemaphorePermit` drop 即释放）。
+async fn parse_recognize(
+    req: Request,
+    state: &Arc<AppState>,
+) -> Result<(DynamicImage, OcrOptions, tokio::sync::OwnedSemaphorePermit), ApiError> {
+    let (bytes, opts) = if req
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim_start().starts_with("multipart/form-data"))
-        .unwrap_or(false);
-
-    if is_multipart {
-        parse_multipart(req).await
+        .unwrap_or(false)
+    {
+        parse_multipart(req).await?
     } else {
-        parse_json(req).await
-    }
+        parse_json(req).await?
+    };
+    let slot = state.acquire_infer_slot()?;
+    let img = decode_image(&bytes).map_err(ApiError::BadRequest)?;
+    Ok((img, opts, slot))
 }
 
-async fn parse_json(req: Request) -> Result<(DynamicImage, OcrOptions), ApiError> {
+/// 只读请求体，不解码图像（解码前要先拿在途名额，见 [`parse_recognize`]）。
+async fn parse_json(req: Request) -> Result<(Vec<u8>, OcrOptions), ApiError> {
     let bytes = to_bytes(req.into_body(), MAX_BODY)
         .await
         .map_err(|e| ApiError::BadRequest(format!("读取请求体失败: {e}")))?;
@@ -345,11 +358,10 @@ async fn parse_json(req: Request) -> Result<(DynamicImage, OcrOptions), ApiError
         ));
     }
     let raw = decode_base64_image(&opts.image).map_err(ApiError::BadRequest)?;
-    let img = decode_image(&raw).map_err(ApiError::BadRequest)?;
-    Ok((img, opts))
+    Ok((raw, opts))
 }
 
-async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), ApiError> {
+async fn parse_multipart(req: Request) -> Result<(Vec<u8>, OcrOptions), ApiError> {
     let mut mp = Multipart::from_request(req, &())
         .await
         .map_err(|e| ApiError::BadRequest(format!("multipart 解析失败: {e}")))?;
@@ -380,7 +392,6 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
 
     let bytes = image_bytes
         .ok_or_else(|| ApiError::BadRequest("multipart 中缺少 image（或 file）文件字段".to_string()))?;
-    let img = decode_image(&bytes).map_err(ApiError::BadRequest)?;
 
     let opts = OcrOptions {
         image: String::new(),
@@ -401,7 +412,7 @@ async fn parse_multipart(req: Request) -> Result<(DynamicImage, OcrOptions), Api
         mode: None,
         with_text: None,
     };
-    Ok((img, opts))
+    Ok((bytes, opts))
 }
 
 /// multipart 里 `class_filter` 写成逗号分隔的 id 列表（如 `0,5,7`）。
@@ -457,7 +468,8 @@ fn to_dto(b: &TextLine) -> LineDto {
 /// POST /ocr/shibie —— 整图识别，返回拼接文本 + 框 + 分数。
 async fn shibie(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -492,7 +504,8 @@ async fn shibie(State(state): State<Arc<AppState>>, req: Request) -> Response {
 /// POST /ocr/zhaozi —— 识别后按关键词/正则筛选命中行。
 async fn zhaozi(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -535,7 +548,8 @@ async fn zhaozi(State(state): State<Arc<AppState>>, req: Request) -> Response {
 /// 出参与 `/ocr/shibie` 基本一致，只多一个 `region`（实际生效的区域）。
 async fn quyuocr(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -616,7 +630,8 @@ pub(crate) fn clamp_region(rx: i32, ry: i32, rw: i32, rh: i32, w: u32, h: u32) -
 /// POST /ocr/duohangjson —— 多行 JSON，`[{text, box, score}, ...]`。
 async fn duohangjson(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -727,7 +742,8 @@ async fn engine_list(State(state): State<Arc<AppState>>) -> Response {
 /// `engine: "yolo"`。
 async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -810,9 +826,10 @@ async fn vision_detect(State(state): State<Arc<AppState>>, req: Request) -> Resp
 ///
 /// 「一个码都没找到」是**正常业务结果**（`count: 0`），不是错误——
 /// rxing 内部为此抛 `NotFoundException`，这里已经转成空列表。
-async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Response {
+async fn vision_qrcode(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -876,7 +893,8 @@ async fn vision_qrcode(State(_state): State<Arc<AppState>>, req: Request) -> Res
 /// 对「先看结构对不对」这个阶段仍然有用。失败只记日志。
 async fn biaoge(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -1075,6 +1093,12 @@ async fn vision_prompt(State(state): State<Arc<AppState>>, req: Request) -> Resp
         ref_bytes,
     } = match parse_prompt(req).await {
         Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    // 在途名额：读完 body 就拿，一直盖到 VPE 推理结束（参考图 + 目标图 + 编码器都在里面）
+    let _slot = match state.acquire_infer_slot() {
+        Ok(s) => s,
         Err(e) => return e.into_response(),
     };
 
@@ -1591,7 +1615,8 @@ async fn parse_prompt(req: Request) -> Result<ParsedPrompt, ApiError> {
 /// 用 yolov8n+coco 时检出的是人/车而不是文字块——**这是预期**，pipeline 面向
 /// 自训检测模型（见 docs/ENGINES.md 6.3）。
 async fn vision_pipeline(State(state): State<Arc<AppState>>, req: Request) -> Response {    let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -1706,10 +1731,10 @@ async fn pingmuzhaotu2(State(state): State<Arc<AppState>>, req: Request) -> Resp
 
 /// 找图统一入口。
 ///
-/// `state` 在本实现里没用到（匹配是纯 CPU 计算，不碰 OCR 引擎），保留参数是为了
-/// 未来加「结果缓存 / 并发限流」时不用改路由签名。
+/// `state` 用来拿在途名额：模板匹配是纯 CPU 的逐像素 NCC，比 OCR 推理还费 CPU，
+/// 而且同样要先把模板图和搜索图解成位图 —— 不设上限时在途位图会随并发线性堆积。
 async fn find_image(
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
     source: FindSource,
     mode: FindMode,
     req: Request,
@@ -1717,6 +1742,12 @@ async fn find_image(
     let t0 = Instant::now();
     let mut parsed = match parse_find(req).await {
         Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    // 先拿名额再解码模板/搜索图，理由同 parse_recognize
+    let _slot = match state.acquire_infer_slot() {
+        Ok(s) => s,
         Err(e) => return e.into_response(),
     };
 
@@ -2270,7 +2301,8 @@ fn pt(p: crate::ocr::geometry::Pt) -> [f64; 2] {
 /// 隔开的两段字之间的空隙可能被算进前一个字的框。
 async fn danzijson(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let t0 = Instant::now();
-    let (img, opts) = match parse_recognize(req).await {
+    // `_slot` 必须活到这个 handler 结束：它在途名额，drop 即释放
+    let (img, opts, _slot) = match parse_recognize(req, &state).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };

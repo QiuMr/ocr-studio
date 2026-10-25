@@ -22,6 +22,8 @@ pub const CODE_NOT_IMPLEMENTED: i32 = 501;
 pub const CODE_NOT_FOUND: i32 = 404;
 /// 路径对但方法不对（例如对 POST 接口发了 GET）。
 pub const CODE_METHOD_NOT_ALLOWED: i32 = 405;
+/// 在途推理请求打满（并发闸门）。服务此刻忙不过来，不是调用方的错。
+pub const CODE_TOO_MANY_REQUESTS: i32 = 429;
 
 /// 统一响应信封。
 #[derive(Debug, Serialize)]
@@ -639,9 +641,59 @@ pub fn decode_base64_image(s: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("base64 解码失败: {e}"))
 }
 
+/// 解码后允许的最大像素数：3200 万（约 5600×5600，或 11520×2160 的三联 4K 长条）。
+///
+/// 为什么必须有这道闸：请求体上限是 32MB，而一张 32MB 的 PNG 能声明 8000×8000
+/// 以上的尺寸，解出来是 200MB 以上的位图。推理被 `engine` 互斥锁串行化，
+/// **排队期间这些位图全部活着** —— 在途请求一多，进程直接被系统 OOM killer
+/// 干掉，现象是「程序闪退、零日志」，跟推理出错完全不像，极难查。
+/// 且 PP-OCR 的检测本身就会把长边缩到 960，超过这个尺寸对识别没有任何增益。
+///
+/// 实测依据：48 路并发 + 2400×1600 的图，进程工作集从 204MB 涨到 493MB
+/// （在途位图 × 图尺寸，线性）。不设上限时这个乘积没有头。
+pub const MAX_DECODE_PIXELS: u64 = 32_000_000;
+
+/// 单边尺寸上限。廉价预过滤，挡「声明 40000×40000 的 PNG 炸弹」——
+/// 这种图会在分配第一行之前就被 `image::Limits` 拦下，根本走不到像素复核。
+const MAX_DECODE_SIDE: u32 = 8000;
+
 /// 用 `image` crate 解码内存中的图像字节。
+///
+/// 与 `image::load_from_memory` 的差别只有一个：套了尺寸闸（见 [`MAX_DECODE_PIXELS`）。
 pub fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
-    image::load_from_memory(bytes).map_err(|e| format!("图像解码失败: {e}"))
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图像解码失败: {e}"))?;
+    // `Limits` 是 #[non_exhaustive] 的，只能改字段不能结构体字面量构造。
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    reader.limits(limits);
+
+    let img = reader.decode().map_err(|e| match e {
+        // 尺寸超限要给可操作的提示，不能甩一句 "Image size exceeds limit"
+        image::ImageError::Limits(_) => format!(
+            "图像尺寸超限：单边不得超过 {MAX_DECODE_SIDE}px。大图请先裁剪，或用带 region 参数的接口分区识别。"
+        ),
+        other => format!("图像解码失败: {other}"),
+    })?;
+
+    // 单边闸拦不住「宽而扁」的组合（12000×2000 单边都合规），像素复核才是总闸。
+    let pixels = u64::from(img.width()) * u64::from(img.height());
+    if pixels > MAX_DECODE_PIXELS {
+        return Err(format!(
+            "图像尺寸超限：{}×{} = {} 像素，上限 {} 像素（约 5600×5600）。\
+             大图请先裁剪，或用带 region 参数的接口分区识别。",
+            img.width(),
+            img.height(),
+            pixels,
+            MAX_DECODE_PIXELS
+        ));
+    }
+    Ok(img)
 }
 
 /// 接口错误。统一转成 `{code, msg}` JSON，并带上合适的 HTTP 状态码。
@@ -660,6 +712,8 @@ pub enum ApiError {
     Internal(String),
     /// 已规划但尚未实现
     NotImplemented(String),
+    /// 在途推理请求打满（并发闸门）。不是调用方的错，是服务此刻忙不过来。
+    TooManyRequests(String),
 }
 
 impl ApiError {
@@ -671,6 +725,7 @@ impl ApiError {
             ApiError::UnknownEngine(_) => 1003,
             ApiError::Internal(_) => 500,
             ApiError::NotImplemented(_) => CODE_NOT_IMPLEMENTED,
+            ApiError::TooManyRequests(_) => CODE_TOO_MANY_REQUESTS,
         }
     }
 
@@ -681,7 +736,8 @@ impl ApiError {
             | ApiError::Unsupported(m)
             | ApiError::UnknownEngine(m)
             | ApiError::Internal(m)
-            | ApiError::NotImplemented(m) => m.clone(),
+            | ApiError::NotImplemented(m)
+            | ApiError::TooManyRequests(m) => m.clone(),
         }
     }
 }
@@ -704,13 +760,85 @@ impl From<ApiError> for Response {
             ApiError::EngineNotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
         };
-        (status, axum::Json(err_resp(e.code(), e.message()))).into_response()
+        let mut resp = (status, axum::Json(err_resp(e.code(), e.message()))).into_response();
+        // 429 必须带 Retry-After：否则调用方只会立刻重试，把队列打得更满。
+        if matches!(e, ApiError::TooManyRequests(_)) {
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        resp
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         self.into()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // image 0.25 的 `dimensions()` 走 `GenericImageView` trait，得显式导入。
+    use image::GenericImageView;
+
+    /// 一张最小的合法 PNG（1×1 白点），用来确认「加了尺寸闸之后正常小图照样解得开」。
+    fn tiny_png() -> Vec<u8> {
+        // base64: 89 50 4E 47 0D 0A 1A 0A ... 1x1 RGB 白点
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            )
+            .unwrap()
+    }
+
+    /// 用 image crate 自己造一张指定尺寸的 PNG（测试里不引入 PIL 之外的依赖）。
+    fn sized_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    /// 尺寸闸不能误伤正常小图 —— 这条是回归防线：闸门加错了地方，
+    /// 所有请求都会变成 400，而单元测试不看 HTTP 层是发现不了的。
+    #[test]
+    fn decode_image_still_accepts_small_images() {
+        let img = decode_image(&tiny_png()).expect("1x1 的 PNG 必须能解开");
+        assert_eq!(img.dimensions(), (1, 1));
+    }
+
+    /// 单边超限要在**分配位图之前**就被拒（image::Limits 的维度闸）。
+    #[test]
+    fn decode_image_rejects_oversized_side_before_allocating() {
+        let e = decode_image(&sized_png(9000, 100)).unwrap_err();
+        assert!(e.contains("单边"), "错误信息要说清是单边超限: {e}");
+    }
+
+    /// 单边合规但像素超限（宽而扁的组合）要走像素总闸。
+    #[test]
+    fn decode_image_rejects_too_many_pixels() {
+        let e = decode_image(&sized_png(7000, 5000)).unwrap_err();
+        assert!(e.contains("像素"), "错误信息要说清是像素超限: {e}");
+        assert!(e.contains("region"), "要给出「分区识别」这条出路: {e}");
+    }
+
+    /// 429 必须落在 HTTP 429 且带 Retry-After，否则客户端只会盲目重试。
+    #[test]
+    fn too_many_requests_maps_to_429_with_retry_after() {
+        let resp = ApiError::TooManyRequests("满了".into()).into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers().get(axum::http::header::RETRY_AFTER).unwrap(),
+            "1"
+        );
     }
 }

@@ -56,8 +56,44 @@ pub fn directml_available() -> bool {
     ort::ep::directml::api().is_some()
 }
 
+/// 当前 CPU 是否满足这份 `onnxruntime.dll` 的指令集基线。
+///
+/// 为什么必须自己先问一句：微软的 Windows x64 预编译包从 1.18 起把 **AVX2 当最低基线**
+/// （x86-64 psABI v3：AVX2 + FMA + BMI1/2 + F16C）。老 CPU 上 Session 构造时会裸跑
+/// AVX2 指令，抛 `0xC000001D`（STATUS_ILLEGAL_INSTRUCTION）被 Windows 直接干掉 ——
+/// 现象是「点了某个功能程序瞬间消失、零日志、零对话框」，只在事件查看器里留一条
+/// Application Error。2012~2013 的至强 E5 v1/v2（Sandy/Ivy Bridge）正是这一档，
+/// 它们是廉价服务器里存量最大的一批。
+/// ORT 的 MLAS 计算内核倒是有 CPUID 逐 ISA 分发，裸跑 AVX2 的只是 Eigen/protobuf/
+/// 会话装配那部分非分发代码，所以不是「一定崩」—— 但崩起来没有任何现场可查。
+/// 在建会话前拦一道，把「静默闪退」变成一句人能看懂的话。
+pub fn cpu_supports_ort_baseline() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        true
+    }
+}
+
+/// 缺 AVX2 时给用户看的一句话。
+pub const CPU_BASELINE_HINT: &str = "当前 CPU 不支持 AVX2 指令集。本程序自带的 ONNX Runtime \
+    要求 Haswell（2013）及以后的处理器；至强 E5 v1/v2（Sandy/Ivy Bridge，2012~2013）不满足，\
+    会直接导致程序闪退。请更换处理器，或联系我们提供不含 AVX2 的专用构建。";
+
 /// 按设备偏好建会话。DirectML 不可用时**直接走 CPU**，不再注册必然失败的 EP。
 pub fn build_session(env: &Environment, path: &Path, device: Device) -> OrtResult<Session> {
+    if !cpu_supports_ort_baseline() {
+        // 必须在任何 ORT C API 之前返回：Session 构造才是崩溃点，别让它走到那儿
+        return Err(ort::Error::new(format!(
+            "{}（{} 请求在 {:?} 上）",
+            CPU_BASELINE_HINT,
+            path.display(),
+            device
+        )));
+    }
     let mut builder = Session::builder(env)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?;
     let use_dml = device == Device::Directml;
@@ -108,6 +144,15 @@ pub fn build_session_with_fallback(
     device: Device,
     warmup_shape: [usize; 4],
 ) -> OrtResult<(Session, Device)> {
+    // 先查指令集，再碰 DLL：`directml_available()` 会调进 onnxruntime.dll，
+    // 老 CPU 上任何一次进入都不值得冒险。
+    if !cpu_supports_ort_baseline() {
+        return Err(ort::Error::new(format!(
+            "{}（{}）",
+            CPU_BASELINE_HINT,
+            path.display()
+        )));
+    }
     if device == Device::Directml && directml_available() {
         match build_session(env, path, Device::Directml) {
             Ok(mut s) => {
