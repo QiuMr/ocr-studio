@@ -19,7 +19,10 @@
 ## 2 版本与发版（改版本号前必读）
 - 仓库 `github.com/QiuMr/ocr-studio`（必须 public：Release 要匿名下载才能自升级）。
 - **版本唯一源 = `src-tauri/tauri.conf.json` 的 `version`**；`build.rs` 注入 `OCR_STUDIO_VERSION`（→ version.rs、health.version），`pack_exe.ps1`/`release.ps1` 拼 zip 名与 tag。**脚本里别写死 `$version`**。
-- 发版：改版本 → 提交 → `powershell -File scripts/release.ps1 -Notes "..."`。gh 不在 PATH：`$env:OCR_GH="C:\Users\13114\.workbuddy\toolchains\gh\bin\gh.exe"`。
+- 发版：改版本 → 提交 → `powershell -File scripts/release.ps1 -Notes "..."`。gh 不在 PATH：`$env:OCR_GH="C:\Users\13114\.workbuddy\toolchains\gh\bin\gh.exe"`。**发版前必须先升版本**（线上已是 0.1.13；同版本 `cmp_version` 判「已是最新」→ 老用户永远收不到更新）。
+- **`release.ps1` 的成败判据是「资产全不全」不是退出码**：agent 会话里 `& git`/`& gh` 读回**空输出 + 空退出码**（曾误报「没有 origin 远程」）。已改走 .NET `Process` 显式重定向（`Invoke-Native`）。**注意 `Process::Start` 在 agent 的 PowerShell 工具里被安全策略拦，但写进 .ps1 执行正常** —— 这类封装只能落进脚本。
+- **gh 上传大文件会中断**：曾出现 Release 建成了但**只有 latest.json、没有 zip**，且第一次是 **Draft**（草稿不占 latest 指针 → 所有人收不到）。补法：`gh release upload <tag> <zip> --clobber` + `gh release edit <tag> --draft=false`。脚本已加自动核对与补传。
+- 发布后必验：`releases/latest/download/latest.json` 匿名 HTTP 200、**无 BOM**、version/size/sha256 与本地 zip 一致；zip 的 HEAD `Content-Length` 与本地一致。
 - **不用 `tauri-plugin-updater`**（只认 NSIS/MSI 签名包，本项目发免安装 zip），自研 `src/updater.rs`：①**必须等进程真退出不能 sleep**（dll 占用 → ERROR_SHARING_VIOLATION），用 `QueryFullProcessImageNameW` **比对镜像路径**（`OpenProcess` 轮询 PID 会被 PID 复用坑到超时）；②**助手必须在 `tauri::Builder` 之前分流**（否则被单实例插件踢掉），此时 tracing 未初始化 → 自写 `%TEMP%/ocr-studio-update/helper.log`；③助手用**旧进程的 exe 路径**拉起新版（开发机 `ocr-studio.exe`、分发 `OCR Studio.exe`）。
 - `latest.json` 必须无 BOM；版本比较用 `cmp_version`（数值比）。
 - `.gitattributes` 里 `*.ps1 -text`。`D:\rust-target\release\` 长期并存 `ocr-studio.exe`（cargo 产物，新）与 `OCR Studio.exe`（pack 重命名，更新器认这个，可能旧）—— 起服务验收前先看 health.version。
