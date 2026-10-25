@@ -54,21 +54,22 @@ if (-not $gitExe) {
 if (-not $gitExe) { Fail "找不到 git。装一个，或把它加进 PATH" }
 Info "git: $gitExe"
 
-# 调 git 并返回 @{ Code; Out }。
+# 跑一个原生 exe 并返回 @{ Code; Out }（Out 里同时含 stdout 与 stderr）。
 #
 # **必须包这一层**，两个原因：
-# 1) git 把进度和提示都写到 **stderr**（"Everything up-to-date"、"To https://..."、
-#    "branch 'master' set up to track ..." 全是 stderr），而 `$ErrorActionPreference
-#    = "Stop"` 会把原生命令的 stderr 当成终止性错误 —— 结果是「推送其实成功了，
-#    脚本却报错退出」。这类假失败最费时间：输出看着像出错，实际一步都没做错。
-# 2) 直接用 `& git ...` 取输出在某些会话里会拿到**空字符串**（原生 exe 的
-#    stdout 重定向不稳定）。空输出会被下游误判成「没有 origin 远程」这种
-#    完全错误的事实。所以改走 .NET 的 Process 显式重定向两条流。
-function Invoke-Git([string[]]$gitArgs) {
+# 1) git / gh 都把进度和提示写到 **stderr**（"Everything up-to-date"、"To https://..."、
+#    "branch 'master' set up to track ..."、上传百分比全是 stderr），而
+#    `$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误 ——
+#    结果是「其实成功了，脚本却报错退出」。这类假失败最费时间。
+# 2) 直接用 `& exe ...` 取输出，在某些会话里会拿到**空字符串**，退出码也会是空
+#    （原生 exe 的 stdout/退出码重定向不稳定）。空输出会被下游误判成
+#    「没有 origin 远程」这种完全错误的事实；空退出码会让 `if ($code -ne 0)`
+#    在成功时也走失败分支。所以改走 .NET 的 Process 显式重定向两条流。
+function Invoke-Native([string]$exePath, [string[]]$cmdArgs) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $gitExe
+  $psi.FileName = $exePath
   # 参数里可能有空格（路径、提交信息），手工加引号，不用数组拼接
-  $psi.Arguments = (($gitArgs | ForEach-Object {
+  $psi.Arguments = (($cmdArgs | ForEach-Object {
     if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
   }) -join ' ')
   $psi.WorkingDirectory = $root
@@ -84,6 +85,12 @@ function Invoke-Git([string[]]$gitArgs) {
   $p.WaitForExit()
   return @{ Code = $p.ExitCode; Out = (($out + "`n" + $err).Trim()) }
 }
+
+function Invoke-Git([string[]]$gitArgs) { Invoke-Native $gitExe $gitArgs }
+
+# gh 同理。**只用于参数简单的子命令**（view / upload）：release create 的
+# --notes 里带换行，拼成命令行字符串会被拆开，那条仍用数组展开直接调。
+function Invoke-Gh([string[]]$ghArgs) { Invoke-Native $gh $ghArgs }
 
 # ── 1. 版本号：唯一来源 tauri.conf.json ────────────────────────────────
 # 必须与 Rust 侧 build.rs 注入的 OCR_STUDIO_VERSION 同源，否则会出现
@@ -189,14 +196,47 @@ $ghArgs = @(
 if ($Draft) { $ghArgs += "--draft" }
 
 Info "创建 Release..."
-# gh 也是把进度写到 stderr 的（上传 225MB 时会刷百分比），
-# 同样不能让它触发 Stop。
+# gh 也是把进度写到 stderr 的（上传时会刷百分比），同样不能让它触发 Stop。
 $prevEA = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 & $gh @ghArgs
 $ghCode = $LASTEXITCODE
 $ErrorActionPreference = $prevEA
-if ($ghCode -ne 0) { Fail "创建 Release 失败（gh 退出码 $ghCode）" }
+# **不用退出码判成败**：这个变量在本机会读成空值，而且 gh 上传大文件中断时
+# 会留下一个「只传了 latest.json、没有 zip」的空壳 Release —— 退出码不管读成
+# 什么，都不如直接问 GitHub「资产到底全不全」来得准。
+# （2026-10-25 真实发生：50MB 的 zip 上传中断，Release 建成了但缺 zip，
+#   而脚本因为退出码读空，报的是一条看不出根因的错。）
+Info "gh 退出码: $ghCode（不作为判据，下面核对资产）"
+
+# 核对资产：Release 上必须同时有 zip 和 latest.json
+$zipLeaf = Split-Path -Leaf $zip
+function Get-ReleaseAssetNames {
+  $v = Invoke-Gh @("release", "view", $tag, "--repo", $slug, "--json", "assets,isDraft")
+  if ($v.Code -ne 0) { return $null }
+  try { return @(($v.Out | ConvertFrom-Json).assets | ForEach-Object { $_.name }) } catch { return $null }
+}
+
+$names = Get-ReleaseAssetNames
+if ($null -eq $names) {
+  Fail "读不到 Release 资产列表，无法确认是否上传完整。请手动检查 https://github.com/$slug/releases/tag/$tag"
+}
+$missing = @($zipLeaf, "latest.json") | Where-Object { $names -notcontains $_ }
+if ($missing.Count -gt 0) {
+  Write-Host "[WARN] Release 缺资产: $($missing -join ', ') —— 多半是上传中断" -ForegroundColor Yellow
+  Info "补传缺少的资产..."
+  $retryArgs = @("release", "upload", $tag)
+  if ($missing -contains $zipLeaf) { $retryArgs += $zip }
+  if ($missing -contains "latest.json") { $retryArgs += $latestPath }
+  $retryArgs += @("--clobber", "--repo", $slug)
+  $r = Invoke-Gh $retryArgs
+  if ($r.Out) { Write-Host $r.Out }
+  $names = Get-ReleaseAssetNames
+  $missing = @($zipLeaf, "latest.json") | Where-Object { $names -notcontains $_ }
+  if ($missing.Count -gt 0) { Fail "补传后仍然缺: $($missing -join ', ')。到 Releases 页面手动上传" }
+  Ok "补传完成"
+}
+Ok "资产齐全：$($names -join ', ')"
 
 Write-Host ""
 Ok "发布完成：https://github.com/$slug/releases/tag/$tag"
